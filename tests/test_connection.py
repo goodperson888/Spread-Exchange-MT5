@@ -224,7 +224,10 @@ class HttpTests(unittest.TestCase):
             def spec(self, symbol): return {'symbol':symbol,'status':'TRADING','baseAsset':'XAU','quoteAsset':'USDT'}
             def quote(self, symbol): return {'bid':4300.,'ask':4300.2,'time_ms':123}
             def usdt_usd(self): return {'value':.9998,'time_ms':123,'source':'test'}
-            def preflight(self): return {'available':1000.,'wallet':1200.}
+            def api_permissions(self): return {'enable_futures':True,'enable_reading':True,'ip_restricted':True}
+            def preflight(self, permissions=None):
+                self.permissions=permissions
+                return {'can_trade':True,'available':1000.,'wallet':1200.}
             def commission_rate(self, symbol): return {'maker':.01,'taker':.04}
         class FakeStream:
             def start(self): return self
@@ -237,6 +240,8 @@ class HttpTests(unittest.TestCase):
             result=server.inspect_binance(c,'key','secret')
         self.assertFalse(result['orders_sent'])
         self.assertEqual(result['fees']['taker'],.04)
+        self.assertTrue(result['permissions']['enable_futures'])
+        self.assertTrue(instances[-1].permissions['enable_futures'])
         self.assertEqual(result['transport'],'WebSocket bookTicker')
         self.assertEqual(instances[-1].kwargs['proxy_url'],'http://127.0.0.1:7890')
         stream.assert_called_with('XAUUSDT',production=True,proxy_url='http://127.0.0.1:7890')

@@ -37,7 +37,7 @@ class Binance:
         proxies = {'http': self.proxy_url, 'https': self.proxy_url} if self.proxy_url else {}
         self.opener = build_opener(ProxyHandler(proxies)) if proxies else build_opener()
 
-    def request(self, path, params=None, method='GET', signed=False):
+    def request(self, path, params=None, method='GET', signed=False, base=None):
         params = dict(params or {})
         if signed:
             if not self.key or not self.secret:
@@ -46,7 +46,7 @@ class Binance:
         query = urlencode(params)
         if signed:
             query += '&signature='+hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-        req = Request(self.base+path+('?' + query if query else ''), method=method,
+        req = Request((base or self.base)+path+('?' + query if query else ''), method=method,
                       headers={'X-MBX-APIKEY':self.key} if signed else {})
         try:
             with self.opener.open(req, timeout=5) as res:
@@ -100,11 +100,26 @@ class Binance:
         return dict(maker=float(r['makerCommissionRate'])*100,
                     taker=float(r['takerCommissionRate'])*100)
 
-    def preflight(self):
+    def api_permissions(self):
+        """Read safe permission flags for the current key; never returns credentials or IPs."""
+        r=self.request('/sapi/v1/account/apiRestrictions', signed=True,
+                       base='https://api.binance.com')
+        return {
+            'enable_reading':bool(r.get('enableReading')),
+            'enable_futures':bool(r.get('enableFutures')),
+            'ip_restricted':bool(r.get('ipRestrict')),
+            'trading_authority_expiration_time':int(r.get('tradingAuthorityExpirationTime') or 0),
+        }
+
+    def preflight(self, api_permissions=None):
         self.sync()
         a=self.request('/fapi/v3/account', signed=True)
         if not a.get('canTrade'):
-            raise ValueError('币安账户或当前 API 未允许合约交易')
+            if api_permissions and not api_permissions.get('enable_futures'):
+                raise ValueError('当前 API Key 权限返回 enableFutures=false；请确认修改并保存的是页面中这把 Key 的“允许合约”权限')
+            if api_permissions and api_permissions.get('enable_futures'):
+                raise ValueError('当前 API Key 已允许合约（enableFutures=true），但 USDⓈ-M 合约账户返回 canTrade=false；请检查主/子账户是否对应，以及账户是否处于组合保证金、冷静期、风控或地区限制。这不是 IP 白名单报错')
+            raise ValueError('USDⓈ-M 合约账户返回 canTrade=false；API Key 权限明细未能读取，请检查主/子账户、组合保证金及账户风控状态')
         assets=list(a.get('assets') or [])
         usdt=next((x for x in assets if str(x.get('asset','')).upper()=='USDT'),None)
         if not usdt:
@@ -124,6 +139,7 @@ class Binance:
         if self.request('/fapi/v1/positionSide/dual', signed=True).get('dualSidePosition'):
             raise ValueError('第一版执行适配币安单向持仓模式，请在无仓位时自行设置账户')
         return {
+            'can_trade':True,
             'available':float(usdt.get('availableBalance',a.get('availableBalance',0)) or 0),
             'wallet':float(usdt.get('walletBalance',a.get('totalWalletBalance',0)) or 0),
             'asset_mode':'multi' if multi else 'single',

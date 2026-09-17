@@ -647,15 +647,21 @@ def inspect_binance(config, api_key='', api_secret=''):
     finally:
         stream.close()
     fx = client.usdt_usd()
-    account = fees = None
+    account = fees = permissions = None
+    permission_warning = ''
     if mode == 'live':
-        account = client.preflight()
+        try:
+            permissions = client.api_permissions()
+        except Exception as exc:
+            permission_warning = str(exc)
+        account = client.preflight(permissions)
         fees = client.commission_rate(config['symbol'])
     return {
         'mode': mode, 'symbol': spec['symbol'], 'status': spec.get('status'),
         'base_asset': spec.get('baseAsset'), 'quote_asset': spec.get('quoteAsset'),
         'quote': quote, 'transport': transport, 'transport_warning': warning,
-        'usdt_usd': fx, 'account': account, 'fees': fees,
+        'usdt_usd': fx, 'account': account, 'permissions': permissions,
+        'permission_warning': permission_warning, 'fees': fees,
         'message': '币安公开行情及合约规格正常' if mode == 'paper'
                    else '币安行情、账户交易权限和合约设置检查通过',
         'orders_sent': False,

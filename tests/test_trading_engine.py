@@ -166,7 +166,10 @@ class BinanceCostTests(unittest.TestCase):
         account={'canTrade':False,'multiAssetsMargin':False,'assets':[
             {'asset':'USDT','walletBalance':'100','availableBalance':'90'}]}
         broker=Binance(production=True);broker.request=self.account_request(account)
-        with self.assertRaisesRegex(ValueError,'未允许合约交易'): broker.preflight()
+        with self.assertRaisesRegex(ValueError,'enableFutures=false'):
+            broker.preflight({'enable_futures':False})
+        with self.assertRaisesRegex(ValueError,'enableFutures=true.*canTrade=false'):
+            broker.preflight({'enable_futures':True})
         account['canTrade']=True
         with self.assertRaisesRegex(ValueError,'单向持仓模式'):
             broker.request=self.account_request(account,dual=True);broker.preflight()
