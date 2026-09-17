@@ -129,6 +129,48 @@ class EngineTests(unittest.TestCase):
 
 
 class BinanceCostTests(unittest.TestCase):
+    @staticmethod
+    def account_request(account, dual=False):
+        def request(path, params=None, method='GET', signed=False):
+            if path.endswith('/account'): return account
+            if path.endswith('/dual'): return {'dualSidePosition':dual}
+            if path.endswith('/time'): return {'serverTime':int(time.time()*1000)}
+            raise AssertionError(path)
+        return request
+
+    def test_multi_asset_mode_allows_usdt_only_and_reports_usdt_balance(self):
+        account={'canTrade':True,'multiAssetsMargin':True,'availableBalance':'900',
+                 'totalWalletBalance':'1000','assets':[
+                     {'asset':'USDT','walletBalance':'120','availableBalance':'95',
+                      'crossWalletBalance':'120','unrealizedProfit':'0'},
+                     {'asset':'USDC','walletBalance':'0','availableBalance':'900',
+                      'crossWalletBalance':'0','unrealizedProfit':'0'}]}
+        broker=Binance(production=True);broker.request=self.account_request(account)
+        result=broker.preflight()
+        self.assertEqual(result['asset_mode'],'multi')
+        self.assertEqual(result['wallet'],120.)
+        self.assertEqual(result['available'],95.)
+        self.assertEqual(result['non_usdt_assets'],[])
+
+    def test_multi_asset_mode_rejects_non_usdt_collateral_or_pnl(self):
+        for field,value in (('walletBalance','1'),('crossWalletBalance','-1'),
+                            ('unrealizedProfit','0.01'),('crossUnPnl','0.01'),('initialMargin','0.01')):
+            other={'asset':'USDC','walletBalance':'0','crossWalletBalance':'0','unrealizedProfit':'0'}
+            other[field]=value
+            account={'canTrade':True,'multiAssetsMargin':True,'assets':[
+                {'asset':'USDT','walletBalance':'100','availableBalance':'90'},other]}
+            broker=Binance(production=True);broker.request=self.account_request(account)
+            with self.assertRaisesRegex(ValueError,'USDC'): broker.preflight()
+
+    def test_preflight_separates_trade_permission_and_position_mode_errors(self):
+        account={'canTrade':False,'multiAssetsMargin':False,'assets':[
+            {'asset':'USDT','walletBalance':'100','availableBalance':'90'}]}
+        broker=Binance(production=True);broker.request=self.account_request(account)
+        with self.assertRaisesRegex(ValueError,'未允许合约交易'): broker.preflight()
+        account['canTrade']=True
+        with self.assertRaisesRegex(ValueError,'单向持仓模式'):
+            broker.request=self.account_request(account,dual=True);broker.preflight()
+
     def test_public_ip_uses_configured_opener_and_validates_response(self):
         broker = Binance(production=True, proxy_url='http://127.0.0.1:7890')
         broker.opener.open = unittest.mock.Mock(return_value=io.BytesIO(b'{"ip":"203.0.113.8"}'))

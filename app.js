@@ -177,7 +177,10 @@ $('check-binance').onclick = () => action('check-binance', async () => {
   });
   const lines=[r.message,`${r.symbol} ${r.status||''} · ${r.base_asset}/${r.quote_asset} · ${r.transport}`,
     `Bid/Ask ${r.quote.bid} / ${r.quote.ask} · USDT/USD ${Number(r.usdt_usd.value).toFixed(6)}`];
-  if(r.account) lines.push(`账户可用 ${Number(r.account.available).toFixed(2)} USDT · 钱包 ${Number(r.account.wallet).toFixed(2)} USDT`);
+  if(r.account) {
+    lines.push(`${r.account.asset_mode_label} · USDT 可用 ${Number(r.account.available).toFixed(2)} · USDT 钱包 ${Number(r.account.wallet).toFixed(2)}`);
+    if(r.account.asset_mode==='multi') lines.push('其他保证金资产余额与未实现盈亏已核验为 0；程序不会切换模式或划转资产。');
+  }
   if(r.fees) lines.push(`账户费率：Maker ${Number(r.fees.maker).toFixed(4)}% / Taker ${Number(r.fees.taker).toFixed(4)}%`);
   if(r.transport_warning) lines.push('提示：'+r.transport_warning);
   lines.push('本次仅读检查，未发送任何订单。');

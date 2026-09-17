@@ -103,11 +103,35 @@ class Binance:
     def preflight(self):
         self.sync()
         a=self.request('/fapi/v3/account', signed=True)
-        if not a.get('canTrade') or a.get('multiAssetsMargin'):
-            raise ValueError('币安须允许交易并使用单资产保证金模式')
+        if not a.get('canTrade'):
+            raise ValueError('币安账户或当前 API 未允许合约交易')
+        assets=list(a.get('assets') or [])
+        usdt=next((x for x in assets if str(x.get('asset','')).upper()=='USDT'),None)
+        if not usdt:
+            raise ValueError('币安合约账户未返回 USDT 资产信息')
+        multi=bool(a.get('multiAssetsMargin'))
+        non_usdt=[]
+        for item in assets:
+            asset=str(item.get('asset','')).upper()
+            if not asset or asset=='USDT': continue
+            amounts=[float(item.get(key,0) or 0) for key in (
+                'walletBalance','crossWalletBalance','unrealizedProfit','crossUnPnl','marginBalance',
+                'initialMargin','maintMargin','positionInitialMargin','openOrderInitialMargin')]
+            if any(not math.isfinite(value) or abs(value)>1e-8 for value in amounts): non_usdt.append(asset)
+        if multi and non_usdt:
+            names='、'.join(sorted(set(non_usdt)))
+            raise ValueError(f'多资产模式检测到非 USDT 资产余额、盈亏或占用保证金：{names}；请清零后重试')
         if self.request('/fapi/v1/positionSide/dual', signed=True).get('dualSidePosition'):
             raise ValueError('第一版执行适配币安单向持仓模式，请在无仓位时自行设置账户')
-        return {'available':float(a['availableBalance']), 'wallet':float(a['totalWalletBalance'])}
+        return {
+            'available':float(usdt.get('availableBalance',a.get('availableBalance',0)) or 0),
+            'wallet':float(usdt.get('walletBalance',a.get('totalWalletBalance',0)) or 0),
+            'asset_mode':'multi' if multi else 'single',
+            'asset_mode_label':'多资产模式（已核验仅 USDT 非零）' if multi else '单资产模式',
+            'non_usdt_assets':non_usdt,
+            'account_available_usd':float(a.get('availableBalance',0) or 0),
+            'account_wallet_usd':float(a.get('totalWalletBalance',0) or 0),
+        }
 
     def positions(self, symbol):
         return self.request('/fapi/v3/positionRisk', {'symbol':symbol}, signed=True)
