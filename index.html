@@ -16,7 +16,7 @@
 </div>
 <div class="grid" id="mcp-fields">
 <label>MT5 MCP 地址<input id="mcp-url" value="http://127.0.0.1:22346/mcp" spellcheck="false"></label>
-<label>MCP Token（仅当前会话）<input id="mt5-mcp-token" type="password" autocomplete="off" placeholder="或启动前设置 MT5_TERMINAL_MCP_TOKEN"></label>
+<label>MCP Token（仅当前会话）<span class="secret-input"><input id="mt5-mcp-token" type="password" autocomplete="off" placeholder="或启动前设置 MT5_TERMINAL_MCP_TOKEN"><button class="secret-toggle" type="button" data-toggle-secret="mt5-mcp-token" aria-controls="mt5-mcp-token" aria-label="显示 MCP Token" aria-pressed="false" title="显示 MCP Token"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 </div>
 <details id="native-path-fields"><summary>多个 Windows MT5 终端时指定路径</summary><label>MT5终端路径<input id="terminal-path" placeholder="C:\Program Files\经纪商 MT5\terminal64.exe" maxlength="1000"></label></details>
 <div id="mt5-result" class="result" role="status" aria-live="polite">尚未检查。检查会保存上方 MT5 配置，然后读取本机终端；不会提交交易。</div>
@@ -39,8 +39,8 @@
 </div>
 <p id="public-ip-result" class="note inline-status" role="status" aria-live="polite">尚未检测。币安白名单需要公网出口 IP，不是局域网 IP。</p>
 <div class="grid" id="api-keys-section" style="display:none;">
-<label>API Key（仅实盘模式）<input id="trading-api-key" type="password" autocomplete="off" placeholder="实盘连接时输入"></label>
-<label>Secret Key（仅实盘模式）<input id="trading-api-secret" type="password" autocomplete="new-password" placeholder="实盘连接时输入"></label>
+<label>API Key（仅实盘模式）<span class="secret-input"><input id="trading-api-key" type="password" autocomplete="off" placeholder="实盘连接时输入"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-key" aria-controls="trading-api-key" aria-label="显示 API Key" aria-pressed="false" title="显示 API Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
+<label>Secret Key（仅实盘模式）<span class="secret-input"><input id="trading-api-secret" type="password" autocomplete="new-password" placeholder="实盘连接时输入"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-secret" aria-controls="trading-api-secret" aria-label="显示 Secret Key" aria-pressed="false" title="显示 Secret Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 </div>
 <p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。网络受限时可填写 HTTP/Mixed 代理，REST、WebSocket 与实盘请求会统一使用；地址会自动保存，请勿在其中填写账号密码。出口 IP 只代表检测当时结果；代理节点、家庭公网 IP 或代理分流规则变化后需重新检测，并以“检查币安连接”的白名单结果为准。实盘还会检查账户交易权限、持仓模式和费率；检查不会下单。API Key/Secret 仅在本次会话使用，不写入文件。</p>
 <div id="binance-result" class="result" role="status" aria-live="polite">尚未检查币安连接。</div>

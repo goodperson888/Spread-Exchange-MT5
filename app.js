@@ -10,6 +10,18 @@ const message = (id, text, error=false) => {
   $(id).textContent = text;
   $(id).classList.toggle('error', error);
 };
+for (const button of document.querySelectorAll('[data-toggle-secret]')) {
+  button.addEventListener('click', () => {
+    const input=$(button.dataset.toggleSecret);
+    const showing=input.type==='password';
+    input.type=showing?'text':'password';
+    button.setAttribute('aria-pressed',String(showing));
+    const name=input.id==='trading-api-key'?'API Key':input.id==='trading-api-secret'?'Secret Key':'MCP Token';
+    const label=(showing?'隐藏 ':'显示 ')+name;
+    button.setAttribute('aria-label',label);
+    button.title=label;
+  });
+}
 async function api(path, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
