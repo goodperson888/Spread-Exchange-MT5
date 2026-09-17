@@ -66,14 +66,20 @@ function populate(c) {
   syncConditionalFields();
 }
 function visible(id, show) { $(id).classList.toggle('is-hidden', !show); }
-function syncConditionalFields() {
-  const live=value('exec-mode')==='live';
+function syncConditionalFields(source='') {
+  let live=value('exec-mode')==='live';
   if (live && value('mt5-adapter')!=='native') {
-    $('mt5-adapter').value='native';
+    if(source==='mt5-adapter') {
+      $('exec-mode').value='paper';
+      live=false;
+      message('mt5-result', 'MT5 MCP 仅提供只读行情，已自动切换为纸面模式；现在可以检查并使用 MCP。');
+    } else {
+      $('mt5-adapter').value='native';
+      message('mt5-result', '实盘仅支持 Windows MT5 原生终端，已自动切换适配器；请在已登录的 MT5 上完成连接检查。');
+    }
     hasResult=false;
     for (const id of ['mt5-symbol', 'account', 'mt5-server']) $(id).value='';
     for (const id of ['contract', 'volume-min', 'volume-step']) $(id).value='';
-    message('mt5-result', '实盘已自动切换为 Windows MT5 终端；请在已登录的 MT5 上完成连接检查。');
   }
   const mcpAdapter=value('mt5-adapter')==='mcp';
   $('api-keys-section').style.display=live?'grid':'none';
@@ -276,9 +282,11 @@ for (const input of document.querySelectorAll('input:not([readonly]), select')) 
   });
 }
 
-// 执行模式变化时显示/隐藏API密钥输入框
-for(const id of ['exec-mode','mt5-adapter','target-mode','require-net','group-loss-on','total-loss-on','auto-fx','auto-binance-fee'])
-  $(id).addEventListener('change',syncConditionalFields);
+// 实盘只能使用 Windows 原生 MT5；主动选择 MCP 时则回到纸面模式。
+$('exec-mode').addEventListener('change',()=>syncConditionalFields('exec-mode'));
+$('mt5-adapter').addEventListener('change',()=>syncConditionalFields('mt5-adapter'));
+for(const id of ['target-mode','require-net','group-loss-on','total-loss-on','auto-fx','auto-binance-fee'])
+  $(id).addEventListener('change',()=>syncConditionalFields(id));
 async function refresh() {
   if (pollBusy) return;
   pollBusy = true;

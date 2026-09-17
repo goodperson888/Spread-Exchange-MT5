@@ -9,7 +9,7 @@
 <div class="heading"><div><p class="eyebrow">01 · MT5 适配器</p><h2 id="setup-heading">选择验证方式，然后检查</h2></div><button id="check-mt5" class="primary" disabled>检查 MT5 连接</button></div>
 <p class="note">Mac 使用本机 MT5 MCP 真实行情（只读）；Windows 实盘使用原生终端。原生模式使用已登录的 MT5，不接收 MT5 密码。</p>
 <div class="grid">
-<label>适配器<select id="mt5-adapter"><option value="mcp">MT5 MCP 真实行情（Mac只读）</option><option value="native">Windows MT5 原生终端</option></select></label>
+<label>适配器<select id="mt5-adapter"><option value="mcp">MT5 MCP 真实行情（仅纸面）</option><option value="native">Windows MT5 原生终端</option></select></label>
 <label>黄金品种<input id="mt5-symbol" list="mt5-symbols" placeholder="留空尝试识别，如 XAUUSDm" maxlength="80"><datalist id="mt5-symbols"></datalist></label>
 <label>目标账号（选填，用于核对）<input id="account" inputmode="numeric" maxlength="30" placeholder="留空先读取，再应用"></label>
 <label>目标服务器（选填，用于核对）<input id="mt5-server" maxlength="120" placeholder="留空先读取，再应用"></label>
@@ -30,7 +30,7 @@
 <div class="heading"><div><p class="eyebrow">02 · 币安永续</p><h2 id="exchange-heading">币安连接配置</h2></div><div><button id="check-binance" class="primary" disabled>检查币安连接</button></div></div>
 <div class="grid">
 <label>交易所品种<input id="symbol" value="XAUUSDT" maxlength="24" spellcheck="false"></label>
-<label>执行模式<select id="exec-mode"><option value="paper">纸面模拟</option><option value="live">实盘</option></select></label>
+<label>执行模式<select id="exec-mode"><option value="paper">纸面模拟（可用 MCP）</option><option value="live">实盘（仅 Windows MT5）</option></select></label>
 </div>
 <div class="proxy-tools">
 <label>币安网络代理（可选）<input id="binance-proxy" placeholder="例如 http://127.0.0.1:7890" maxlength="300" spellcheck="false"></label>
