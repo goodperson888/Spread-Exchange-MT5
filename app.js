@@ -3,7 +3,7 @@ const bindings = {
   mt5: {adapter:'mt5-adapter', symbol:'mt5-symbol', terminal_path:'terminal-path', mcp_url:'mcp-url', account:'account', server:'mt5-server'},
   strategy: {mt5_lots:'lots', entry_spread_usd:'entry', take_contraction_usd:'take', max_groups:'max-groups', max_quote_age_ms:'max-age', max_clock_skew_ms:'max-clock-skew', max_unhedged_ms:'max-unhedged', max_slippage_usd:'slippage'},
 };
-let revision = 0, busy = false, loaded = false, hasResult = false, planTimer, saveTimer, autoSaving=false;
+let revision = 0, busy = false, loaded = false, hasResult = false, planTimer, saveTimer, autoSaving=false, publicIpValue='';
 let pollBusy = false;
 const value = id => $(id).value.trim();
 const message = (id, text, error=false) => {
@@ -89,17 +89,18 @@ function syncConditionalFields() {
   $('binance-fee').disabled=live&&$('auto-binance-fee').checked;
 }
 function controls() {
-  for (const id of ['check-binance','check-mt5','paper-toggle','paper-step','paper-reset']) $(id).disabled = busy || !loaded;
+  for (const id of ['check-binance','check-mt5','check-public-ip','paper-toggle','paper-step','paper-reset']) $(id).disabled = busy || !loaded;
+  $('copy-public-ip').disabled = busy || !loaded || !publicIpValue;
 }
 async function action(button, job) {
   if (busy || !loaded) return;
   busy = true; controls();
   const buttonElement = $(button);
   const label = buttonElement.textContent;
-  buttonElement.textContent = button === 'check-mt5' ? '检查中，最多等待约 18 秒…' : button === 'check-binance' ? '正在检查行情与权限…' : '处理中…';
+  buttonElement.textContent = button === 'check-mt5' ? '检查中，最多等待约 18 秒…' : button === 'check-binance' ? '正在检查行情与权限…' : button === 'check-public-ip' ? '正在检测出口…' : '处理中…';
   buttonElement.classList.add('processing');
   try { await job(); }
-  catch (error) { message(button === 'check-mt5' ? 'mt5-result' : button === 'check-binance' ? 'binance-result' : ['paper-step','paper-toggle','paper-reset'].includes(button) ? 'plan-result' : 'config-status', error.message, true); }
+  catch (error) { message(button === 'check-mt5' ? 'mt5-result' : button === 'check-binance' ? 'binance-result' : button === 'check-public-ip' ? 'public-ip-result' : ['paper-step','paper-toggle','paper-reset'].includes(button) ? 'plan-result' : 'config-status', error.message, true); }
   finally { busy = false; buttonElement.textContent = label; buttonElement.classList.remove('processing'); controls(); }
 }
 async function saveConfig() {
@@ -177,6 +178,21 @@ $('check-binance').onclick = () => action('check-binance', async () => {
   $('bid').value=r.quote.bid;$('binance-ask').value=r.quote.ask;
   message('binance-result',lines.join('\n'),false);
 });
+$('check-public-ip').onclick = () => action('check-public-ip', async () => {
+  await saveConfig();
+  const {result:r}=await api('/api/binance/public-ip',{});
+  publicIpValue=r.ip;
+  message('public-ip-result',`${r.ip} · ${r.route_label}。可填入币安 API 白名单；代理分流或出口变化后需重新检测。`,false);
+  $('public-ip-result').classList.add('ok');
+});
+$('copy-public-ip').onclick = async () => {
+  if(!publicIpValue) return;
+  try {
+    await navigator.clipboard.writeText(publicIpValue);
+    message('public-ip-result',`${publicIpValue} · 已复制。请粘贴到币安 API 的 IP 白名单。`,false);
+    $('public-ip-result').classList.add('ok');
+  } catch (error) { message('public-ip-result','复制失败，请手动选择上方 IP。',true); }
+};
 $('check-mt5').onclick = () => action('check-mt5', async () => {
   hasResult = false;
   const at = revision;
@@ -243,6 +259,11 @@ for (const input of document.querySelectorAll('input:not([readonly]), select')) 
     revision++;
     const secret=['trading-api-key','trading-api-secret','mt5-mcp-token'].includes(input.id);
     if(!secret){message('config-status', '有修改，等待自动保存…');queueAutoSave();}
+    if(input.id==='binance-proxy') {
+      publicIpValue=''; controls();
+      $('public-ip-result').classList.remove('ok');
+      message('public-ip-result','代理配置已修改，请重新检测币安出口 IP。');
+    }
     if (Object.values(bindings.mt5).includes(input.id) || input.id==='mt5-mcp-token') {
       hasResult = false; controls();
       for (const id of ['contract', 'volume-min', 'volume-step']) $(id).value = '';

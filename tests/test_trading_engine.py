@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 import tempfile
 import time
@@ -128,6 +129,13 @@ class EngineTests(unittest.TestCase):
 
 
 class BinanceCostTests(unittest.TestCase):
+    def test_public_ip_uses_configured_opener_and_validates_response(self):
+        broker = Binance(production=True, proxy_url='http://127.0.0.1:7890')
+        broker.opener.open = unittest.mock.Mock(return_value=io.BytesIO(b'{"ip":"203.0.113.8"}'))
+        self.assertEqual(broker.public_ip(), '203.0.113.8')
+        request = broker.opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, 'https://api.ipify.org?format=json')
+
     def test_asset_index_and_account_commission_are_normalized(self):
         broker = Binance(production=True, key='k', secret='s')
         def request(path, params=None, method='GET', signed=False):

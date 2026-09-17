@@ -1,6 +1,7 @@
 """Exchange/terminal adapters. All writes are invoked only by an armed engine."""
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import queue
@@ -63,6 +64,18 @@ class Binance:
         before=int(time.time()*1000)
         t=self.request('/fapi/v1/time')['serverTime']
         self.offset=int(t)-(before+int(time.time()*1000))//2
+
+    def public_ip(self):
+        """Return the public egress IP observed through this client's route."""
+        req = Request('https://api.ipify.org?format=json',
+                      headers={'Accept':'application/json','User-Agent':'GoldPairLocal/1'})
+        try:
+            with self.opener.open(req, timeout=8) as res:
+                value = str(json.load(res).get('ip', '')).strip()
+            ipaddress.ip_address(value)
+            return value
+        except Exception:
+            raise ApiError('NETWORK', '无法检测公网出口 IP，请检查代理后重试', False) from None
 
     def spec(self, symbol):
         items=self.request('/fapi/v1/exchangeInfo').get('symbols', [])

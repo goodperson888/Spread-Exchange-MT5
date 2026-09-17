@@ -208,6 +208,14 @@ class HttpTests(unittest.TestCase):
         inspect.assert_called_once()
         self.assertEqual(server.load_config()['binance']['api_secret'], '')
 
+    def test_binance_public_ip_endpoint(self):
+        with patch.object(server, 'inspect_binance_public_ip', return_value={
+                'ip':'203.0.113.8','route':'proxy','route_label':'经配置代理','current_only':True}) as inspect:
+            code, body = self.request('/api/binance/public-ip', {})
+        self.assertEqual(code, 200)
+        self.assertEqual(body['result']['ip'], '203.0.113.8')
+        inspect.assert_called_once()
+
     def test_inspect_binance_checks_market_and_live_permissions(self):
         instances = []
         class FakeBinance:

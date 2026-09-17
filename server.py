@@ -662,6 +662,19 @@ def inspect_binance(config, api_key='', api_secret=''):
     }
 
 
+def inspect_binance_public_ip(config):
+    """Detect the current public IP using the same route as Binance REST."""
+    proxy_url = config['binance'].get('proxy_url', '')
+    client = Binance(production=True, recv_window_ms=config['binance']['recv_window_ms'],
+                     proxy_url=proxy_url)
+    return {
+        'ip': client.public_ip(),
+        'route': 'proxy' if proxy_url else 'direct',
+        'route_label': '经配置代理' if proxy_url else '直连网络',
+        'current_only': True,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "GoldPairLocal/0.1"
 
@@ -801,6 +814,11 @@ class Handler(BaseHTTPRequestHandler):
                     config = load_config()
                 result = inspect_binance(config, str(body.get('api_key', '')), str(body.get('api_secret', '')))
                 self.send_json({'ok': True, 'result': result})
+                return
+            if path == '/api/binance/public-ip':
+                with LOCK:
+                    config = load_config()
+                self.send_json({'ok': True, 'result': inspect_binance_public_ip(config)})
                 return
             if path == "/api/config":
                 with LOCK:
