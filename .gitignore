@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv*/
+build/
+dist/
+*.spec
+.playwright-cli/
+.codex/
+data/config.json
+data/state.json
+data/events.jsonl
+data/*.sqlite3*
+*.log
+.DS_Store

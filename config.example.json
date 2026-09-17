@@ -1,0 +1,47 @@
+{
+  "mode": "paper",
+  "symbol": "XAUUSDT",
+  "mt5": {
+    "adapter": "mcp",
+    "terminal_path": "",
+    "mcp_url": "http://127.0.0.1:22346/mcp",
+    "account": "",
+    "server": "",
+    "symbol": "XAUUSDm",
+    "contract_size_oz": 100,
+    "volume_min": 0.01,
+    "volume_step": 0.01,
+    "volume_max": 100,
+    "paper_bid": 4300,
+    "paper_ask": 4300.3
+  },
+  "binance": {
+    "api_key": "",
+    "api_secret": "",
+    "recv_window_ms": 1000
+  },
+  "strategy": {
+    "mt5_lots": 0.02,
+    "entry_spread_usd": 5,
+    "take_contraction_usd": 2,
+    "max_groups": 1,
+    "max_quote_age_ms": 3000,
+    "max_clock_skew_ms": 2000,
+    "max_unhedged_ms": 1500,
+    "max_slippage_usd": 0.5,
+    "cooldown_seconds": 60,
+    "max_total_lots": 0.1,
+    "exit_mode": "group",
+    "target_mode": "contraction",
+    "exit_spread_usd": 0,
+    "require_net_profit": true,
+    "min_net_profit_usd": 0,
+    "group_loss_enabled": false,
+    "group_max_loss_usd": 50,
+    "total_loss_enabled": false,
+    "total_max_loss_usd": 150,
+    "max_hold_minutes": 0
+  },
+  "execution": {"mode": "paper", "quote_source": "market", "poll_ms": 250, "magic": 9121701, "close_retry_limit": 3},
+  "costs": {"usdt_usd_auto": true, "usdt_usd": 1, "binance_fee_auto": true, "binance_taker_percent": 0.05, "mt5_commission_per_lot_side": 0, "mt5_swap_per_lot_day": 0, "paper_funding_percent_day": 0}
+}

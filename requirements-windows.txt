@@ -1,0 +1,4 @@
+# Runtime component is packaged into the executable, not installed by end users.
+MetaTrader5==5.0.6180; sys_platform == 'win32'
+PyInstaller==6.22.3; sys_platform == 'win32'
+websocket-client==1.9.0

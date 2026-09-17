@@ -1,0 +1,152 @@
+import copy
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from trading_brokers import Binance, PaperBroker
+from trading_config import pair_key, validate
+from trading_engine import Engine
+from trading_store import Store
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def config():
+    c = json.loads((ROOT / 'config.example.json').read_text())
+    c['mt5'].update(adapter='paper', symbol='XAUUSD.paper', account='PAPER', server='local')
+    c['strategy'].update(entry_spread_usd=5, take_contraction_usd=2, cooldown_seconds=1, max_total_lots=.1)
+    c['costs']['binance_taker_percent'] = 0
+    return c
+
+
+def quote(c, bid=4306, ask=4306.1, mt_bid=4300, mt_ask=4300.3):
+    now = int(time.time() * 1000)
+    return dict(key=pair_key(c), time_ms=now, binance=dict(bid=bid, ask=ask, time_ms=now),
+                mt5=dict(bid=mt_bid, ask=mt_ask, time_ms=now), entry=bid-mt_ask, exit=ask-mt_bid)
+
+
+class UnknownBroker(PaperBroker):
+    def submit(self, order):
+        return dict(status='unknown', qty=0, price=0, error='network timeout')
+
+    def query(self, order):
+        return dict(status='unknown', qty=0, price=0, error='not yet queryable')
+
+
+class RejectMt5CloseBroker(PaperBroker):
+    def submit(self, order):
+        if order['leg'] == 'mt5' and order['action'] == 'close':
+            return dict(status='done', qty=0, price=0, error='rejected')
+        return super().submit(order)
+
+
+class RejectBinanceOpenBroker(PaperBroker):
+    def submit(self, order):
+        if order['leg'] == 'binance' and order['action'] == 'open':
+            return dict(status='done', qty=0, price=0, error='rejected')
+        return super().submit(order)
+
+
+class EngineTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.temp.name) / 'state.sqlite3')
+        self.c = config()
+        validate(self.c)
+        self.plan = dict(lots=.02, qty=2, contract=100)
+
+    def tearDown(self):
+        self.store.close()
+        self.temp.cleanup()
+
+    def test_paper_pair_opens_then_closes_on_contraction(self):
+        engine = Engine(self.store, PaperBroker())
+        engine.start(self.c)
+        engine.tick(self.c, self.plan, quote(self.c))
+        g = engine.active()[0]
+        self.assertEqual(g['status'], 'open')
+        self.assertEqual(engine.amounts(g), {'binance': 2, 'mt5': 2})
+        engine.tick(self.c, self.plan, quote(self.c, bid=4302.9, ask=4303))
+        self.assertEqual(engine.active(), [])
+        closed = engine.state['groups'][0]
+        self.assertEqual(closed['status'], 'closed')
+        self.assertAlmostEqual(closed['exit'], 3)
+        self.assertGreater(closed['valuation']['net'], 0)
+        self.assertIn('binance_funding', closed['valuation'])
+        self.assertIn('mt5_swap', closed['valuation'])
+        self.assertEqual(closed['valuation']['remaining'], {'binance': 0, 'mt5': 0})
+
+    def test_unknown_first_leg_pauses_without_resubmission(self):
+        engine = Engine(self.store, UnknownBroker())
+        engine.start(self.c)
+        engine.tick(self.c, self.plan, quote(self.c))
+        self.assertFalse(engine.state['enabled'])
+        self.assertEqual(len(engine.state['orders']), 1)
+        engine.tick(self.c, self.plan, quote(self.c))
+        self.assertEqual(len(engine.state['orders']), 1)
+        self.assertIn('状态未知', engine.state['alarm'])
+
+    def test_changed_key_rejects_quote(self):
+        engine = Engine(self.store, PaperBroker())
+        engine.start(self.c)
+        q = quote(self.c)
+        q['key'] = 'other'
+        engine.tick(self.c, self.plan, q)
+        self.assertEqual(engine.state['orders'], [])
+
+    def test_dynamic_usdt_index_does_not_change_account_pair_key(self):
+        changed = copy.deepcopy(self.c)
+        changed['costs']['usdt_usd'] = .997
+        self.assertEqual(pair_key(self.c), pair_key(changed))
+
+    def test_mt5_close_rejection_does_not_unhedge_binance(self):
+        engine = Engine(self.store, RejectMt5CloseBroker())
+        engine.start(self.c)
+        engine.tick(self.c, self.plan, quote(self.c))
+        group = engine.active()[0]
+        engine.request_close(group['id'])
+        engine.tick(self.c, self.plan, quote(self.c))
+        self.assertEqual(engine.amounts(group), {'binance': 2, 'mt5': 2})
+        binance_closes = [o for o in engine.state['orders']
+                          if o['leg'] == 'binance' and o['action'] == 'close']
+        self.assertEqual(binance_closes, [])
+
+    def test_second_leg_rejection_immediately_unwinds_mt5(self):
+        engine = Engine(self.store, RejectBinanceOpenBroker())
+        engine.start(self.c)
+        engine.tick(self.c, self.plan, quote(self.c))
+        self.assertEqual(engine.active(), [])
+        group = engine.state['groups'][0]
+        self.assertEqual(group['status'], 'closed')
+        self.assertEqual(engine.amounts(group), {'binance': 0, 'mt5': 0})
+
+
+class BinanceCostTests(unittest.TestCase):
+    def test_asset_index_and_account_commission_are_normalized(self):
+        broker = Binance(production=True, key='k', secret='s')
+        def request(path, params=None, method='GET', signed=False):
+            if path.endswith('assetIndex'):
+                return {'index':'0.9992','time':123}
+            return {'makerCommissionRate':'0.0001','takerCommissionRate':'0.00045'}
+        broker.request = request
+        self.assertEqual(broker.usdt_usd()['value'], .9992)
+        self.assertEqual(broker.commission_rate('XAUUSDT')['taker'], .045)
+
+    def test_non_usdt_commission_is_converted(self):
+        broker = Binance(production=True)
+        broker.quote = lambda symbol: {'bid':600,'ask':602}
+        fee = broker.commissions_usdt([
+            {'commission':'1.5','commissionAsset':'USDT'},
+            {'commission':'0.01','commissionAsset':'BNB'},
+        ])
+        self.assertAlmostEqual(fee, 7.51)
+
+
+if __name__ == '__main__':
+    unittest.main()

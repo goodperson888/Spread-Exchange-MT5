@@ -1,0 +1,899 @@
+"""Local-only XAU perpetual × MT5 paired-trading application.
+
+The default is paper mode; live execution is deliberately armed only by the
+user after connection and reconciliation checks pass.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import math
+import os
+import sys
+import tempfile
+from decimal import Decimal
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+from mt5_connector import run_probe
+from mt5_mcp import DEFAULT_URL as DEFAULT_MCP_URL, McpTerminal, inspect_mcp_terminal, validate_mcp_url
+from mt5_paper import inspect_paper_terminal
+from paper_engine import default_state, step as paper_step
+from trading_brokers import Binance, BinanceBookTicker, Terminal, LiveBroker, PaperBroker
+from trading_config import validate as validate_trading, plan as executable_plan, pair_key
+from trading_engine import Engine
+from trading_store import Store
+
+ROOT = Path(__file__).resolve().parent
+DATA = (Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GoldPairLocal') if getattr(sys, 'frozen', False) else ROOT / 'data'
+DATA.mkdir(parents=True, exist_ok=True)
+CONFIG_PATH = DATA / "config.json"
+STATE_PATH = DATA / "state.json"
+EVENTS_PATH = DATA / "events.jsonl"
+TRADING_DB_PATH = DATA / "trading.sqlite3"
+HOST = "127.0.0.1"
+PORT = int(os.environ.get("GOLD_PAIR_PORT", "8766"))
+LOCK = threading.RLock()
+PROBE_LOCK = threading.Lock()
+LAST_PROBE = None
+
+
+def atomic_write_json(path, value):
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.stem + '-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def stop_legacy_paper_on_boot(path=STATE_PATH):
+    """The legacy paper engine advances only on a button click, not in background.
+
+    Preserve its simulated positions for inspection, but never carry a stale
+    "running" label across application restarts.
+    """
+    state = read_json(path, default_state())
+    state["running"] = False
+    state["updated_ms"] = now_ms()
+    atomic_write_json(path, state)
+    return state
+
+
+class TradingRuntime:
+    """The only component allowed to poll or submit paired trades.
+
+    Credentials remain in process memory. They are deliberately not copied into
+    config.json, SQLite events, or any API response.
+    """
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.store = Store(TRADING_DB_PATH)
+        self.engine = Engine(self.store, PaperBroker())
+        self.binance = None
+        self.market_stream = None
+        self.terminal = None
+        self.spec = None
+        self.config = None
+        self.plan = None
+        self.quote = None
+        self.connected = False
+        self.reconciled = False
+        self.last_error = ''
+        self.market_meta = {}
+        self._last_fx_refresh = 0
+        self._last_carry_refresh = 0
+        self._last_rest_market = None
+        self._last_rest_market_at = 0
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._loop, name='gold-pair-market', daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.stop_event.set()
+        if self.terminal:
+            self.terminal.close()
+        if self.market_stream:
+            self.market_stream.close()
+        self.store.close()
+
+    def connect(self, config, api_key='', api_secret='', mt5_mcp_token=''):
+        config = copy.deepcopy(config)
+        validate_trading(config)
+        mode = config['execution']['mode']
+        
+        # 只支持两种模式：paper（纸上交易）和live（实盘交易）
+        if mode not in ('paper', 'live'):
+            raise ValueError('只支持纸上交易(paper)和实盘交易(live)两种模式')
+        
+        # 实盘模式需要API密钥，纸面模式使用正式环境行情但不需要密钥
+        if mode == 'live' and (not api_key or not api_secret):
+            raise ValueError('实盘连接需要在本次会话输入币安 API Key 和 Secret Key；程序不会保存它们')
+        
+        with self.lock:
+            new_key = pair_key(config)
+            if any(g.get('key') != new_key for g in self.engine.active()):
+                raise ValueError('存在其他账户或品种的未平交易组，禁止切换连接')
+
+            # Build and validate a replacement connection before touching the
+            # current one. A failed reconnect must not leave a half-live runtime.
+            new_binance = Binance(production=True, key=api_key, secret=api_secret,
+                                   recv_window_ms=config['binance']['recv_window_ms'])
+            new_terminal = None
+            new_stream = None
+            meta = {'mt5_transport':'工作进程持久会话 + tick 轮询'}
+            try:
+                new_spec = new_binance.spec(config['symbol'])
+                if config['costs']['usdt_usd_auto']:
+                    fx = new_binance.usdt_usd()
+                    config['costs']['usdt_usd'] = fx['value']
+                    meta['fx'] = fx
+                if config['mt5']['adapter'] == 'paper':
+                    mt5 = inspect_paper_terminal(config['mt5'])
+                    if not mt5.get('connected'):
+                        raise ValueError(mt5.get('message', '本地 MT5 模拟器不可用'))
+                    snapshot = {'quote': mt5['quote'], 'spec': mt5['symbol'], 'allowed': True, 'positions': []}
+                elif config['mt5']['adapter'] == 'mcp':
+                    if mode != 'paper':
+                        raise ValueError('MT5 MCP 只读适配器只能用于纸面模式')
+                    checked_spec(config['mt5'], require_applied=True)
+                    new_terminal = McpTerminal(config['mt5'], mt5_mcp_token)
+                    snapshot = new_terminal.call('snapshot')
+                    meta['mt5_transport'] = 'MT5 MCP 真实行情（只读轮询）'
+                else:
+                    checked_spec(config['mt5'], require_applied=True)
+                    new_terminal = Terminal(config['mt5'], config['execution']['magic'])
+                    snapshot = new_terminal.call('snapshot')
+                    if not snapshot['allowed']:
+                        raise ValueError('MT5 未允许程序交易；请按页面提示完成权限检查')
+                    if snapshot['spec']['name'] != config['mt5']['symbol']:
+                        raise ValueError('MT5 当前品种与已应用配置不一致')
+                    if mode == 'live':
+                        if str(snapshot['account'].get('currency','')).upper()!='USD':
+                            raise ValueError('当前 MT5 账户币种不是 USD，本版无法准确换算佣金和持仓费')
+                        new_binance.preflight()
+                        if config['costs']['binance_fee_auto']:
+                            fees = new_binance.commission_rate(config['symbol'])
+                            config['costs']['binance_taker_percent'] = fees['taker']
+                            meta['binance_fee'] = {**fees, 'source':'Binance account commission rate'}
+                        margin = new_terminal.call('margin', lots=config['strategy']['mt5_lots'])
+                        if margin['required'] > margin['available']:
+                            raise ValueError('MT5 可用保证金不足，不能启动')
+
+                new_stream = BinanceBookTicker(config['symbol'], production=True).start()
+                market = new_stream.quote(max_age_ms=config['strategy']['max_quote_age_ms'],wait_ms=2500)
+                if market is None:
+                    market = new_binance.quote(config['symbol'])
+                    meta['binance_transport'] = 'REST 回退（WebSocket 正在重连）'
+                else:
+                    meta['binance_transport'] = 'WebSocket bookTicker'
+                new_plan = executable_plan(config, snapshot['spec'], new_spec, market['bid'])
+                new_quote = self._quote(snapshot['quote'], market, config)
+                broker = PaperBroker() if mode == 'paper' else LiveBroker(config, new_binance, new_terminal, new_spec)
+            except Exception:
+                if new_stream:
+                    new_stream.close()
+                if new_terminal:
+                    new_terminal.close()
+                raise
+
+            old_terminal = self.terminal
+            old_stream = self.market_stream
+            self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
+            self.plan, self.config, self.engine.broker = new_plan, config, broker
+            self.quote, self.connected, self.last_error = new_quote, True, ''
+            self.market_meta = meta
+            self._last_fx_refresh = time.monotonic()
+            self._last_carry_refresh = 0
+            self._last_rest_market = market
+            self._last_rest_market_at = time.monotonic()
+            self.reconciled = mode == 'paper'
+            if mode == 'live':
+                self.engine.pause('实盘连接已建立，启动前必须完成持仓对账')
+            self.store.sample(self.quote)
+            if old_terminal and old_terminal is not new_terminal:
+                old_terminal.close()
+            if old_stream and old_stream is not new_stream:
+                old_stream.close()
+            return self.snapshot()
+
+    def _quote(self, mt5, binance, config=None):
+        c = config or self.config
+        fx = c['costs']['usdt_usd']
+        return {
+            'key': pair_key(c), 'time_ms': now_ms(),
+            'binance': binance, 'mt5': mt5,
+            'usdt_usd': fx,
+            'entry': binance['bid'] * fx - mt5['ask'],
+            'exit': binance['ask'] * fx - mt5['bid'],
+        }
+
+    def _poll(self):
+        c = self.config
+        if c['costs']['usdt_usd_auto'] and time.monotonic()-self._last_fx_refresh>=30:
+            try:
+                fx=self.binance.usdt_usd();c['costs']['usdt_usd']=fx['value'];self.market_meta['fx']=fx
+                self._last_fx_refresh=time.monotonic()
+            except Exception as exc:
+                self.market_meta['fx_warning']='USDT/USD 更新失败，暂用上次数值：'+str(exc)
+                self._last_fx_refresh=time.monotonic()
+        market = self.market_stream.quote(max_age_ms=c['strategy']['max_quote_age_ms']) if self.market_stream else None
+        if market is None:
+            if self._last_rest_market and time.monotonic()-self._last_rest_market_at<1:
+                market = self._last_rest_market
+            else:
+                market = self.binance.quote(c['symbol'])
+                self._last_rest_market,self._last_rest_market_at=market,time.monotonic()
+            self.market_meta['binance_transport']='REST 回退（WebSocket 正在重连）'
+        else:
+            self.market_meta['binance_transport']='WebSocket bookTicker'
+        if c['mt5']['adapter'] == 'paper':
+            result = inspect_paper_terminal(c['mt5'])
+            if not result.get('connected'):
+                raise ValueError(result.get('message', '本地模拟 MT5 报价失效'))
+            mt5 = result['quote']
+        elif c['mt5']['adapter'] == 'mcp':
+            result = self.terminal.call('snapshot')
+            mt5 = result['quote']
+        else:
+            result = self.terminal.call('snapshot')
+            if not result['allowed']:
+                raise ValueError('MT5 自动交易权限已关闭；已暂停开仓')
+            mt5 = result['quote']
+            self._update_live_carry(result['positions'])
+        q = self._quote(mt5, market)
+        self.quote = q
+        self.store.sample(q)
+        self.engine.tick(c, self.plan, q)
+        self._verify_closed_costs()
+
+    def _update_live_carry(self, positions):
+        if self.config['execution']['mode']!='live': return
+        active=self.engine.active();orders=self.engine.state['orders']
+        for group in active:
+            opened=next((o for o in orders if o['group']==group['id'] and o['leg']=='mt5'
+                         and o['action']=='open' and o.get('result',{}).get('qty',0)>0),None)
+            ticket=str(opened.get('result',{}).get('position','')) if opened else ''
+            comment=opened['id'] if opened else ''
+            swap=sum(float(p.get('swap',0)) for p in positions
+                     if str(p.get('ticket',''))==ticket or p.get('comment')==comment)
+            group['live_mt5_swap_usd']=swap
+            group['live_carry_usd']=swap+group.get('live_binance_funding_usd',0)
+        if not active or time.monotonic()-self._last_carry_refresh<60: return
+        try:
+            start=min(g['opened_ms'] for g in active);end=now_ms()
+            rows=self.binance.income(self.config['symbol'],start,end)
+            for group in active: group['live_binance_funding_usd']=0
+            for item in rows:
+                if item.get('incomeType')!='FUNDING_FEE': continue
+                at=int(item.get('time',0));peers=[g for g in self.engine.state['groups']
+                    if g.get('mode')=='live' and g.get('symbol')==self.config['symbol']
+                    and g.get('open_binance') is not None and g['opened_ms']<=at<=g.get('closed_ms',at)]
+                total=sum(float(g.get('qty',0)) for g in peers)
+                if not total: continue
+                for group in active:
+                    if group in peers:
+                        group['live_binance_funding_usd']+=float(item.get('income',0))*group['qty']/total*self.config['costs']['usdt_usd']
+            for group in active:
+                group['live_carry_usd']=group.get('live_mt5_swap_usd',0)+group.get('live_binance_funding_usd',0)
+            self._last_carry_refresh=time.monotonic();self.market_meta.pop('carry_warning',None)
+        except Exception as exc:
+            self.market_meta['carry_warning']='实盘持仓费更新待重试：'+str(exc)
+            self._last_carry_refresh=time.monotonic()
+
+    def _verify_closed_costs(self):
+        """Replace estimates with broker deal records after a completed live group.
+
+        Binance commissions are matched to the exact order IDs. MT5 deals are
+        matched to our unique comments and magic number. Funding has no order
+        ID in Binance's income feed, so it is only attributed while this app
+        is the sole managed position for this symbol (enforced by reconcile).
+        
+        Funding fees are calculated by exact time window to avoid double counting
+        when multiple groups have overlapping holding periods.
+        """
+        if self.config['execution']['mode'] != 'live':
+            return
+        for group in self.engine.state['groups']:
+            if group['status'] != 'closed' or group.get('costs_verified'):
+                continue
+            try:
+                by_id = {o['id']: o for o in self.engine.state['orders'] if o['group'] == group['id']}
+                for order in by_id.values():
+                    if order['leg'] != 'binance' or not order.get('result', {}).get('ticket'):
+                        continue
+                    fills = self.binance.trades(order['symbol'], order['result']['ticket'])
+                    order['result']['fee'] = self.binance.commissions_usdt(fills)
+                deals = self.terminal.call('history', start_ms=group['opened_ms'] - 60000)
+                mt_swap = 0
+                for order in by_id.values():
+                    if order['leg'] != 'mt5':
+                        continue
+                    rows = [x for x in deals if x.get('comment') == order['id']]
+                    order['result']['fee'] = -sum(float(x.get('commission', 0)) + float(x.get('fee', 0)) for x in rows)
+                    mt_swap += sum(float(x.get('swap', 0)) for x in rows)
+                
+                # Funding is reported for the whole symbol position. Allocate
+                # each event by group quantity among all groups alive then, so
+                # overlapping groups do not each claim the full account fee.
+                window_start = group['opened_ms']
+                window_end = group['closed_ms'] + 1000
+                income = self.binance.income(group['symbol'], window_start, window_end)
+                funding = 0
+                for item in income:
+                    if item.get('incomeType') == 'FUNDING_FEE':
+                        fee_time = item.get('time', 0)
+                        if window_start <= fee_time <= window_end:
+                            peers = [x for x in self.engine.state['groups']
+                                     if x.get('mode') == 'live' and x.get('symbol') == group['symbol']
+                                     and x.get('open_binance') is not None
+                                     and x['opened_ms'] <= fee_time <= x.get('closed_ms', fee_time)]
+                            total_qty = sum(float(x.get('qty', 0)) for x in peers)
+                            share = float(group['qty']) / total_qty if total_qty else 1
+                            funding += float(item.get('income', 0)) * share
+                
+                group['mt5_swap_usd'] = mt_swap
+                group['binance_funding_usd'] = funding * group['costs']['usdt_usd']
+                group['carry_usd'] = group['mt5_swap_usd'] + group['binance_funding_usd']
+                group['costs_verified'] = True
+                group['valuation'] = self.engine.valuation(group, self.quote)
+                self.engine.save('costs_verified', {'group': group['id'], 'net': group['valuation']['net']})
+            except Exception as exc:
+                # Position is already flat; retain estimates and surface the
+                # verification failure without treating it as a trade failure.
+                group['cost_verification_error'] = str(exc)
+                self.engine.save('cost_verification_pending', {'group': group['id']})
+
+    def _loop(self):
+        while not self.stop_event.wait(.1):
+            with self.lock:
+                if not self.connected or not self.config:
+                    continue
+                poll = self.config['execution']['poll_ms'] / 1000
+                last = getattr(self, '_last_poll', 0)
+                if time.monotonic() - last < poll:
+                    continue
+                self._last_poll = time.monotonic()
+                try:
+                    self._poll()
+                    self.last_error = ''
+                except Exception as exc:
+                    self.last_error = str(exc)
+                    if self.engine.active():
+                        self.engine.pause('行情或交易通道异常：' + self.last_error)
+
+    def start(self, current_config=None):
+        with self.lock:
+            if not self.connected:
+                raise ValueError('请先连接并完成双边规格校验')
+            if current_config is not None:
+                incoming=copy.deepcopy(current_config);effective=copy.deepcopy(self.config)
+                if effective['costs']['usdt_usd_auto']:
+                    incoming['costs']['usdt_usd']=effective['costs']['usdt_usd']
+                if effective['costs']['binance_fee_auto'] and effective['execution']['mode']=='live':
+                    incoming['costs']['binance_taker_percent']=effective['costs']['binance_taker_percent']
+                if incoming != effective:
+                    raise ValueError('配置已修改，请重新点击“保存并连接”')
+            if self.config['execution']['mode'] == 'live' and not self.reconciled:
+                raise ValueError('实盘启动前必须先完成持仓对账')
+            self.engine.start(self.config)
+            return self.snapshot()
+
+    def pause(self):
+        with self.lock:
+            self.engine.pause()
+            return self.snapshot()
+
+    def close_group(self, group=None, reason='用户请求平仓'):
+        with self.lock:
+            if not self.quote:
+                raise ValueError('尚无可用报价，不能请求平仓')
+            self.engine.request_close(group, reason)
+            # One immediate attempt; the background loop performs retries.
+            self.engine.tick(self.config, self.plan, self.quote)
+            return self.snapshot()
+
+    def reconcile(self):
+        with self.lock:
+            # 必须先连接才能进行对账
+            if not self.connected:
+                raise ValueError('请先连接后再进行对账')
+            
+            if self.config['execution']['mode'] == 'paper':
+                # Paper state is deterministic and is reconciled from journal.
+                for g in self.engine.active(): self.engine.resolve(g)
+                self.engine.state['recovery'] = any(self.engine.uncertain(g) for g in self.engine.active())
+                self.reconciled = not self.engine.state['recovery']
+                self.engine.save('paper_reconciled')
+                return self.snapshot()
+            
+            # 实盘模式对账：验证实际持仓与策略日志一致性
+            for g in self.engine.active():
+                self.engine.resolve(g)
+            positions = self.binance.positions(self.config['symbol'])
+            open_orders = self.binance.open_orders(self.config['symbol'])
+            signed_bqty = sum(float(x.get('positionAmt', 0)) for x in positions)
+            mt5 = self.terminal.call('snapshot')
+            managed_mt5 = [x for x in mt5['positions'] if x['magic'] == self.config['execution']['magic']]
+            lots = sum(float(x['lots']) for x in managed_mt5)
+            expected_b = sum(self.engine.amounts(g)['binance'] for g in self.engine.active())
+            expected_m = sum(self.engine.amounts(g)['mt5'] / g['contract'] for g in self.engine.active())
+            expected_comments = {o['id'] for o in self.engine.state['orders']
+                                 if o['group'] in {g['id'] for g in self.engine.active()}
+                                 and o['leg'] == 'mt5' and o['action'] == 'open'}
+            by_comment = {x.get('comment'): x for x in managed_mt5 if x.get('comment')}
+            for order in self.engine.state['orders']:
+                if (order['id'] in by_comment and order['leg'] == 'mt5' and order['action'] == 'open'
+                        and not order.get('result', {}).get('position')):
+                    order['result']['position'] = str(by_comment[order['id']]['ticket'])
+
+            # Binance is deliberately limited to one-way mode: our position
+            # must therefore be a short of exactly the journaled quantity.
+            bad_mt5 = any(int(x.get('side', -1)) != 0 or x.get('comment') not in expected_comments
+                          for x in managed_mt5)
+            if open_orders or abs(signed_bqty + expected_b) > .000001 or abs(lots - expected_m) > .0000001 or bad_mt5:
+                self.engine.pause('账户持仓与本策略日志不一致，禁止自动处理；请人工核对')
+                details = []
+                if open_orders: details.append('币安存在未完成委托')
+                if abs(signed_bqty + expected_b) > .000001: details.append('币安空头方向或数量不符')
+                if abs(lots - expected_m) > .0000001 or bad_mt5: details.append('MT5 持仓数量、方向或注释不符')
+                raise ValueError('实际持仓与本策略日志不一致：' + '；'.join(details))
+            
+            self.engine.state['recovery'] = any(self.engine.uncertain(g) for g in self.engine.active())
+            if self.engine.state['recovery']:
+                self.engine.pause('仍有订单成交状态未确定，禁止启动')
+                raise ValueError('仍有订单成交状态未确定，请继续核对平台成交记录')
+            if not self.engine.state['recovery']:
+                self.engine.state['alarm'] = ''
+            self.reconciled = True
+            self.engine.save('reconciled', {'binance_qty': signed_bqty, 'mt5_lots': lots})
+            return self.snapshot()
+
+    def snapshot(self):
+        with self.lock:
+            st = self.engine.state
+            return {
+                'connected': self.connected, 'last_error': self.last_error,
+                'quote': self.quote, 'plan': self.plan,
+                'state': st, 'events': self.store.events(),
+                'auto_values': self.market_meta,
+                'capabilities': {'live_orders': bool(self.config and self.config['execution']['mode'] == 'live'),
+                                 'mode': self.config['execution']['mode'] if self.config else 'paper',
+                                 'reconciled': self.reconciled},
+            }
+
+    def chart(self, since):
+        with self.lock:
+            key = pair_key(self.config) if self.config else ''
+            return self.store.samples(key, since)
+
+
+TRADING = TradingRuntime()
+
+DEFAULT = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def read_json(path: Path, fallback):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return fallback
+
+
+def deep_merge(base, incoming):
+    result = dict(base)
+    for key, value in incoming.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_config():
+    config = deep_merge(DEFAULT, read_json(CONFIG_PATH, {}))
+    legacy_paper = config.get('mt5', {}).get('adapter') == 'paper' and (
+        config['mt5'].get('account') == 'PAPER-MT5' or config['mt5'].get('server') == 'local-paper')
+    if legacy_paper:
+        config['mt5']['adapter'] = 'native' if sys.platform == 'win32' else 'mcp'
+        config['mt5']['mcp_url'] = config['mt5'].get('mcp_url') or DEFAULT_MCP_URL
+        if config['mt5'].get('account') == 'PAPER-MT5':
+            config['mt5']['account'] = ''
+        if config['mt5'].get('server') == 'local-paper':
+            config['mt5']['server'] = ''
+    return config
+
+
+def write_config(config):
+    # Atomic replace prevents a stopped app from leaving half a configuration.
+    fd, name = tempfile.mkstemp(dir=DATA, prefix='config-', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(config, handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, CONFIG_PATH)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def connection_key(settings):
+    return tuple(str(settings.get(k, '')).strip() for k in (
+        'adapter', 'terminal_path', 'mcp_url', 'account', 'server', 'symbol',
+        'contract_size_oz', 'volume_min', 'volume_step', 'volume_max',
+    ))
+
+
+def checked_spec(settings, require_applied=False):
+    if not LAST_PROBE or LAST_PROBE['key'] != connection_key(settings):
+        raise ValueError('请先检查 MT5 连接，并应用读取到的账户及规格。')
+    result = LAST_PROBE['result']
+    if require_applied and not LAST_PROBE.get('applied'):
+        raise ValueError('请先核对并应用读取结果')
+    if not result.get('identity_matches') or not result.get('symbol') or time.monotonic() - LAST_PROBE['at'] > 300:
+        raise ValueError('MT5 检查已失效，请重新检查连接。')
+    return result
+
+
+def save_event(event):
+    event = {"time_ms": now_ms(), **event}
+    with EVENTS_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def validate_config(config):
+    errors = []
+    if config.get('mode') != 'paper':
+        errors.append('旧纸面接口固定为 paper；自动执行模式请选择 paper 或 live')
+    symbol = str(config.get("symbol") or '').upper()
+    if not 5 <= len(symbol) <= 24 or not symbol.isalnum():
+        errors.append('币安合约名称无效')
+    mt5 = config.get("mt5", {})
+    strategy = config.get("strategy", {})
+    lots = float(strategy.get("mt5_lots", 0) or 0)
+    contract = float(mt5.get("contract_size_oz", 0) or 0)
+    step = float(mt5.get("volume_step", 0) or 0)
+    vmin = float(mt5.get("volume_min", 0) or 0)
+    if not isinstance(mt5.get('symbol', ''), str):
+        errors.append('MT5 品种名称应为文本')
+    if mt5.get('adapter') == 'mcp':
+        try:
+            validate_mcp_url(mt5.get('mcp_url'))
+        except ValueError as exc:
+            errors.append(str(exc))
+    if contract <= 0:
+        errors.append("MT5 合约大小必须大于 0")
+    if lots <= 0:
+        errors.append("MT5 手数必须大于 0")
+    if step <= 0 or vmin <= 0:
+        errors.append("MT5 最小手数和步长必须大于 0")
+    if not (0 <= float(strategy.get("max_quote_age_ms", 0)) <= 60000):
+        errors.append("行情最大年龄范围应为 0 到 60000 毫秒")
+    if not (0 <= float(strategy.get("max_unhedged_ms", 0)) <= 60000):
+        errors.append("单边敞口时间范围应为 0 到 60000 毫秒")
+    if not all(math.isfinite(x) for x in (lots, contract, step, vmin)):
+        errors.append('数量和规格必须是有限数值')
+    for key in ('entry_spread_usd', 'take_contraction_usd', 'max_slippage_usd'):
+        value = float(strategy.get(key, 0))
+        if not math.isfinite(value) or value < 0:
+            errors.append('价差、目标和滑点应为有限的非负数')
+    window = float(config.get('binance', {}).get('recv_window_ms', 1000))
+    if not math.isfinite(window) or not 1 <= window <= 60000:
+        errors.append('请求有效窗口应为 1 到 60000 毫秒')
+    try:
+        validate_trading(config)
+    except (ValueError, KeyError, TypeError) as exc:
+        errors.append(str(exc))
+    return errors
+
+
+def order_plan(config, binance_bid=0.0):
+    spec = checked_spec(config['mt5'], require_applied=True)['symbol']
+    lots = Decimal(str(config['strategy']['mt5_lots']))
+    minimum, maximum, step = (Decimal(str(spec[k])) for k in ('volume_min', 'volume_max', 'volume_step'))
+    if not lots.is_finite() or lots < minimum or lots > maximum or lots % step:
+        raise ValueError('MT5 手数不符合终端返回的最小值、最大值或步长。')
+    qty = lots * Decimal(str(spec['contract_size_oz']))
+    price = float(binance_bid or 0)
+    if not math.isfinite(price) or price < 0:
+        raise ValueError('参考价格必须是有限的非负数')
+    return {
+        "mt5_symbol": spec['name'],
+        "mt5_lots": float(lots),
+        "contract_size_oz": spec['contract_size_oz'],
+        "gold_qty_oz": float(qty),
+        "binance_symbol": config["symbol"],
+        "binance_qty_xau": float(qty),
+        "binance_notional_usdt": float(qty) * price if price > 0 else None,
+        "note": "MT5 规格已读取；币安数量是 1 XAU 对应 1 盎司假设下的预览，尚未校验交易所合约过滤器，不是可执行订单。",
+        "direction": "卖 XAUUSDT / 买 MT5",
+    }
+
+
+def inspect_binance(config, api_key='', api_secret=''):
+    """Read-only connectivity and permission check; never submits an order."""
+    mode = config['execution']['mode']
+    if mode == 'live' and (not api_key or not api_secret):
+        raise ValueError('实盘检查需要输入本次会话的币安 API Key 和 Secret Key')
+    client = Binance(production=True, key=api_key, secret=api_secret,
+                     recv_window_ms=config['binance']['recv_window_ms'])
+    client.sync()
+    spec = client.spec(config['symbol'])
+    stream = BinanceBookTicker(config['symbol'], production=True).start()
+    try:
+        quote = stream.quote(max_age_ms=config['strategy']['max_quote_age_ms'], wait_ms=2500)
+        transport = 'WebSocket bookTicker'
+        warning = ''
+        if quote is None:
+            quote = client.quote(config['symbol'])
+            transport = 'REST 回退'
+            warning = 'WebSocket 未在等待时间内收到数据；正式连接会继续自动重连并使用 REST 回退'
+    finally:
+        stream.close()
+    fx = client.usdt_usd()
+    account = fees = None
+    if mode == 'live':
+        account = client.preflight()
+        fees = client.commission_rate(config['symbol'])
+    return {
+        'mode': mode, 'symbol': spec['symbol'], 'status': spec.get('status'),
+        'base_asset': spec.get('baseAsset'), 'quote_asset': spec.get('quoteAsset'),
+        'quote': quote, 'transport': transport, 'transport_warning': warning,
+        'usdt_usd': fx, 'account': account, 'fees': fees,
+        'message': '币安公开行情及合约规格正常' if mode == 'paper'
+                   else '币安行情、账户交易权限和合约设置检查通过',
+        'orders_sent': False,
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "GoldPairLocal/0.1"
+
+    def log_message(self, fmt, *args):
+        print("[%s] %s" % (self.log_date_time_string(), fmt % args))
+
+    def send_json(self, payload, status=200):
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def read_body(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        if not 0 <= length <= 100_000:
+            raise ValueError("请求过大")
+        result = json.loads(self.rfile.read(length) or b"{}", parse_constant=lambda _: None)
+        if not isinstance(result, dict):
+            raise ValueError('请求应为配置对象')
+        return result
+
+    def local_request(self, mutation=False):
+        port = self.server.server_port
+        allowed = (f'127.0.0.1:{port}', f'localhost:{port}')
+        if self.headers.get('Host') not in allowed:
+            self.send_json({'ok': False, 'error': '仅接受本机访问'}, 403)
+            return False
+        if mutation and (self.headers.get('X-Local-App') != 'GoldPairLocal' or
+                         self.headers.get('Origin') not in (None, *(f'http://{h}' for h in allowed))):
+            self.send_json({'ok': False, 'error': '请从本机应用页面操作'}, 403)
+            return False
+        return True
+
+    def do_GET(self):
+        if not self.local_request():
+            return
+        path = urlparse(self.path).path
+        if path == '/favicon.ico':
+            self.send_response(204)
+            self.end_headers()
+            return
+        if path in ("/", "/index.html"):
+            data = (ROOT / "index.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path in ("/app.js", "/trading-app.js", "/style.css", "/echarts.min.js"):
+            suffix = path[1:]
+            data = (ROOT / suffix).read_bytes()
+            content_type = "text/javascript; charset=utf-8" if suffix.endswith("js") else "text/css; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if path == "/api/status":
+            with LOCK:
+                config = load_config()
+                state = read_json(STATE_PATH, {"mode": "paper", "running": False, "position": None})
+            self.send_json({"ok": True, "app": "GoldPairLocal", "host": HOST, "port": PORT, "time_ms": now_ms(), "capabilities": {"mt5_native": sys.platform == 'win32', "mt5_paper": True, "binance_testnet": False, "real_orders": False, "paired_live_orders": True, "paper_engine": True}, "config": {"mode": config.get("mode"), "symbol": config.get("symbol")}, "state": state, "config_errors": validate_config(config)})
+            return
+        if path == "/api/config":
+            with LOCK:
+                config = load_config()
+            safe = json.loads(json.dumps(config))
+            safe["binance"]["api_key_configured"] = bool(safe["binance"].get("api_key"))
+            safe["binance"]["api_secret_configured"] = bool(safe["binance"].get("api_secret"))
+            safe["binance"]["api_key"] = ""
+            safe["binance"]["api_secret"] = ""
+            safe["mt5"].pop("mcp_token", None)
+            self.send_json({"ok": True, "config": safe, "errors": validate_config(config)})
+            return
+        if path == "/api/trading/status":
+            self.send_json({"ok": True, **TRADING.snapshot()})
+            return
+        if path == "/api/trading/chart":
+            query = urlparse(self.path).query
+            try:
+                minutes = max(1, min(43200, int(next((x.split('=', 1)[1] for x in query.split('&') if x.startswith('minutes=')), '1440'))))
+            except ValueError:
+                self.send_json({'ok': False, 'error': 'minutes 参数无效'}, 400)
+                return
+            self.send_json({'ok': True, 'samples': TRADING.chart(now_ms() - minutes * 60000)})
+            return
+        self.send_json({"ok": False, "error": "未找到"}, 404)
+
+    def do_POST(self):
+        global LAST_PROBE
+        if not self.local_request(mutation=True):
+            return
+        path = urlparse(self.path).path
+        try:
+            body = self.read_body()
+            if path == '/api/mt5/check':
+                if not PROBE_LOCK.acquire(blocking=False):
+                    self.send_json({'ok': False, 'error': 'MT5 检查正在进行，请等待结果'}, 409)
+                    return
+                try:
+                    with LOCK:
+                        settings = load_config()['mt5']
+                    LAST_PROBE = None
+                    token = str(body.get('mcp_token', ''))
+                    if settings.get('adapter', 'native') == 'paper':
+                        result = inspect_paper_terminal(settings)
+                    elif settings.get('adapter') == 'mcp':
+                        result = inspect_mcp_terminal(settings, token)
+                    else:
+                        result = run_probe(settings)
+                    with LOCK:
+                        LAST_PROBE = dict(key=connection_key(settings), result=result, at=time.monotonic())
+                    self.send_json({'ok': True, 'result': result})
+                finally:
+                    PROBE_LOCK.release()
+                return
+            if path == '/api/mt5/apply':
+                with LOCK:
+                    config = load_config()
+                    result = checked_spec(config['mt5'])
+                    spec = result['symbol']
+                    config['mt5'].update(account=result['identity']['account'], server=result['identity']['server'],
+                                         symbol=spec['name'], **{k: spec[k] for k in ('contract_size_oz', 'volume_min', 'volume_step', 'volume_max')})
+                    config['mt5'].pop('bridge_url', None)
+                    write_config(config)
+                    LAST_PROBE['key'] = connection_key(config['mt5'])
+                    LAST_PROBE['applied'] = True
+                self.send_json({'ok': True, 'mt5': config['mt5']})
+                return
+            if path == '/api/binance/check':
+                with LOCK:
+                    config = load_config()
+                result = inspect_binance(config, str(body.get('api_key', '')), str(body.get('api_secret', '')))
+                self.send_json({'ok': True, 'result': result})
+                return
+            if path == "/api/config":
+                with LOCK:
+                    current = load_config()
+                    incoming = deep_merge({}, body)
+                    b = incoming.get("binance", {})
+                    # Secrets are accepted only by the one-shot check endpoint;
+                    # they are never written to config.json by the app.
+                    b.pop("api_key", None)
+                    b.pop("api_secret", None)
+                    incoming.get("mt5", {}).pop("mcp_token", None)
+                    saved = deep_merge(current, incoming)
+                    errors = validate_config(saved)
+                    if errors:
+                        self.send_json({'ok': False, 'errors': errors}, 400)
+                        return
+                    saved['mt5'].pop('bridge_url', None)
+                    write_config(saved)
+                self.send_json({"ok": True, "errors": validate_config(saved)})
+                save_event({"type": "config_saved", "mode": saved.get("mode")})
+                return
+
+            if path == '/api/trading/connect':
+                config = load_config()
+                result = TRADING.connect(config, str(body.get('api_key', '')), str(body.get('api_secret', '')),
+                                         str(body.get('mt5_mcp_token', '')))
+                self.send_json({'ok': True, **result})
+                return
+            if path == '/api/trading/start':
+                self.send_json({'ok': True, **TRADING.start(load_config())})
+                return
+            if path == '/api/trading/pause':
+                self.send_json({'ok': True, **TRADING.pause()})
+                return
+            if path == '/api/trading/close':
+                group = body.get('group')
+                self.send_json({'ok': True, **TRADING.close_group(str(group) if group else None,
+                                                                   str(body.get('reason') or '用户请求平仓'))})
+                return
+            if path == '/api/trading/reconcile':
+                self.send_json({'ok': True, **TRADING.reconcile()})
+                return
+
+            if path == "/api/paper/plan":
+                config = load_config()
+                errors = validate_config(config)
+                if errors:
+                    self.send_json({"ok": False, "errors": errors}, 400)
+                    return
+                with LOCK:
+                    plan = order_plan(config, body.get("binance_bid", 0))
+                self.send_json({"ok": True, "plan": plan, "checks": {"local_only": True, "real_order_enabled": False, "mode": config.get("mode")}})
+                save_event({"type": "paper_plan", "plan": plan})
+                return
+            if path == "/api/paper/start":
+                with LOCK:
+                    state = read_json(STATE_PATH, default_state())
+                    state["running"] = True
+                    state["updated_ms"] = now_ms()
+                    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+                self.send_json({"ok": True, "state": state, "message": "纸面引擎已启动；只更新模拟持仓，不发送任何订单。"})
+                save_event({"type": "paper_started"})
+                return
+            if path == "/api/paper/reset":
+                state = default_state()
+                STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+                save_event({"type": "paper_reset"})
+                self.send_json({"ok": True, "state": state})
+                return
+            if path == "/api/paper/step":
+                config = load_config()
+                errors = validate_config(config)
+                if errors:
+                    self.send_json({"ok": False, "errors": errors}, 400)
+                    return
+                with LOCK:
+                    plan = order_plan(config, body.get("binance_bid", 0))
+                    state = read_json(STATE_PATH, default_state())
+                    result = paper_step(state, config, plan, body)
+                    STATE_PATH.write_text(json.dumps(result["state"], ensure_ascii=False, indent=2), encoding="utf-8")
+                self.send_json({"ok": True, **result, "checks": {"real_order_enabled": False, "mode": "paper"}})
+                save_event({"type": "paper_step", "action": result["action"], "metrics": result["metrics"]})
+                return
+            if path == "/api/paper/stop":
+                state = read_json(STATE_PATH, {"mode": "paper", "position": None})
+                state["running"] = False
+                state["stopped_at_ms"] = now_ms()
+                STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+                save_event({"type": "paper_stopped"})
+                self.send_json({"ok": True, "state": state})
+                return
+            self.send_json({"ok": False, "error": "未找到"}, 404)
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 400)
+
+
+if __name__ == "__main__":
+    stop_legacy_paper_on_boot()
+    print(f"黄金双边自动交易：{HOST}:{PORT}（仅本机，默认模拟模式）")
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
