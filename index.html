@@ -32,11 +32,12 @@
 <label>交易所品种<input id="symbol" value="XAUUSDT" maxlength="24" spellcheck="false"></label>
 <label>执行模式<select id="exec-mode"><option value="paper">纸面模拟</option><option value="live">实盘</option></select></label>
 </div>
+<label>币安网络代理（可选）<input id="binance-proxy" placeholder="例如 http://127.0.0.1:7890" maxlength="300" spellcheck="false"></label>
 <div class="grid" id="api-keys-section" style="display:none;">
 <label>API Key（仅实盘模式）<input id="trading-api-key" type="password" autocomplete="off" placeholder="实盘连接时输入"></label>
 <label>Secret Key（仅实盘模式）<input id="trading-api-secret" type="password" autocomplete="new-password" placeholder="实盘连接时输入"></label>
 </div>
-<p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。实盘还会检查账户交易权限、持仓模式和费率；检查不会下单。API Key/Secret 仅在本次会话使用，不写入文件。</p>
+<p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。网络受限时可填写 HTTP/Mixed 代理，REST、WebSocket 与实盘请求会统一使用；地址会自动保存，请勿在其中填写账号密码。实盘还会检查账户交易权限、持仓模式和费率；检查不会下单。API Key/Secret 仅在本次会话使用，不写入文件。</p>
 <div id="binance-result" class="result" role="status" aria-live="polite">尚未检查币安连接。</div>
 <p id="config-status" class="note" role="status" aria-live="polite">正在读取配置…</p>
 </section>

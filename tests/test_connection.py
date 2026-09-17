@@ -209,8 +209,9 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(server.load_config()['binance']['api_secret'], '')
 
     def test_inspect_binance_checks_market_and_live_permissions(self):
+        instances = []
         class FakeBinance:
-            def __init__(self, **kwargs): self.kwargs=kwargs
+            def __init__(self, **kwargs): self.kwargs=kwargs; instances.append(self)
             def sync(self): pass
             def spec(self, symbol): return {'symbol':symbol,'status':'TRADING','baseAsset':'XAU','quoteAsset':'USDT'}
             def quote(self, symbol): return {'bid':4300.,'ask':4300.2,'time_ms':123}
@@ -222,12 +223,23 @@ class HttpTests(unittest.TestCase):
             def quote(self, **kwargs): return {'bid':4300.,'ask':4300.2,'time_ms':123}
             def close(self): pass
         c=copy.deepcopy(server.load_config());c['execution']['mode']='live';c['mt5']['adapter']='native'
-        with patch.object(server,'Binance',FakeBinance), patch.object(server,'BinanceBookTicker',return_value=FakeStream()):
+        c['binance']['proxy_url']='http://127.0.0.1:7890'
+        with patch.object(server,'Binance',FakeBinance), patch.object(server,'BinanceBookTicker',return_value=FakeStream()) as stream:
             with self.assertRaises(ValueError): server.inspect_binance(c)
             result=server.inspect_binance(c,'key','secret')
         self.assertFalse(result['orders_sent'])
         self.assertEqual(result['fees']['taker'],.04)
         self.assertEqual(result['transport'],'WebSocket bookTicker')
+        self.assertEqual(instances[-1].kwargs['proxy_url'],'http://127.0.0.1:7890')
+        stream.assert_called_with('XAUUSDT',production=True,proxy_url='http://127.0.0.1:7890')
+
+    def test_binance_proxy_validation(self):
+        c=copy.deepcopy(server.load_config())
+        for invalid in ('socks5://127.0.0.1:7890','http://user:pass@127.0.0.1:7890','http://127.0.0.1'):
+            c['binance']['proxy_url']=invalid
+            self.assertTrue(any('代理' in error for error in server.validate_config(c)))
+        c['binance']['proxy_url']='http://127.0.0.1:7890'
+        self.assertFalse(any('代理' in error for error in server.validate_config(c)))
 
     def test_paper_open_close_and_stop(self):
         self.request('/api/config', {'mt5': {'adapter':'paper', 'account':'PAPER', 'server':'test',

@@ -18,7 +18,8 @@
   "binance": {
     "api_key": "",
     "api_secret": "",
-    "recv_window_ms": 1000
+    "recv_window_ms": 1000,
+    "proxy_url": ""
   },
   "strategy": {
     "mt5_lots": 0.02,

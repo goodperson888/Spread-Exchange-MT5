@@ -125,7 +125,8 @@ class TradingRuntime:
             # Build and validate a replacement connection before touching the
             # current one. A failed reconnect must not leave a half-live runtime.
             new_binance = Binance(production=True, key=api_key, secret=api_secret,
-                                   recv_window_ms=config['binance']['recv_window_ms'])
+                                   recv_window_ms=config['binance']['recv_window_ms'],
+                                   proxy_url=config['binance'].get('proxy_url', ''))
             new_terminal = None
             new_stream = None
             meta = {'mt5_transport':'工作进程持久会话 + tick 轮询'}
@@ -167,7 +168,8 @@ class TradingRuntime:
                         if margin['required'] > margin['available']:
                             raise ValueError('MT5 可用保证金不足，不能启动')
 
-                new_stream = BinanceBookTicker(config['symbol'], production=True).start()
+                new_stream = BinanceBookTicker(config['symbol'], production=True,
+                                               proxy_url=config['binance'].get('proxy_url', '')).start()
                 market = new_stream.quote(max_age_ms=config['strategy']['max_quote_age_ms'],wait_ms=2500)
                 if market is None:
                     market = new_binance.quote(config['symbol'])
@@ -628,10 +630,12 @@ def inspect_binance(config, api_key='', api_secret=''):
     if mode == 'live' and (not api_key or not api_secret):
         raise ValueError('实盘检查需要输入本次会话的币安 API Key 和 Secret Key')
     client = Binance(production=True, key=api_key, secret=api_secret,
-                     recv_window_ms=config['binance']['recv_window_ms'])
+                     recv_window_ms=config['binance']['recv_window_ms'],
+                     proxy_url=config['binance'].get('proxy_url', ''))
     client.sync()
     spec = client.spec(config['symbol'])
-    stream = BinanceBookTicker(config['symbol'], production=True).start()
+    stream = BinanceBookTicker(config['symbol'], production=True,
+                               proxy_url=config['binance'].get('proxy_url', '')).start()
     try:
         quote = stream.quote(max_age_ms=config['strategy']['max_quote_age_ms'], wait_ms=2500)
         transport = 'WebSocket bookTicker'

@@ -35,7 +35,7 @@ function mt5Form() {
 function formConfig() {
   return {
     mode:'paper', symbol:value('symbol').toUpperCase(), mt5:mt5Form(),
-    binance:{recv_window_ms:Number(value('recv-window'))},
+    binance:{recv_window_ms:Number(value('recv-window')),proxy_url:value('binance-proxy')},
     strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),
       cooldown_seconds:Number(value('cooldown')),max_total_lots:Number(value('max-total')),exit_mode:value('exit-mode'),target_mode:value('target-mode'),exit_spread_usd:Number(value('absolute-exit')),
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
@@ -49,6 +49,7 @@ function populate(c) {
     for (const [key, id] of Object.entries(fields)) $(id).value = c[section]?.[key] ?? '';
   }
   $('recv-window').value = c.binance.recv_window_ms;
+  $('binance-proxy').value = c.binance.proxy_url ?? '';
   $('symbol').value = c.symbol;
   $('exec-mode').value = c.execution?.mode ?? 'paper';
   // 只支持 paper 和 live 两种模式

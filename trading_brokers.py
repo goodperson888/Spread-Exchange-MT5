@@ -11,8 +11,8 @@ import time
 import uuid
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlsplit
+from urllib.request import ProxyHandler, Request, build_opener
 from urllib.error import HTTPError
 
 try:
@@ -28,10 +28,13 @@ class ApiError(Exception):
 
 
 class Binance:
-    def __init__(self, production=False, key='', secret='', recv_window_ms=5000):
+    def __init__(self, production=False, key='', secret='', recv_window_ms=5000, proxy_url=''):
         self.base = 'https://fapi.binance.com' if production else 'https://demo-fapi.binance.com'
         self.key, self.secret, self.offset = key, secret, 0
         self.recv_window_ms = int(recv_window_ms)
+        self.proxy_url = str(proxy_url or '').strip()
+        proxies = {'http': self.proxy_url, 'https': self.proxy_url} if self.proxy_url else {}
+        self.opener = build_opener(ProxyHandler(proxies)) if proxies else build_opener()
 
     def request(self, path, params=None, method='GET', signed=False):
         params = dict(params or {})
@@ -45,7 +48,7 @@ class Binance:
         req = Request(self.base+path+('?' + query if query else ''), method=method,
                       headers={'X-MBX-APIKEY':self.key} if signed else {})
         try:
-            with urlopen(req, timeout=5) as res:
+            with self.opener.open(req, timeout=5) as res:
                 return json.load(res)
         except HTTPError as exc:
             try:
@@ -165,8 +168,9 @@ class Binance:
 
 class BinanceBookTicker:
     """Reconnectable best-bid/ask stream with a REST-compatible quote shape."""
-    def __init__(self, symbol, production=True):
+    def __init__(self, symbol, production=True, proxy_url=''):
         self.symbol=symbol.upper();self.production=production
+        self.proxy_url=str(proxy_url or '').strip()
         self.lock=threading.RLock();self.stop_event=threading.Event();self.ready=threading.Event()
         self.value=None;self.error='';self.socket=None;self.thread=None
 
@@ -183,7 +187,11 @@ class BinanceBookTicker:
         while not self.stop_event.is_set():
             ws=None
             try:
-                ws=websocket.create_connection(url,timeout=10,enable_multithread=True)
+                options=dict(timeout=10,enable_multithread=True)
+                if self.proxy_url:
+                    proxy=urlsplit(self.proxy_url)
+                    options.update(http_proxy_host=proxy.hostname,http_proxy_port=proxy.port,proxy_type='http')
+                ws=websocket.create_connection(url,**options)
                 ws.settimeout(30)
                 with self.lock: self.socket=ws;self.error=''
                 backoff=1

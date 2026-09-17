@@ -2,10 +2,29 @@
 import math
 import re
 from decimal import Decimal
+from urllib.parse import urlsplit
+
+
+def validate_proxy_url(value):
+    """Accept an optional credential-free HTTP proxy URL."""
+    value = str(value or '').strip()
+    if not value:
+        return ''
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        raise ValueError('币安代理地址无效') from None
+    if (parsed.scheme.lower() != 'http' or not parsed.hostname or not port or
+            parsed.path not in ('', '/') or parsed.query or parsed.fragment or
+            parsed.username is not None or parsed.password is not None):
+        raise ValueError('币安代理请填写无账号密码的 HTTP 地址，例如 http://127.0.0.1:7890')
+    return value
 
 
 def validate(c):
     s, e, costs = c['strategy'], c['execution'], c['costs']
+    validate_proxy_url(c.get('binance', {}).get('proxy_url', ''))
     if not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
         raise ValueError('币安合约名称无效，请填写平台实际名称，例如 XAUUSDT')
     if e['mode'] not in ('paper', 'live') or e['quote_source'] != 'market':
