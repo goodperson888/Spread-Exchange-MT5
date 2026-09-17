@@ -129,7 +129,7 @@ powershell -ExecutionPolicy Bypass -File build_windows.ps1
 打包脚本创建隔离构建环境，安装固定版本依赖，运行测试，打入 MetaTrader5 组件与静态页面，并执行包内组件导入自检。产物：
 dist/GoldPairLocal-Windows.zip
 
-仓库已配置 `.github/workflows/windows-build.yml`。推送到 `main` 后 GitHub Actions 会在 Windows x64 环境运行同一打包脚本，成功后可在该次 Actions 的 Artifacts 中下载 `GoldPairLocal-Windows`。MCP Token、本机配置和交易数据均被 `.gitignore` 排除。
+仓库已配置 `.github/workflows/windows-build.yml`，只接受手动触发，不会在推送代码时自动打包。进入 GitHub 仓库的 **Actions** 页面，选择 **Build Windows package**，点击 **Run workflow**；构建成功后，在该次运行的 Artifacts 中下载 `GoldPairLocal-Windows`。MCP Token、本机配置和交易数据均被 `.gitignore` 排除。
 
 接收者解压整个文件夹后双击 GoldPairLocal.exe；不要只复制 exe。
 包内不含 MT5 终端，经纪商终端需要预先安装登录。构建脚本自检不代替实机 MT5 连接验收。
