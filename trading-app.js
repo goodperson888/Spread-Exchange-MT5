@@ -197,14 +197,14 @@
   }
   async function closeOne(group) { render(await request('/api/trading/close',{group,reason:'用户请求平仓'})); }
   el('trading-connect').onclick=()=>action(connect,'trading-connect','正在检查行情、账户和合约规则…');
-  el('trading-reconcile').onclick=()=>action(async()=>{try {render(await request('/api/trading/reconcile'));await plot();} catch(error) {await status(false).catch(()=>{});throw error;}},'trading-reconcile','正在核对两边持仓…');
+  el('trading-reconcile').onclick=()=>action(async()=>{try {render(await request('/api/trading/reconcile',{}));await plot();} catch(error) {await status(false).catch(()=>{});throw error;}},'trading-reconcile','正在核对两边持仓…');
   el('trading-toggle').onclick=()=>action(async()=>{
     const state = last?.state;
     if(state?.enabled) {
-      render(await request('/api/trading/pause'));
+      render(await request('/api/trading/pause',{}));
     } else {
       await saveConfig();
-      render(await request('/api/trading/start'));
+      render(await request('/api/trading/start',{}));
       await plot();
     }
   },'trading-toggle','正在切换自动开仓状态…');

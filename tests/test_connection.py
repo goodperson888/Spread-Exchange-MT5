@@ -164,6 +164,18 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.request('/api/paper/plan', {})[0], 400)
         self.assertEqual(self.request('/api/config')[1]['config']['mt5']['account'], '123')
 
+    def test_trading_actions_require_post_and_dispatch(self):
+        with patch.object(server, 'TRADING') as runtime:
+            for action in ('reconcile', 'start', 'pause'):
+                method = getattr(runtime, action)
+                method.return_value = {'message': action}
+                self.assertEqual(self.request('/api/trading/' + action)[0], 404)
+                method.assert_not_called()
+                code, body = self.request('/api/trading/' + action, {})
+                self.assertEqual(code, 200)
+                self.assertEqual(body['message'], action)
+                method.assert_called_once()
+
     def test_changed_account_invalidates_check(self):
         self.request('/api/config', {'mt5': {'adapter': 'native'}})
         result = connector.inspect_terminal({}, FakeMT5())
