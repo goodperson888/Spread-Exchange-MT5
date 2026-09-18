@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import hashlib
 import os
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from trading_brokers import Binance, BinanceBookTicker, Terminal, LiveBroker, Pa
 from trading_config import validate as validate_trading, plan as executable_plan, pair_key
 from trading_engine import Engine
 from trading_store import Store
+import position_adoption
 
 ROOT = Path(__file__).resolve().parent
 DATA = (Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GoldPairLocal') if getattr(sys, 'frozen', False) else ROOT / 'data'
@@ -89,6 +91,8 @@ class TradingRuntime:
         self.last_error = ''
         self.market_meta = {}
         self.position_report = None
+        self.adoption_preview = None
+        self.engine.before_import_close = self._guard_import_close
         self._last_fx_refresh = 0
         self._last_carry_refresh = 0
         self._last_rest_market = None
@@ -120,6 +124,9 @@ class TradingRuntime:
         
         with self.lock:
             new_key = pair_key(config)
+            key_fingerprint=hashlib.sha256(api_key.encode()).hexdigest()
+            if any(g.get('imported') and g.get('binance_key_fingerprint')!=key_fingerprint for g in self.engine.active()):
+                raise ValueError('接管仓位绑定的币安 API Key 已变化；请使用接管时的连接配置')
             if any(g.get('key') != new_key for g in self.engine.active()):
                 raise ValueError('存在其他账户或品种的未平交易组，禁止切换连接')
 
@@ -210,6 +217,9 @@ class TradingRuntime:
             self.quote, self.connected, self.last_error = new_quote, True, ''
             self.market_meta = meta
             self.position_report = None
+            self.adoption_preview = None
+            for g in self.engine.active():
+                if g.get('imported'): g['management_enabled']=False
             self._last_fx_refresh = time.monotonic()
             self._last_carry_refresh = 0
             self._last_rest_market = market
@@ -271,13 +281,24 @@ class TradingRuntime:
         q = self._quote(mt5, market)
         self.quote = q
         self.store.sample(q)
-        self.engine.tick(c, self.plan, q)
+        if c['execution']['mode']=='paper' or self.reconciled:
+            if any(g.get('imported') for g in self.engine.active()) and time.monotonic()-getattr(self,'_last_import_check',0)>=2:
+                self._guard_import_close()
+                self._last_import_check=time.monotonic()
+            self.engine.tick(c, self.plan, q)
         self._verify_closed_costs()
 
     def _update_live_carry(self, positions):
         if self.config['execution']['mode']!='live': return
         active=self.engine.active();orders=self.engine.state['orders']
         for group in active:
+            if group.get('imported'):
+                tickets=self.engine.mt5_tickets(group)
+                current=sum(float(p.get('swap',0)) for p in positions if str(p['ticket']) in tickets)
+                realized=sum(float(o.get('result',{}).get('swap',0)) for o in orders
+                             if o['group']==group['id'] and o['leg']=='mt5' and o['action']=='close')
+                group['live_mt5_swap_usd']=current+realized
+                continue
             opened=next((o for o in orders if o['group']==group['id'] and o['leg']=='mt5'
                          and o['action']=='open' and o.get('result',{}).get('qty',0)>0),None)
             ticket=str(opened.get('result',{}).get('position','')) if opened else ''
@@ -322,6 +343,15 @@ class TradingRuntime:
         if self.config['execution']['mode'] != 'live':
             return
         for group in self.engine.state['groups']:
+            if group.get('imported'):
+                if (group['status']=='closed' and not group.get('import_closing_costs_checked')
+                        and now_ms()-group.get('import_cost_check_ms',0)>=60000):
+                    group['import_cost_check_ms']=now_ms()
+                    try:
+                        self._verify_import_costs(group)
+                    except Exception as exc:
+                        group['cost_verification_error']=str(exc)
+                continue
             if group['status'] != 'closed' or group.get('costs_verified'):
                 continue
             try:
@@ -370,6 +400,38 @@ class TradingRuntime:
                 # verification failure without treating it as a trade failure.
                 group['cost_verification_error'] = str(exc)
                 self.engine.save('cost_verification_pending', {'group': group['id']})
+
+    def _verify_import_costs(self, group):
+        """Verify trades sent after adoption, while retaining the explicit original cost estimates."""
+        orders=[o for o in self.engine.state['orders'] if o['group']==group['id'] and o['action']=='close']
+        deals=self.terminal.call('history',start_ms=group['opened_ms']-60000)
+        for o in orders:
+            if o['result'].get('qty',0)<=0: continue
+            if o['leg']=='binance':
+                fills=self.binance.trades(o['symbol'],o['result']['ticket'])
+                if not fills: raise ValueError('币安接管平仓成交费用尚未返回')
+                o['result']['fee']=self.binance.commissions_usdt(fills)
+            else:
+                rows=[d for d in deals if d.get('comment')==o['id']]
+                if abs(sum(float(d['volume'])*group['contract'] for d in rows)-o['result']['qty'])>1e-7:
+                    raise ValueError('MT5 接管平仓成交记录尚未完整返回')
+                o['result']['fee']=-sum(float(d.get('commission',0))+float(d.get('fee',0)) for d in rows)
+                o['result']['swap']=sum(float(d.get('swap',0)) for d in rows)
+        group['live_mt5_swap_usd']=sum(o['result'].get('swap',0) for o in orders if o['leg']=='mt5')
+        funding=0
+        for item in self.binance.income(group['symbol'],group['opened_ms'],group['closed_ms']+1000):
+            at=int(item.get('time',0))
+            if item.get('incomeType')!='FUNDING_FEE' or not group['opened_ms']<=at<=group['closed_ms']: continue
+            peers=[g for g in self.engine.state['groups'] if g.get('mode')=='live' and g['symbol']==group['symbol']
+                   and g['opened_ms']<=at<=g.get('closed_ms',at)]
+            total=sum(g['qty'] for g in peers)
+            if total: funding+=float(item['income'])*group['qty']/total*group['costs']['usdt_usd']
+        group['live_binance_funding_usd']=funding
+        group['import_closing_costs_checked']=True
+        group['costs_verified']=False
+        group.pop('cost_verification_error',None)
+        group['valuation']=self.engine.valuation(group,self.quote)
+        self.engine.save('adoption_closing_costs_checked',{'group':group['id']})
 
     def _loop(self):
         while not self.stop_event.wait(.1):
@@ -423,11 +485,117 @@ class TradingRuntime:
 
     def close_group(self, group=None, reason='用户请求平仓'):
         with self.lock:
+            if self.config and self.config['execution']['mode']=='live' and not self.reconciled:
+                raise ValueError('请先完成持仓对账，再请求平仓')
             if not self.quote:
                 raise ValueError('尚无可用报价，不能请求平仓')
             self.engine.request_close(group, reason)
             # One immediate attempt; the background loop performs retries.
             self.engine.tick(self.config, self.plan, self.quote)
+            return self.snapshot()
+
+    def _validate_import_exposure(self, mt5, positions, pending):
+        """Compare account quantities to the journal, including each adopted MT5 identity."""
+        if pending or mt5.get('orders'):
+            raise ValueError('当前品种存在挂单，暂停接管管理，请处理挂单后重新对账')
+        if mt5.get('orders') is None:
+            raise ValueError('未取得 MT5 挂单检查结果')
+        expected=sum(self.engine.amounts(g)['binance'] for g in self.engine.active())
+        rows=[p for p in positions if float(p.get('positionAmt',0))]
+        if any(float(p['positionAmt'])>0 or p.get('positionSide') not in ('SHORT','BOTH') for p in rows):
+            raise ValueError('币安持仓方向改变，请重新对账')
+        if abs(sum(abs(float(p['positionAmt'])) for p in rows)-expected)>1e-7:
+            raise ValueError('币安实际数量已变化，与接管及策略记录不符；暂停处理，请人工核对')
+        current={str(p['ticket']):p for p in mt5['positions']}
+        for g in self.engine.active():
+            if not g.get('imported'): continue
+            remaining=self.engine.mt5_tickets(g)
+            for o in self.engine.state['orders']:
+                if o['group']!=g['id'] or not o.get('original_position'): continue
+                original=o['original_position'];ticket=str(original['ticket']);actual=current.get(ticket)
+                qty=remaining.get(ticket,0)
+                if qty<=1e-8:
+                    if actual: raise ValueError('已平接管票据仍有持仓，请人工核对')
+                    continue
+                if (not actual or actual['side']!=0 or
+                    any(str(actual.get(k))!=str(original.get(k)) for k in ('identifier','magic','time_ms','price_open')) or
+                    abs(actual['lots']*g['contract']-qty)>1e-7):
+                    raise ValueError('接管 MT5 票据 '+ticket+' 的身份或数量已变化，请人工核对')
+
+    def _guard_import_close(self):
+        try:
+            if not self.reconciled: raise ValueError('请先完成持仓对账')
+            if any(self.engine.uncertain(g) for g in self.engine.active()):
+                raise ValueError('尚有成交状态未确定，请先对账，禁止再次发送平仓')
+            mt5=self.terminal.call('snapshot')
+            self._validate_import_exposure(mt5,self.binance.positions(self.config['symbol']),
+                                           self.binance.open_orders(self.config['symbol']))
+        except Exception:
+            self.reconciled=False
+            self.engine.state['recovery']=True
+            for g in self.engine.active():
+                if g.get('imported'): g['management_enabled']=False
+            self.engine.pause('接管仓位核验未通过，请查看错误并重新对账')
+            raise
+
+    def _adoption_read(self):
+        if not self.connected or self.config['execution']['mode']!='live':
+            raise ValueError('请先连接实盘账户；接管登记本身不会下单')
+        if self.engine.active():
+            raise ValueError('首次接管需没有未平策略组；已接管仓位请在下方独立管理，不能重复导入')
+        if self.engine.state['enabled']:
+            raise ValueError('请先暂停新开仓，再读取接管预览')
+        self.binance.refresh_position_mode()
+        return (self.terminal.call('snapshot'), self.binance.positions(self.config['symbol']),
+                self.binance.open_orders(self.config['symbol']))
+
+    def adoption_plan(self, body):
+        with self.lock:
+            mt5,positions,pending=self._adoption_read()
+            tickets=body.get('tickets',[])
+            if not isinstance(tickets,list) or any(not isinstance(t,str) for t in tickets):
+                raise ValueError('MT5 票据列表无效')
+            p=position_adoption.preview(self.config,mt5,positions,pending,tickets,body,self.spec,now_ms())
+            p['binance_key_fingerprint']=hashlib.sha256(self.binance.key.encode()).hexdigest()
+            self.adoption_preview=p
+            return {'preview':{k:v for k,v in p.items() if k not in ('fingerprint','binance_key_fingerprint')}}
+
+    def adoption_confirm(self, body):
+        with self.lock:
+            token=body.get('preview_id')
+            # A lost HTTP response can be retried without importing twice.
+            if any(g.get('imported') and g['id']==token for g in self.engine.state['groups']):
+                return self.snapshot()
+            p=self.adoption_preview
+            if not p or p['id']!=token or now_ms()-p['created_ms']>120000:
+                raise ValueError('预览已失效，请重新预览后确认')
+            mt5,positions,pending=self._adoption_read()
+            if (p['key']!=pair_key(self.config) or
+                now_ms()-p['created_ms']>120000 or
+                p['fingerprint']!=position_adoption.fingerprint(positions,mt5,pending) or
+                p['binance_key_fingerprint']!=hashlib.sha256(self.binance.key.encode()).hexdigest()):
+                self.adoption_preview=None
+                raise ValueError('平台持仓或连接已变化，未接管；请重新预览')
+            g=position_adoption.register(self.engine,self.config,p,now_ms())
+            self.reconciled=False;self.adoption_preview=None
+            result=self.reconcile()
+            result['message']='已登记接管并完成对账，尚未启动已有仓位管理；本次没有下单'
+            return result
+
+    def adoption_manage(self, body):
+        with self.lock:
+            g=next((g for g in self.engine.active() if g.get('imported') and g['id']==body.get('group')),None)
+            if not g: raise ValueError('未找到活动接管篮子')
+            if g['status']!='open': raise ValueError('篮子正在平仓或有异常，请先处理订单状态')
+            enabled=body.get('enabled')
+            if type(enabled) is not bool: raise ValueError('启停参数无效')
+            if enabled:
+                self._guard_import_close()
+                if self.engine.state['recovery']: raise ValueError('请先完成持仓对账')
+                g['parameters']['take_contraction_usd']=position_adoption.number(body,'take_contraction_usd',.000001,1e5)
+                g['parameters']['min_net_profit_usd']=position_adoption.number(body,'min_net_profit_usd',0,1e9)
+            g['management_enabled']=enabled
+            self.engine.save('adoption_management',{'group':g['id'],'enabled':enabled})
             return self.snapshot()
 
     def reconcile(self):
@@ -468,7 +636,8 @@ class TradingRuntime:
                                    for x in open_orders],
                 'mt5': [dict(x, managed=False) for x in mt5['positions']],
             }
-            managed_mt5 = [x for x in mt5['positions'] if x['magic'] == self.config['execution']['magic']]
+            imported_tickets={ticket for g in self.engine.active() if g.get('imported') for ticket in self.engine.mt5_tickets(g)}
+            managed_mt5 = [x for x in mt5['positions'] if x['magic'] == self.config['execution']['magic'] or str(x['ticket']) in imported_tickets]
             lots = sum(float(x['lots']) for x in managed_mt5)
             expected_b = sum(self.engine.amounts(g)['binance'] for g in self.engine.active())
             expected_m = sum(self.engine.amounts(g)['mt5'] / g['contract'] for g in self.engine.active())
@@ -477,7 +646,9 @@ class TradingRuntime:
                                  and o['leg'] == 'mt5' and o['action'] == 'open'}
             for position in self.position_report['mt5']:
                 position['managed'] = (position.get('magic') == self.config['execution']['magic']
-                                       and position.get('comment') in expected_comments)
+                                       and position.get('comment') in expected_comments) or str(position['ticket']) in imported_tickets
+            if imported_tickets:
+                self._validate_import_exposure(mt5,positions,open_orders)
             by_comment = {x.get('comment'): x for x in managed_mt5 if x.get('comment')}
             for order in self.engine.state['orders']:
                 if (order['id'] in by_comment and order['leg'] == 'mt5' and order['action'] == 'open'
@@ -498,7 +669,7 @@ class TradingRuntime:
                 short_qty=0
                 other_qty=0
                 signed_bqty=sum(float(x.get('positionAmt', 0)) for x in positions)
-            bad_mt5 = any(int(x.get('side', -1)) != 0 or x.get('comment') not in expected_comments
+            bad_mt5 = any(int(x.get('side', -1)) != 0 or (x.get('comment') not in expected_comments and str(x['ticket']) not in imported_tickets)
                           for x in managed_mt5)
             binance_mismatch=(long_qty>0.000001 or other_qty>0.000001 or abs(short_qty-expected_b)>0.000001) if position_mode=='hedge' else abs(signed_bqty + expected_b)>0.000001
             if open_orders or binance_mismatch or abs(lots - expected_m) > .0000001 or bad_mt5:
@@ -507,7 +678,7 @@ class TradingRuntime:
                 if open_orders: details.append('币安存在未完成委托')
                 if binance_mismatch: details.append('币安持仓模式、空头方向或数量不符')
                 if abs(lots - expected_m) > .0000001 or bad_mt5: details.append('MT5 持仓数量、方向或注释不符')
-                raise ValueError('实际持仓与本策略日志不一致：' + '；'.join(details))
+                raise ValueError('实际持仓与本策略日志不一致：' + '；'.join(details) + '。手工仓位可在“已有持仓管理”中预览接管，无需先平仓')
             
             self.engine.state['recovery'] = any(self.engine.uncertain(g) for g in self.engine.active())
             if self.engine.state['recovery']:
@@ -938,6 +1109,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == '/api/trading/reconcile':
                 self.send_json({'ok': True, **TRADING.reconcile()})
+                return
+            if path == '/api/trading/adoption/preview':
+                self.send_json({'ok': True, **TRADING.adoption_plan(body)})
+                return
+            if path == '/api/trading/adoption/confirm':
+                self.send_json({'ok': True, **TRADING.adoption_confirm(body)})
+                return
+            if path == '/api/trading/adoption/manage':
+                self.send_json({'ok': True, **TRADING.adoption_manage(body)})
                 return
 
             if path == "/api/paper/plan":

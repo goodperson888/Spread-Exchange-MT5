@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 // Execute the actual button handlers without contacting any trading account.
-function pageFixture(reconcileFails = false) {
+function pageFixture(reconcileFails = false, handlers = {}) {
   const elements = new Map(), calls = [];
   const el = id => {
     if (!elements.has(id)) elements.set(id, {
@@ -26,7 +26,8 @@ function pageFixture(reconcileFails = false) {
       calls.push({url, ...options});
       const action = url.split('/').at(-1);
       let body = {}, status = 200;
-      if (['reconcile','start','pause'].includes(action)) {
+      if (handlers[url]) body=handlers[url](JSON.parse(options.body));
+      else if (['reconcile','start','pause'].includes(action)) {
         if (options.method !== 'POST') {status=404; body={error:'未找到'};}
         else if (action==='reconcile' && reconcileFails) {status=400; body={error:'持仓不一致'};}
         else {
@@ -70,4 +71,32 @@ test('failed reconcile refreshes status and preserves the actionable error', asy
     ['/api/trading/reconcile','POST'], ['/api/trading/status','GET']
   ]);
   assert.equal(el('trading-reconcile').disabled, false);
+});
+
+test('adoption buttons send explicit POST, confirmation stays paused, management is separate', async () => {
+  const group={id:'old-basket',imported:true,management_enabled:false,status:'open',mode:'live',
+    entry:6,qty:1,lots:.01,parameters:{take_contraction_usd:2,min_net_profit_usd:0}};
+  const status=()=>({state:{enabled:false,groups:[group],orders:[]}});
+  const {el,calls}=pageFixture(false,{
+    '/api/trading/adoption/preview':body=>{
+      assert.deepEqual(body.tickets,['123']);assert.equal(body.entry_fx,'1');
+      return {preview:{...group,positions:[{ticket:'123'}],entry_fx:1,binance_entry:4306,mt5_entry:4300,
+        history_fees_usd:0,history_funding_usd:0}};
+    },
+    '/api/trading/adoption/confirm':body=>{assert.equal(body.preview_id,group.id);return status();},
+    '/api/trading/adoption/manage':body=>{
+      assert.equal(body.group,group.id);group.management_enabled=body.enabled;return status();
+    }
+  });
+  el('adoption-tickets').querySelectorAll=()=>[{value:'123'}];
+  el('adoption-fx').value='1';el('adoption-costs-confirmed').checked=true;
+  await el('adoption-preview').onclick();
+  assert.equal(el('adoption-confirm').disabled,false);
+  await el('adoption-confirm').onclick();
+  assert.equal(el('adoption-manage').textContent,'启动已有仓位管理');
+  await el('adoption-manage').onclick();
+  assert.equal(el('adoption-manage').textContent,'暂停已有仓位管理');
+  await el('adoption-manage').onclick();
+  assert.equal(el('adoption-manage').textContent,'启动已有仓位管理');
+  assert.ok(calls.every(c=>c.method==='POST' && c.url.startsWith('/api/trading/adoption/')));
 });

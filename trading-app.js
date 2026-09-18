@@ -8,6 +8,7 @@
   const usd = x => Number.isFinite(Number(x)) ? `${Number(x)>=0?'+':''}${Number(x).toFixed(2)} USD` : '—';
   const escape = value => String(value ?? '').replace(/[&<>'"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
   let chart, timer, busy=false, last=null, resetChartZoom=true, actionError='';
+  let adoptionPreview=null, adoptionReportTime=null, adoptionGroupId=null, adoptionRevision=0;
 
   async function request(path, body) {
     const controller=new AbortController();
@@ -24,10 +25,11 @@
   }
   function lock(value, activeId, label) {
     busy=value;
-    for(const id of ['trading-connect','trading-reconcile','trading-toggle','trading-close']) {
+    for(const id of ['trading-connect','trading-reconcile','trading-toggle','trading-close','adoption-read','adoption-preview','adoption-confirm','adoption-manage']) {
       el(id).disabled=value;
       el(id).classList.toggle('processing', value);
     }
+    if(!value) el('adoption-confirm').disabled=!adoptionPreview;
     const active=activeId&&el(activeId);
     if(active?.tagName==='BUTTON') {
       if(value) { active.dataset.label=active.textContent; active.dataset.pendingLabel=label||'处理中…'; active.textContent=active.dataset.pendingLabel; }
@@ -37,7 +39,15 @@
   async function action(work, activeId, label) {
     if(busy)return; actionError=''; lock(true,activeId,label);
     text('trading-result', label||'正在处理，请稍候…');
-    try { await work(); } catch(error) { actionError='本次操作未完成：'+error.message; text('trading-result',actionError,true); }
+    const adoptionAction=activeId?.startsWith('adoption-');
+    if(adoptionAction)text('adoption-feedback',label||'正在处理…');
+    try {
+      await work();
+      if(adoptionAction)text('adoption-feedback',activeId==='adoption-confirm'?'已登记接管；旧仓管理尚未启动，本次没有下单。':'操作完成，请查看下方预览或管理状态。');
+    } catch(error) {
+      actionError='本次操作未完成：'+error.message; text('trading-result',actionError,true);
+      if(adoptionAction)text('adoption-feedback',actionError,true);
+    }
     finally { lock(false,activeId); }
   }
   function groupRows(groups, orders) {
@@ -47,7 +57,7 @@
       const v=g.valuation||{}, remaining=v.remaining||{};
       const own=orders.filter(o=>o.group===g.id&&o.action==='open'&&Number(o.result?.qty)>0);
       const amount=leg=>own.filter(o=>o.leg===leg).reduce((sum,o)=>sum+Number(o.result.qty)*Number(o.result.price),0);
-      const basis=g.mode==='paper'?'纸面估算':v.costs_verified?'平台已复核':'实盘估算';
+      const basis=g.imported?'接管旧仓 · 成本估算':g.mode==='paper'?'纸面估算':v.costs_verified?'平台已复核':'实盘估算';
       const funding=Number(v.binance_funding||0),swap=Number(v.mt5_swap||0);
       const carryDetail=('binance_funding' in v||'mt5_swap' in v)?`资金费 ${usd(funding)}<br>MT5 Swap ${usd(swap)}`:`合计 ${usd(v.carry||0)}`;
       const action=g.status==='closed'?'':`<button data-close="${escape(g.id)}">平仓</button>`;
@@ -64,8 +74,8 @@
       const r=o.result||{},g=byGroup.get(o.group),filled=Number(r.qty||0),price=Number(r.price||0);
       const direction=o.leg==='binance'?(o.action==='open'?'卖出':'买入'):(o.action==='open'?'买入':'卖出');
       const quantity=o.leg==='mt5'&&g?`${n(filled)} 盎司 / ${n(filled/g.contract)} 手`:`${n(filled)} XAU`;
-      const status=r.status==='done'?(filled>0?'已成交':'未成交'):(r.status==='pending'?'待确认':'状态未知');
-      const fee=Number.isFinite(Number(r.fee))?`${Number(r.fee).toFixed(4)} ${o.leg==='binance'?'USDT':'USD'}`:'未单独回填';
+      const status=o.imported?'原持仓成本登记（本次未下单）':r.status==='done'?(filled>0?'已成交':'未成交'):(r.status==='pending'?'待确认':'状态未知');
+      const fee=o.imported?'历史费用见接管汇总':Number.isFinite(Number(r.fee))?`${Number(r.fee).toFixed(4)} ${o.leg==='binance'?'USDT':'USD'}`:'未单独回填';
       return `<tr><td>${dateTime(o.created_ms)}</td><td>#${escape(o.group)}</td><td>${o.leg==='binance'?'币安':'MT5'}<br>${escape(o.symbol)}</td><td>${o.action==='open'?'开仓':'平仓'} · ${direction}</td><td>申请 ${n(o.requested)} 盎司<br>成交 ${quantity}</td><td>${price?`${n(price)}<br>${(filled*price).toFixed(2)} ${o.leg==='binance'?'USDT':'USD'}`:'—'}</td><td>${fee}</td><td>${status}${r.error?'<br>'+escape(r.error):''}<br><span class="muted">${escape(r.ticket||o.id)}</span></td></tr>`;
     }).join('');
     return `<table class="records-table"><thead><tr><th>时间</th><th>交易组</th><th>平台 / 品种</th><th>动作</th><th>申请 / 成交数量</th><th>成交价 / 金额</th><th>成交手续费</th><th>状态 / 票据</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -97,7 +107,8 @@
       chartStatus.textContent=result.connected?'实时采样中 · 策略每 250 毫秒检查':'未连接 · 图表保留历史';
       chartStatus.classList.toggle('warning',!result.connected);
     }
-    const stateText = !result.connected ? '未连接，不能开仓' : (!reconciled || state.recovery) ? '已连接，等待持仓对账' : state.enabled ? '自动开仓运行中' : '已连接，尚未启动自动开仓';
+    const oldManaging=(state.groups||[]).some(g=>g.imported&&g.status!=='closed'&&g.management_enabled);
+    const stateText = !result.connected ? '未连接，不能开仓' : (!reconciled || state.recovery) ? '已连接，等待持仓对账' : state.enabled ? '自动开仓运行中'+(oldManaging?' · 旧仓管理运行中':'') : oldManaging?'旧仓管理运行中 · 新开仓未启动':'已连接，尚未启动自动开仓';
     const alarm=state.alarm||result.last_error;
     const message=result.message ? `\n${result.message}` : '';
     const next=(!result.connected ? '请先连接行情。' : ((!reconciled||state.recovery) ? '请先点击“持仓对账”，对账通过后才能启动自动开仓。' : result.capabilities?.live_orders ? '实盘通道已连接、持仓已对账；启动时仍会检查配置和策略状态。' : '纸面模式不会发送真实订单。'));
@@ -150,7 +161,65 @@
     el('orders').innerHTML=orderRows(orders,groups);
     for(const button of el('groups').querySelectorAll('[data-close]')) button.onclick=()=>action(()=>closeOne(button.dataset.close));
     el('trade-events').textContent=(result.events||[]).slice(0,8).map(x=>`${new Date(x.time).toLocaleString()}  ${x.kind}  ${JSON.stringify(x.data)}`).join('\n');
+    renderAdoption(result);
   }
+  function renderAdoption(result) {
+    const group=(result.state?.groups||[]).find(g=>g.imported&&g.status!=='closed');
+    el('adoption-setup').hidden=Boolean(group);el('adoption-managed').hidden=!group;
+    if(group) {
+      if(adoptionGroupId!==group.id) {
+        el('adoption-managed-take').value=group.parameters.take_contraction_usd;
+        el('adoption-managed-profit').value=group.parameters.min_net_profit_usd;
+        adoptionGroupId=group.id;
+      }
+      const managing=Boolean(group.management_enabled);
+      el('adoption-manage').textContent=managing?'暂停已有仓位管理':'启动已有仓位管理';
+      el('adoption-managed-take').disabled=managing;el('adoption-managed-profit').disabled=managing;
+      el('adoption-managed-status').textContent=`接管篮子 #${group.id} · ${managing?'管理已启动':'管理已暂停'} · ${group.status==='open'?'持仓中':group.status} · 数量 ${n(group.qty)} XAU / ${n(group.lots)} 手 · 开仓参考价差 ${n(group.entry)} USD/盎司 · 净收益 ${usd(group.valuation?.net)}（估算）`;
+    } else adoptionGroupId=null;
+    const report=result.position_report;
+    if(report && report.time_ms!==adoptionReportTime) {
+      const selected=new Set(Array.from(el('adoption-tickets').querySelectorAll('input:checked'),x=>x.value));
+      el('adoption-tickets').innerHTML=report.mt5.filter(p=>p.side===0&&!p.managed).map(p=>`<label class="check"><input type="checkbox" value="${escape(p.ticket)}" ${selected.has(String(p.ticket))?'checked':''} />票据 ${escape(p.ticket)} · ${n(p.lots)} 手 · 开仓 ${n(p.price_open)} · ${dateTime(p.time_ms)}</label>`).join('')||'没有可接管的 MT5 多头票据。';
+      adoptionReportTime=report.time_ms;
+      invalidateAdoption();
+    }
+  }
+  function invalidateAdoption() {
+    adoptionRevision++;
+    adoptionPreview=null;el('adoption-confirm').disabled=true;
+    el('adoption-preview-result').textContent='选择或条件变化后，请重新预览。';
+  }
+  el('adoption-setup').addEventListener?.('input',invalidateAdoption);
+  el('adoption-setup').addEventListener?.('change',invalidateAdoption);
+  el('adoption-read').onclick=()=>action(async()=>{
+    try {render(await request('/api/trading/reconcile',{}));}
+    catch(error) {await status(false);throw error;}
+  },'adoption-read','正在读取平台持仓…');
+  el('adoption-preview').onclick=()=>action(async()=>{
+    invalidateAdoption();
+    const revision=adoptionRevision;
+    const result=await request('/api/trading/adoption/preview',{
+      tickets:Array.from(el('adoption-tickets').querySelectorAll('input:checked'),x=>x.value),
+      entry_fx:el('adoption-fx').value,history_fees_usd:el('adoption-fees').value,
+      history_funding_usd:el('adoption-funding').value,costs_confirmed:el('adoption-costs-confirmed').checked,
+      take_contraction_usd:el('adoption-take').value,min_net_profit_usd:el('adoption-profit').value
+    });
+    if(revision!==adoptionRevision)throw Error('预览期间输入已变化，请重新预览');
+    const p=result.preview;adoptionPreview=p;
+    el('adoption-preview-result').textContent=`MT5 ${p.positions.map(x=>x.ticket).join('、')} 共 ${n(p.lots)} 手 ↔ 币安全部空头 ${n(p.qty)} XAU。\n币安原均价 ${n(p.binance_entry)} USDT × 汇率 ${p.entry_fx} − MT5 加权开仓均价 ${n(p.mt5_entry)} USD = 开仓参考价差 ${n(p.entry)} USD/盎司。\n历史手续费 ${p.history_fees_usd} USD；历史资金费净收入 ${p.history_funding_usd} USD；MT5 Swap 按平台读取。\n退出：收窄至少 ${p.parameters.take_contraction_usd} USD/盎司，且篮子净收益 ≥ ${p.parameters.min_net_profit_usd} USD（估算）。\n独立旧仓篮子，不补仓。预览 2 分钟有效，确认时再次核验持仓；确认本身不下单。`;
+  },'adoption-preview','正在核验配平数量…');
+  el('adoption-confirm').onclick=()=>action(async()=>{
+    if(!adoptionPreview)throw Error('请先生成预览');
+    try {render(await request('/api/trading/adoption/confirm',{preview_id:adoptionPreview.id}));invalidateAdoption();}
+    catch(error) {await status(false);throw error;}
+  },'adoption-confirm','正在登记接管（不下单）…');
+  el('adoption-manage').onclick=()=>action(async()=>{
+    const group=(last?.state?.groups||[]).find(g=>g.id===adoptionGroupId);
+    if(!group)throw Error('未找到接管篮子');
+    render(await request('/api/trading/adoption/manage',{group:group.id,enabled:!group.management_enabled,
+      take_contraction_usd:el('adoption-managed-take').value,min_net_profit_usd:el('adoption-managed-profit').value}));
+  },'adoption-manage','正在切换旧仓管理…');
   async function plot() {
     const minutes=Number(el('chart-window').value);
     const r=await request('/api/trading/chart?minutes='+minutes);

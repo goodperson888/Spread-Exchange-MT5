@@ -380,6 +380,8 @@ def worker_main():
                 if cmd=='snapshot':
                     tick=mt.symbol_info_tick(s.name)
                     positions=mt.positions_get(symbol=s.name)
+                    pending=mt.orders_get(symbol=s.name)
+                    if pending is None: raise ValueError('MT5 挂单读取失败')
                     if not tick or positions is None: raise ValueError('MT5 报价或持仓读取失败')
                     data=dict(quote=dict(bid=tick.bid,ask=tick.ask,time_ms=tick.time_msc),
                         spec=dict(name=s.name,contract_size_oz=s.trade_contract_size,volume_min=s.volume_min,
@@ -388,7 +390,8 @@ def worker_main():
                         account=dict(account=str(a.login),server=a.server,currency=a.currency,margin_mode=a.margin_mode,
                                      trade_mode=a.trade_mode,free_margin=a.margin_free),
                         allowed=bool(t.trade_allowed and not t.tradeapi_disabled and a.trade_allowed and a.trade_expert),
-                        positions=[dict(ticket=str(p.ticket),lots=p.volume,side=p.type,magic=p.magic,swap=p.swap,
+                        orders=[dict(ticket=str(x.ticket),symbol=x.symbol,type=x.type,volume=x.volume_current) for x in pending],
+                        positions=[dict(identifier=str(p.identifier),ticket=str(p.ticket),lots=p.volume,side=p.type,magic=p.magic,swap=p.swap,
                                         symbol=p.symbol,price_open=p.price_open,time_ms=p.time_msc,
                                         profit=p.profit,comment=p.comment) for p in positions])
                 elif cmd=='history': data=[d._asdict() for d in history(r['start_ms']) if d.symbol==s.name and d.magic==magic]
@@ -418,7 +421,7 @@ def worker_main():
                             type_time=mt.ORDER_TIME_GTC,type_filling=filling)
                         if not opening:
                             pos=mt.positions_get(ticket=int(o['position']))
-                            if not pos or pos[0].magic!=magic or pos[0].symbol!=s.name or pos[0].type!=mt.POSITION_TYPE_BUY:
+                            if not pos or not owned_close_position(pos[0],o,s.name,magic):
                                 raise ValueError('MT5 待平仓位不属于本策略，已拒绝操作')
                             if req['volume']>pos[0].volume+1e-9: raise ValueError('MT5 平仓量大于实际持仓')
                             req['position']=int(o['position'])
@@ -455,6 +458,18 @@ def worker_main():
         except Exception as exc:
             print(json.dumps(dict(ok=False,error=str(exc))),flush=True)
     mt.shutdown()
+
+
+def owned_close_position(position, order, symbol, magic):
+    if position.symbol != symbol or position.type != 0:
+        return False
+    adopted = order.get('adopted_position')
+    if not adopted:
+        return position.magic == magic
+    return (str(position.ticket) == str(adopted['ticket']) == str(order.get('position'))
+            and str(position.identifier) == str(adopted['identifier'])
+            and position.magic == adopted['magic'] and position.time_msc == adopted['time_ms']
+            and abs(position.price_open - adopted['price_open']) < 1e-8)
 
 
 class LiveBroker:

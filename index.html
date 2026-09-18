@@ -115,7 +115,32 @@
 <div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>
 <div class="chart-wrap"><div id="spread-chart" class="chart" role="img" aria-label="入场与退出可成交价差历史折线图"></div><p id="chart-empty" class="chart-empty">连接后开始积累可成交价差历史。</p></div>
 <p id="chart-coverage" class="note">本机高频记录保留 24 小时，更早数据按分钟归档并保留 30 天；历史保存在本机数据目录，清理浏览器缓存不会删除。</p>
-<details><summary>平台当前持仓与币安挂单（只读）</summary><p class="note">点击“持仓对账”后更新，仅显示当前连接品种。纸面模式只核对本机模拟记录。外部仓位不自动加入策略，未接管仓位不由“全部平仓”处理。币安开仓均价可能合并多次成交，更新时间不是首次开仓时间；MT5 列出各持仓票据。历史开仓价差需双方成交配对及当时汇率，不能用当前报价倒推。此处未读取 MT5 挂单。</p><div id="platform-positions" class="table-wrap">尚未读取实盘平台持仓。</div></details>
+<details><summary>平台当前持仓与币安挂单（只读）</summary><p class="note">点击“持仓对账”后更新，仅显示当前连接品种。纸面模式只核对本机模拟记录。外部仓位不自动加入策略，未接管仓位不由“全部平仓”处理。币安开仓均价可能合并多次成交，更新时间不是首次开仓时间；MT5 列出各持仓票据。历史开仓价差需双方成交配对及当时汇率，不能用当前报价倒推。接管预览还会检查 MT5 挂单。</p><div id="platform-positions" class="table-wrap">尚未读取实盘平台持仓。</div></details>
+<details id="adoption-panel"><summary>已有持仓管理 · 配对接管</summary>
+<p id="adoption-feedback" class="result" role="status">先读取持仓，再选择票据并预览。</p>
+<p class="note">首次接管须没有未平策略组。仅支持币安空头＋MT5 多头：选择 MT5 完整票据，配平当前品种的全部币安空头。预览、确认只登记，不下单；确认后还需单独启动旧仓管理。接管篮子不补仓、不与新仓合并止盈，但占用策略总手数上限。</p>
+<div id="adoption-setup">
+<button id="adoption-read" type="button">读取已有持仓</button>
+<div id="adoption-tickets" class="result">读取后选择 MT5 持仓票据。</div>
+<div class="grid">
+<label>原始开仓 USDT/USD 换算汇率<input id="adoption-fx" type="number" step="0.000001" min="0.5" max="1.5" placeholder="核对后填入，不能用当前汇率冒充" /></label>
+<label>接管前双边累计手续费（USD）<input id="adoption-fees" type="number" min="0" step="0.01" placeholder="含已付双边开仓费用，无费用填 0" /></label>
+<label>接管前累计资金费净收入（USD）<input id="adoption-funding" type="number" step="0.01" placeholder="收取为正、支付为负；无费用填 0" /></label>
+<label>旧仓价差至少收窄（USD/盎司）<input id="adoption-take" type="number" min="0.000001" step="0.1" value="2" /></label>
+<label>旧仓篮子最低净收益（USD）<input id="adoption-profit" type="number" min="0" step="0.01" value="0" /></label>
+</div>
+<p class="note">退出须同时满足收窄目标和最低净收益。按原始开仓成本计算，不从接管时重新计盈亏。MT5 当前 Swap 自动读取，勿重复填入资金费；历史费用/汇率由你核对，后续资金费分摊及预计平仓费仍属估算，不能保证最终成交净收益。</p>
+<label class="check"><input id="adoption-costs-confirmed" type="checkbox" />我已核对历史成本，并接受所示费用估算（未知费用不能直接填 0）</label>
+<div class="actions"><button id="adoption-preview" type="button">预览配对和退出条件</button><button id="adoption-confirm" type="button" disabled>确认接管（不下单）</button></div>
+<div id="adoption-preview-result" class="result" role="status">尚未生成预览。</div>
+</div>
+<div id="adoption-managed" hidden>
+<p id="adoption-managed-status" class="note"></p>
+<div class="grid"><label>旧仓至少收窄（USD/盎司）<input id="adoption-managed-take" type="number" min="0.000001" step="0.1" /></label><label>旧仓篮子最低净收益（USD）<input id="adoption-managed-profit" type="number" min="0" step="0.01" /></label></div>
+<div class="actions"><button id="adoption-manage" type="button">启动已有仓位管理</button></div>
+<p class="note">启动后可能立即触发真实平仓；此按钮不启动新开仓。修改退出条件需先暂停旧仓管理。暂停不会撤销已经发出的平仓指令。重启或重连后必须重新对账并手动恢复管理。</p>
+</div>
+</details>
 <section class="records" aria-labelledby="group-records-heading"><div class="subheading"><div><p class="eyebrow">06 · 收益与订单</p><h3 id="group-records-heading">交易组收益记录</h3></div><span class="note">实盘平仓后会用平台成交与费用记录复核</span></div><div id="pnl-stats" class="stats" aria-label="交易收益摘要"></div><div id="groups" class="table-wrap"></div><h3>双边订单流水</h3><div id="orders" class="table-wrap"></div><details><summary>技术事件日志</summary><div id="trade-events" class="events"></div></details></section>
 </section>
 </main><script src="echarts.min.js"></script><script src="app.js"></script><script src="trading-app.js"></script></body></html>

@@ -176,6 +176,14 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual(body['message'], action)
                 method.assert_called_once()
 
+    def test_adoption_routes_dispatch_post_body_without_orders(self):
+        with patch.object(server,'TRADING') as runtime:
+            for path, name in [('preview','adoption_plan'),('confirm','adoption_confirm'),('manage','adoption_manage')]:
+                method=getattr(runtime,name);method.return_value={}
+                payload={'preview_id':'fixture','enabled':False}
+                self.assertEqual(self.request('/api/trading/adoption/'+path,payload)[0],200)
+                method.assert_called_once_with(payload)
+
     def test_changed_account_invalidates_check(self):
         self.request('/api/config', {'mt5': {'adapter': 'native'}})
         result = connector.inspect_terminal({}, FakeMT5())

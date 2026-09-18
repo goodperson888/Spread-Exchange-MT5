@@ -23,6 +23,8 @@ class Engine:
         self.store,self.broker=store,broker
         self.state=store.load() or dict(groups=[],orders=[],last_open_ms=0,enabled=False,mode='paper',key=None,alarm='',recovery=False)
         self.state['enabled']=False
+        for g in self.state['groups']:
+            if g.get('imported'): g['management_enabled']=False
         self.state['recovery']=any(g['status']!='closed' for g in self.state['groups'])
         if self.state['recovery']: self.state['alarm']='程序重启，须连接原账户并完成持仓对账后恢复管理'
         self.save('boot')
@@ -66,7 +68,16 @@ class Engine:
             # The broker adds this only when the account is in Hedge Mode.
             o['position_side']='SHORT'
         if action=='close' and leg=='mt5':
-            opened=next(x for x in self.state['orders'] if x['group']==g['id'] and x['leg']=='mt5' and x['action']=='open' and x['result'].get('qty',0)>0)
+            candidates=[x for x in self.state['orders'] if x['group']==g['id'] and x['leg']=='mt5' and x['action']=='open' and x['result'].get('qty',0)>0]
+            if g.get('imported'):
+                # Close each adopted ticket separately; never reuse the first ticket for the whole basket.
+                remaining=self.mt5_tickets(g)
+                opened=next((x for x in candidates if remaining.get(str(x['result'].get('position')),0)>1e-8),None)
+                if opened is None: raise ValueError('接管票据剩余数量不一致，请重新对账')
+                qty=min(qty,remaining[str(opened['result']['position'])]);o['requested']=qty
+                o['adopted_position']=copy.deepcopy(opened['original_position'])
+            else:
+                opened=candidates[0]
             o['position']=opened['result'].get('position') or opened['result'].get('ticket')
             if not o['position']:
                 raise ValueError('MT5 持仓票据未确定，必须先完成对账')
@@ -77,6 +88,14 @@ class Engine:
         if not self.result_valid(result,qty): result=dict(status='unknown',qty=0,price=0,error='成交回报无效，等待对账')
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
         return o
+
+    def mt5_tickets(self, g):
+        result={}
+        for o in self.state['orders']:
+            if o['group']!=g['id'] or o['leg']!='mt5': continue
+            ticket=str(o.get('position') or o.get('result',{}).get('position') or '')
+            result[ticket]=result.get(ticket,0)+(1 if o['action']=='open' else -1)*o.get('result',{}).get('qty',0)
+        return result
 
     @staticmethod
     def result_valid(r, requested):
@@ -121,6 +140,10 @@ class Engine:
             mt5_swap=-g['lots']*c['mt5_swap_per_lot_day']*days
             funding=g['qty']*g.get('open_binance',0)*fx*c['paper_funding_percent_day']/100*days
         carry=mt5_swap+funding
+        if g.get('imported'):
+            fees+=g['history_fees_usd']
+            funding+=g['history_funding_usd']
+            carry=mt5_swap+funding
         flat=max(owned.values())<1e-8
         return dict(gross=round(gross,8),fees=round(fees,8),estimated_exit_fee=round(exit_fee,8),
                     mt5_swap=round(mt5_swap,8),binance_funding=round(funding,8),carry=round(carry,8),
@@ -165,6 +188,12 @@ class Engine:
         self.save('close_requested',{'group':group_id,'reason':reason})
 
     def close_group(self, g, q):
+        if g.get('imported') and hasattr(self,'before_import_close'):
+            self.before_import_close()
+            # Account reads can take longer than the quote budget. Wait for another tick.
+            if any(stamp()-int(q[leg]['time_ms'])>g['parameters']['max_quote_age_ms'] for leg in ('binance','mt5')):
+                self.state['alarm']='接管平仓核验完成时行情已过期，等待新报价'
+                return
         if not self.resolve(g): return
         amounts=self.amounts(g)
         if max(amounts.values())<1e-8:
@@ -195,6 +224,10 @@ class Engine:
             mt5_closed=max(0,before_m-after_m)
             if mt5_closed>1e-8:
                 self.order(g,'binance','close',min(before_b,mt5_closed),q)
+        if g.get('imported') and not self.uncertain(g):
+            after=self.amounts(g)
+            if after['mt5']<before_m-1e-8 and abs(after['mt5']-after['binance'])<1e-8:
+                g['attempts']=0
         if not self.uncertain(g) and max(self.amounts(g).values())<1e-8:
             g.update(status='closed',closed_ms=stamp(),exit=q['exit']);g['valuation']=self.valuation(g,q)
             self.save('group_closed',{'group':g['id'],'net_estimate':g['valuation']['net']})
@@ -210,10 +243,10 @@ class Engine:
             if g['status']=='opening':
                 if self.resolve(g): g['status']='unwinding';g['reason']='中断后的开仓组撤销'
             g['valuation']=self.valuation(g,q)
-        opened=[g for g in self.active() if g['status']=='open']
-        total=sum(g.get('valuation',{}).get('net',0) for g in self.active())
+        opened=[g for g in self.active() if g['status']=='open' and (not g.get('imported') or g.get('management_enabled'))]
+        total=sum(g.get('valuation',{}).get('net',0) for g in self.active() if not g.get('imported'))
         loss=c['strategy']['total_loss_enabled'] and total<=-c['strategy']['total_max_loss_usd']
-        basket=[g for g in opened if g['parameters']['exit_mode']=='basket']
+        basket=[g for g in opened if g['parameters']['exit_mode']=='basket' and not g.get('imported')]
         basket_exit=set()
         if basket:
             qty=sum(g['qty'] for g in basket); entry=sum(g['entry']*g['qty'] for g in basket)/qty
@@ -223,7 +256,9 @@ class Engine:
                 basket_exit={g['id'] for g in basket}
         for g in opened:
             s=g['parameters'];v=g['valuation'];reason=''
-            if loss: reason='本策略总浮动亏损上限'
+            if g.get('imported'):
+                if self.target(g,g['entry'],q['exit']) and v['net']>=s['min_net_profit_usd']: reason='接管篮子收窄并盈利'
+            elif loss: reason='本策略总浮动亏损上限'
             elif s['group_loss_enabled'] and v['net']<=-s['group_max_loss_usd']: reason='单组亏损上限'
             elif s['max_hold_minutes'] and stamp()-g['opened_ms']>=s['max_hold_minutes']*60000: reason='持仓超时'
             elif g['id'] in basket_exit: reason='整篮子止盈'
@@ -234,7 +269,7 @@ class Engine:
         for g in self.active():
             if g['status'] in ('closing','unwinding'):
                 exit_event=True;self.close_group(g,q)
-        s=c['strategy'];active=self.active();grid_index=0;open_threshold=s['entry_spread_usd'];grid_allowed=True
+        s=c['strategy'];all_active=self.active();active=[g for g in all_active if not g.get('imported')];grid_index=0;open_threshold=s['entry_spread_usd'];grid_allowed=True
         if s.get('grid_enabled') and active:
             # Grid additions are separate paired groups. They only continue
             # a homogeneous grid chain; unrelated/manual groups block adds.
@@ -244,9 +279,9 @@ class Engine:
                 grid_allowed=grid_index<=int(s['grid_max_adds'])
             else:
                 grid_allowed=False
-        if (self.state['enabled'] and not exit_event and all(g['status']=='open' for g in active)
+        if (self.state['enabled'] and not exit_event and all(g['status']=='open' for g in all_active)
             and grid_allowed and len(active)<s['max_groups']
-            and sum(g['lots'] for g in active)+p['lots']<=s['max_total_lots']+1e-9
+            and sum(g['lots'] for g in all_active)+p['lots']<=s['max_total_lots']+1e-9
             and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and q['entry']>=open_threshold):
             self.open(c,p,q,grid_index=grid_index)
 
