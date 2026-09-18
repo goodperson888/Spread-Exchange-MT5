@@ -65,7 +65,7 @@
 <label>最大单边敞口时间（毫秒）<input id="max-unhedged" type="number" value="1500"></label>
 <label>最大滑点（USD/盎司）<input id="slippage" type="number" step="0.1" value="0.5"></label>
 <label>签名请求有效窗口（毫秒）<input id="recv-window" type="number" value="1000"></label>
-</div><p class="note">签名请求窗口用于币安签名接口，不是行情刷新间隔。币安最优 Bid/Ask 优先使用 WebSocket，断开时回退 REST；MT5 使用持续终端会话轮询 tick。报价年龄、双边时钟偏差和单边敞口时间都会在执行前检查。</p></details>
+</div><p class="note">签名请求窗口用于币安签名接口，不是行情刷新间隔。币安最优 Bid/Ask 优先使用 WebSocket，断开时回退 REST；MT5 优先采用 EA 推送；EA 未接入或报价过期时使用持续终端会话轮询 tick。报价年龄、双边时钟偏差和单边敞口时间都会在执行前检查。</p></details>
 <div class="actions" id="legacy-paper-actions"><button id="paper-toggle" disabled>启动纸面引擎</button><button id="paper-step" disabled>推进一次纸面撮合</button><button id="paper-reset" disabled>重置纸面持仓</button></div>
 <div id="plan-result" class="result" role="status" aria-live="polite">检查 MT5 成功后会自动计算；连接币安后还会校验币安数量步长和最低名义金额。</div>
 </section>
@@ -88,10 +88,10 @@
 <label id="min-net-field"><span id="min-net-label">最低净收益（USD）</span><input id="min-net" type="number" value="0" min="0" step="0.01"></label>
 </div>
 <details><summary>高级连接与执行参数</summary><div class="grid">
-<label>策略计算间隔（毫秒）<input id="poll-ms" type="number" value="250" min="250" max="5000"></label>
+<label>兼容轮询间隔（毫秒）<input id="poll-ms" type="number" value="250" min="250" max="5000"></label>
 <label>平仓重试次数<input id="close-retries" type="number" value="3" min="1" max="5"></label>
 <label>MT5 策略识别码（Magic）<input id="magic" type="number" value="9121701" min="1" max="2147483647"></label>
-</div><p class="note">策略执行默认每 250 毫秒检查一次双边报价；实际成交还会受平台撮合、网络和滑点影响。图表仅限制到秒级缩放，不会改变监控、开平仓或成交判断频率。Magic 仅用于识别本策略下的 MT5 订单与持仓，防止程序误处理其他手工单或 EA 订单。正常使用保持默认值即可。</p></details>
+</div><p class="note">新报价会唤醒策略；此间隔只控制兼容轮询和无新报价时的定期检查，不限制 EA 推送或图表更新。订单仍串行执行，实际成交受平台撮合、网络和滑点影响。图表仅限制到秒级缩放，不会改变监控、开平仓或成交判断频率。Magic 仅用于识别本策略下的 MT5 订单与持仓，防止程序误处理其他手工单或 EA 订单。正常使用保持默认值即可。</p></details>
 <details><summary>净收益、止损与费用设置</summary><div class="grid">
 <label class="check"><input id="group-loss-on" type="checkbox"> 启用单组亏损退出</label>
 <label id="group-loss-field">单组最大亏损（USD）<input id="group-loss" type="number" value="50" min="0.01" step="0.01"></label>
