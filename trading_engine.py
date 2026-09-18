@@ -203,10 +203,15 @@ class Engine:
         if second['result']['status']=='done' and abs(second['result']['qty']-p['qty'])<1e-8:
             actual=self._record_spread(g,'open',q['entry'])
             threshold=min_entry_spread if min_entry_spread is not None else c['strategy']['entry_spread_usd']
-            if actual is None or actual < threshold:
-                g['status']='unwinding';g['reason']='两边成交后的实际价差低于开仓阈值';self.pause(g['reason']);self.close_group(g,second_q);return
+            if actual is None:
+                # Both legs reported full fills, but the pair basis could not
+                # be reconstructed. Keep the hedge untouched and require a
+                # reconciliation instead of churning fees with a blind close.
+                g['status']='attention';g['reason']='两边已成交但无法计算实际价差，请对账核验';self.pause(g['reason']);return
             g['status']='open';g['open_binance']=second['result']['price']
             g['entry_signal']=q['entry'];g['entry']=actual
+            if actual < threshold:
+                g['execution_warning']=f'实际成交价差 {actual:.6f} 低于触发阈值 {threshold:.6f}，按实际开仓价差管理；未反向平仓'
             self.save('group_opened',{'group':g['id'],'entry':g['entry']})
         else:
             g['status']='unwinding';g['reason']='币安拒单、部分成交或状态未知';self.pause(g['reason'])

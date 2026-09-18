@@ -90,6 +90,8 @@ class TradingRuntime:
         self.reconciled = False
         self.last_error = ''
         self.market_meta = {}
+        self._last_mt5_snapshot = None
+        self._last_mt5_snapshot_at = 0
         self.position_report = None
         self.adoption_preview = None
         self.engine.before_import_close = self._guard_import_close
@@ -215,6 +217,8 @@ class TradingRuntime:
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.engine.quote_provider = self._execution_quote
+            self._last_mt5_snapshot = snapshot if config['mt5']['adapter']=='native' else None
+            self._last_mt5_snapshot_at = time.monotonic()
             self.quote, self.connected, self.last_error = new_quote, True, ''
             self.market_meta = meta
             self.position_report = None
@@ -253,7 +257,7 @@ class TradingRuntime:
         if market is None: market=self.binance.quote(c['symbol'])
         if c['mt5']['adapter']=='paper': mt5=inspect_paper_terminal(c['mt5'])['quote']
         elif c['mt5']['adapter']=='mcp': mt5=self.terminal.call('snapshot')['quote']
-        else: mt5=self.terminal.call('snapshot')['quote']
+        else: mt5=self.terminal.call('quote')['quote']
         return self._quote(mt5,market,c)
 
     def _poll(self):
@@ -284,11 +288,18 @@ class TradingRuntime:
             result = self.terminal.call('snapshot')
             mt5 = result['quote']
         else:
-            result = self.terminal.call('snapshot')
-            if not result['allowed']:
-                raise ValueError('MT5 自动交易权限已关闭；已暂停开仓')
-            mt5 = result['quote']
-            self._update_live_carry(result['positions'])
+            # MT5 Python has no push callback/WebSocket. Keep the terminal
+            # session alive, read the latest tick every strategy cycle, and
+            # refresh account/positions less often for reconciliation and Swap.
+            if (self._last_mt5_snapshot is None or
+                    time.monotonic()-self._last_mt5_snapshot_at >= 2):
+                self._last_mt5_snapshot = self.terminal.call('snapshot')
+                self._last_mt5_snapshot_at = time.monotonic()
+                if not self._last_mt5_snapshot['allowed']:
+                    raise ValueError('MT5 自动交易权限已关闭；已暂停开仓')
+                self._update_live_carry(self._last_mt5_snapshot['positions'])
+            tick=self.terminal.call('quote')
+            mt5 = tick['quote']
         q = self._quote(mt5, market)
         self.quote = q
         self.store.sample(q)

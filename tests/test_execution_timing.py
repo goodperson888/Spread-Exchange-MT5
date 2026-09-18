@@ -54,17 +54,20 @@ class ExecutionTimingTests(unittest.TestCase):
         b=next(o for o in e.state['orders'] if o['leg']=='binance' and o['action']=='open')
         self.assertEqual(b['reference'],fresh['binance']['bid'])
 
-    def test_actual_entry_below_threshold_unwinds_instead_of_opening(self):
+    def test_actual_entry_below_threshold_keeps_group_and_warns(self):
         class BadFill(SlippageBroker):
             def submit(self, order):
                 r=super().submit(order)
                 if order['leg']=='binance' and order['action']=='open':r['price']=4304.7
                 return r
         e=Engine(self.store,BadFill());e.start(self.c);e.tick(self.c,self.plan,quote(self.c))
-        self.assertEqual(e.active(),[])
-        g=e.state['groups'][0]
-        self.assertIn('实际价差',g['reason'])
-        self.assertTrue(any(o['action']=='close' for o in e.state['orders']))
+        active=e.active()
+        self.assertEqual(len(active),1)
+        g=active[0]
+        self.assertEqual(g['status'],'open')
+        self.assertIn('低于触发阈值',g.get('execution_warning',''))
+        self.assertTrue(e.state['enabled'])
+        self.assertFalse(any(o['action']=='close' for o in e.state['orders']))
 
 
 if __name__=='__main__':unittest.main()

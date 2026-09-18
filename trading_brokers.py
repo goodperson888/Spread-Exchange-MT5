@@ -377,7 +377,11 @@ def worker_main():
             else:
                 a,t=identity(); s=mt.symbol_info(settings['symbol'])
                 if not s: raise ValueError('MT5 品种不可用')
-                if cmd=='snapshot':
+                if cmd=='quote':
+                    tick=mt.symbol_info_tick(s.name)
+                    if not tick: raise ValueError('MT5 报价读取失败')
+                    data=dict(quote=dict(bid=tick.bid,ask=tick.ask,time_ms=tick.time_msc))
+                elif cmd=='snapshot':
                     tick=mt.symbol_info_tick(s.name)
                     positions=mt.positions_get(symbol=s.name)
                     pending=mt.orders_get(symbol=s.name)
