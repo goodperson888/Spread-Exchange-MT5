@@ -63,6 +63,8 @@ class Engine:
                reference=reference,limit=reference+(-slip if sell else slip),slippage=slip,
                fx=q.get('usdt_usd',g['costs']['usdt_usd']),
                created_ms=stamp(),result={'status':'unknown','qty':0,'price':0})
+        o['signal_spread']=q.get('entry' if action=='open' else 'exit')
+        o['signal_time_ms']=q.get('time_ms')
         if leg=='binance':
             # The strategy always opens and closes the Binance SHORT leg.
             # The broker adds this only when the account is in Hedge Mode.
@@ -86,8 +88,29 @@ class Engine:
         except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
         # Never let an invalid result look like a completed zero-volume fill.
         if not self.result_valid(result,qty): result=dict(status='unknown',qty=0,price=0,error='成交回报无效，等待对账')
+        if result.get('status')=='done' and float(result.get('qty',0))>0:
+            result['fill_time_ms']=stamp()
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
         return o
+
+    def _record_spread(self, g, action, signal=None):
+        rows=[o for o in self.state['orders'] if o['group']==g['id'] and o['action']==action
+              and o.get('result',{}).get('qty',0)>0]
+        b=[o for o in rows if o['leg']=='binance'];m=[o for o in rows if o['leg']=='mt5']
+        if not b or not m: return None
+        bqty=sum(float(o['result']['qty']) for o in b);mqty=sum(float(o['result']['qty']) for o in m)
+        if bqty<=0 or mqty<=0: return None
+        bprice=sum(float(o['result']['qty'])*float(o['result']['price']) for o in b)/bqty
+        mprice=sum(float(o['result']['qty'])*float(o['result']['price']) for o in m)/mqty
+        fx=sum(float(o.get('fx',g['costs']['usdt_usd']))*float(o['result']['qty']) for o in b)/bqty
+        actual=bprice*fx-mprice
+        if signal is None:
+            signal=next((o.get('signal_spread') for o in rows if o.get('signal_spread') is not None),None)
+        for o in rows:
+            if signal is not None: o['signal_spread']=signal
+            o['actual_spread']=actual
+            o['spread_slippage']=actual-signal if signal is not None else None
+        return actual
 
     def mt5_tickets(self, g):
         result={}
@@ -150,7 +173,7 @@ class Engine:
                     net=round(gross-fees-exit_fee+carry,8),remaining=owned,
                     costs_verified=verified,estimated=not flat or (g['mode']!='paper' and not verified))
 
-    def open(self, c, p, q, grid_index=0):
+    def open(self, c, p, q, grid_index=0, min_entry_spread=None):
         now=stamp()
         g=dict(id=uuid.uuid4().hex[:12],status='opening',opened_ms=now,qty=p['qty'],lots=p['lots'],contract=p['contract'],
             symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],mode=c['execution']['mode'],
@@ -168,10 +191,22 @@ class Engine:
         if stamp()-now>c['strategy']['max_unhedged_ms'] or not valid_quote(q,c):
             g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期';self.pause(g['reason'])
             self.close_group(g,q);return
-        second=self.order(g,'binance','open',p['qty'],q)
+        second_q=q
+        provider=getattr(self,'quote_provider',None)
+        if provider:
+            try: second_q=provider()
+            except Exception as exc:
+                g['status']='unwinding';g['reason']='第二腿前无法取得新报价：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return
+            if stamp()-now>c['strategy']['max_unhedged_ms'] or not valid_quote(second_q,c):
+                g['status']='unwinding';g['reason']='第一腿成交后报价过期或超出敞口期限';self.pause(g['reason']);self.close_group(g,second_q);return
+        second=self.order(g,'binance','open',p['qty'],second_q)
         if second['result']['status']=='done' and abs(second['result']['qty']-p['qty'])<1e-8:
+            actual=self._record_spread(g,'open',q['entry'])
+            threshold=min_entry_spread if min_entry_spread is not None else c['strategy']['entry_spread_usd']
+            if actual is None or actual < threshold:
+                g['status']='unwinding';g['reason']='两边成交后的实际价差低于开仓阈值';self.pause(g['reason']);self.close_group(g,second_q);return
             g['status']='open';g['open_binance']=second['result']['price']
-            g['entry']=second['result']['price']*second.get('fx',c['costs']['usdt_usd'])-first['result']['price']
+            g['entry_signal']=q['entry'];g['entry']=actual
             self.save('group_opened',{'group':g['id'],'entry':g['entry']})
         else:
             g['status']='unwinding';g['reason']='币安拒单、部分成交或状态未知';self.pause(g['reason'])
@@ -197,7 +232,8 @@ class Engine:
         if not self.resolve(g): return
         amounts=self.amounts(g)
         if max(amounts.values())<1e-8:
-            g.update(status='closed',closed_ms=stamp(),exit=q['exit']);g['valuation']=self.valuation(g,q)
+            actual=self._record_spread(g,'close',g.get('exit_signal',q['exit']))
+            g.update(status='closed',closed_ms=stamp(),exit=actual if actual is not None else q['exit']);g['valuation']=self.valuation(g,q)
             self.save('group_closed',{'group':g['id'],'net_estimate':g['valuation']['net']});return
         if g['attempts']>=g['retry_limit']:
             g['status']='attention';self.pause('减仓重试达到上限，仍有敞口；请检查账户后使用“重试平仓”');return
@@ -264,7 +300,7 @@ class Engine:
             elif g['id'] in basket_exit: reason='整篮子止盈'
             elif s['exit_mode']=='group' and self.target(g,g['entry'],q['exit']) and (not s['require_net_profit'] or v['net']>=s['min_net_profit_usd']): reason='逐组止盈'
             if reason:
-                g.update(status='closing',reason=reason);exit_event=True;self.save('exit_signal',{'group':g['id'],'reason':reason})
+                g.update(status='closing',reason=reason,exit_signal=q['exit']);exit_event=True;self.save('exit_signal',{'group':g['id'],'reason':reason,'signal_spread':q['exit']})
                 if reason in ('本策略总浮动亏损上限','单组亏损上限'): self.pause(reason)
         for g in self.active():
             if g['status'] in ('closing','unwinding'):
@@ -283,7 +319,7 @@ class Engine:
             and grid_allowed and len(active)<s['max_groups']
             and sum(g['lots'] for g in all_active)+p['lots']<=s['max_total_lots']+1e-9
             and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and q['entry']>=open_threshold):
-            self.open(c,p,q,grid_index=grid_index)
+            self.open(c,p,q,grid_index=grid_index,min_entry_spread=open_threshold)
 
     @staticmethod
     def target(g, entry, exit_spread):

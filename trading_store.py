@@ -35,10 +35,14 @@ class Store:
 
     def sample(self, quote):
         with self.lock, self.db:
-            self.db.execute('INSERT OR REPLACE INTO quotes VALUES (?,?,?)',
+            # The timestamp is the sample identity. A duplicate timestamp must
+            # not mutate an already-rendered historical point.
+            self.db.execute('INSERT OR IGNORE INTO quotes VALUES (?,?,?)',
                             (quote['time_ms'], quote['key'], json.dumps(quote, allow_nan=False)))
             bucket = quote['time_ms'] - quote['time_ms'] % 60000
-            self.db.execute('INSERT OR REPLACE INTO quote_minutes VALUES (?,?,?)',
+            # Archive points are immutable. High-frequency rows remain in
+            # `quotes` for the recent window; never rewrite a prior minute.
+            self.db.execute('INSERT OR IGNORE INTO quote_minutes VALUES (?,?,?)',
                             (bucket, quote['key'], json.dumps(quote, allow_nan=False)))
             now = int(time.time()*1000)
             if now - self.last_cleanup >= 60000:

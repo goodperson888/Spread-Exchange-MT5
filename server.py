@@ -214,6 +214,7 @@ class TradingRuntime:
             old_stream = self.market_stream
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
             self.plan, self.config, self.engine.broker = new_plan, config, broker
+            self.engine.quote_provider = self._execution_quote
             self.quote, self.connected, self.last_error = new_quote, True, ''
             self.market_meta = meta
             self.position_report = None
@@ -244,6 +245,16 @@ class TradingRuntime:
             'entry': binance['bid'] * fx - mt5['ask'],
             'exit': binance['ask'] * fx - mt5['bid'],
         }
+
+    def _execution_quote(self):
+        """Read a fresh executable quote between the two paired legs."""
+        c=self.config
+        market=self.market_stream.quote(max_age_ms=c['strategy']['max_quote_age_ms']) if self.market_stream else None
+        if market is None: market=self.binance.quote(c['symbol'])
+        if c['mt5']['adapter']=='paper': mt5=inspect_paper_terminal(c['mt5'])['quote']
+        elif c['mt5']['adapter']=='mcp': mt5=self.terminal.call('snapshot')['quote']
+        else: mt5=self.terminal.call('snapshot')['quote']
+        return self._quote(mt5,market,c)
 
     def _poll(self):
         c = self.config
@@ -489,6 +500,9 @@ class TradingRuntime:
                 raise ValueError('请先完成持仓对账，再请求平仓')
             if not self.quote:
                 raise ValueError('尚无可用报价，不能请求平仓')
+            for g in self.engine.active():
+                if group is None or g['id']==group:
+                    g['exit_signal']=self.quote.get('exit')
             self.engine.request_close(group, reason)
             # One immediate attempt; the background loop performs retries.
             self.engine.tick(self.config, self.plan, self.quote)
