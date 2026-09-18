@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 // Execute the actual button handlers without contacting any trading account.
 function pageFixture(reconcileFails = false, handlers = {}) {
-  const elements = new Map(), calls = [];
+  const elements = new Map(), calls = [], charts=[];
   const el = id => {
     if (!elements.has(id)) elements.set(id, {
       tagName:'BUTTON', value:'', textContent:'', innerHTML:'', dataset:{},
@@ -21,12 +21,12 @@ function pageFixture(reconcileFails = false, handlers = {}) {
     document:{getElementById:el}, window:{addEventListener(){}},
     loaded:false, saveConfig:async()=>{}, AbortController,
     setTimeout(){}, clearTimeout(){}, setInterval(){},
-    echarts:{init:()=>({getOption:()=>({}), setOption(){}})},
+    echarts:{init:()=>({getOption:()=>({}), setOption(option){charts.push(option);}})},
     fetch:async (url, options) => {
       calls.push({url, ...options});
       const action = url.split('/').at(-1);
       let body = {}, status = 200;
-      if (handlers[url]) body=handlers[url](JSON.parse(options.body));
+      if (handlers[url]) body=handlers[url](options.body===undefined?undefined:JSON.parse(options.body));
       else if (['reconcile','start','pause'].includes(action)) {
         if (options.method !== 'POST') {status=404; body={error:'未找到'};}
         else if (action==='reconcile' && reconcileFails) {status=400; body={error:'持仓不一致'};}
@@ -42,7 +42,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
       return {ok:status===200, json:async()=>body};
     }
   });
-  return {el, calls};
+  return {el, calls, charts};
 }
 
 test('reconcile, start and pause buttons send POST; chart remains GET', async () => {
@@ -75,9 +75,10 @@ test('failed reconcile refreshes status and preserves the actionable error', asy
 
 test('adoption buttons send explicit POST, confirmation stays paused, management is separate', async () => {
   const group={id:'old-basket',imported:true,management_enabled:false,status:'open',mode:'live',
-    entry:6,qty:1,lots:.01,parameters:{take_contraction_usd:2,min_net_profit_usd:0}};
+    entry:6,qty:1,lots:.01,opened_ms:1500,parameters:{take_contraction_usd:2,min_net_profit_usd:0}};
   const status=()=>({state:{enabled:false,groups:[group],orders:[]}});
-  const {el,calls}=pageFixture(false,{
+  const {el,calls,charts}=pageFixture(false,{
+    '/api/trading/chart?minutes=0':()=>({samples:[{time_ms:1000,entry:6,exit:7},{time_ms:2000,entry:5,exit:6}]}),
     '/api/trading/adoption/preview':body=>{
       assert.deepEqual(body.tickets,['123']);assert.equal(body.entry_fx,'1');
       return {preview:{...group,positions:[{ticket:'123'}],entry_fx:1,binance_entry:4306,mt5_entry:4300,
@@ -99,4 +100,9 @@ test('adoption buttons send explicit POST, confirmation stays paused, management
   await el('adoption-manage').onclick();
   assert.equal(el('adoption-manage').textContent,'启动已有仓位管理');
   assert.ok(calls.every(c=>c.method==='POST' && c.url.startsWith('/api/trading/adoption/')));
+  await el('chart-latest').onclick();
+  await new Promise(setImmediate);
+  assert.doesNotMatch(el('trading-result').textContent,/本次操作未完成/);
+  assert.equal(charts.at(-1).series.find(s=>s.id==='open').data.length,0);
+  assert.ok(charts.at(-1).series[0].markLine.data.some(x=>x.name.includes('旧仓')&&x.name.includes('暂停')));
 });

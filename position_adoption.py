@@ -108,7 +108,7 @@ def register(engine, config, proposal, at):
     before = copy.deepcopy(engine.state)
     try:
         engine.state['groups'].append(g); engine.state['orders'].extend(orders)
-        engine.state.update(enabled=False, recovery=True)
+        engine.state.update(enabled=False, recovery=True, mode='live', key=p['key'])
         engine.save('positions_adopted', {'group': g['id'], 'tickets': [str(x['ticket']) for x in p['positions']]})
     except Exception:
         engine.state = before

@@ -226,13 +226,13 @@
     const samples=r.samples||[];
     if(!chart) chart=echarts.init(el('spread-chart'));
     const groups=last?.state?.groups||[];
-    const marks=groups.filter(g=>g.status!=='closed').map(g=>({name:'#'+g.id+' 止盈',yAxis:g.parameters.target_mode==='absolute'?g.parameters.exit_spread_usd:g.entry-g.parameters.take_contraction_usd}));
+    const marks=groups.filter(g=>g.status!=='closed').map(g=>({name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported&&!g.management_enabled?' 目标（暂停）':' 止盈'),yAxis:g.parameters.target_mode==='absolute'?g.parameters.exit_spread_usd:g.entry-g.parameters.take_contraction_usd}));
     const expected=samples.length>1?(samples.at(-1).time_ms-samples[0].time_ms)/(samples.length-1):0;
     const lines=[];let previous;
     for(const x of samples){if(previous&&x.time_ms-previous.time_ms>Math.max(10000,expected*6))lines.push({time_ms:previous.time_ms+1,entry:null,exit:null});lines.push(x);previous=x;}
     const nearest=(at,field)=>{let best=null,distance=Infinity;for(const x of samples){const d=Math.abs(x.time_ms-at);if(d<distance){best=x;distance=d;}}return best&&Number.isFinite(best[field])?[at,best[field]]:null;};
     const firstTime=samples[0]?.time_ms??0,lastTime=samples.at(-1)?.time_ms??0;
-    const opened=groups.filter(g=>g.opened_ms>=firstTime&&g.opened_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.opened_ms,g.entry]}));
+    const opened=groups.filter(g=>!g.imported&&g.opened_ms>=firstTime&&g.opened_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.opened_ms,g.entry]}));
     const closed=groups.filter(g=>g.closed_ms>=firstTime&&g.closed_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.closed_ms,Number.isFinite(g.exit)?g.exit:nearest(g.closed_ms,'exit')?.[1]]})).filter(x=>Number.isFinite(x.value[1]));
     const entries=samples.map(x=>x.entry).filter(Number.isFinite), exits=samples.map(x=>x.exit).filter(Number.isFinite);
     const average=values=>values.length?values.reduce((a,b)=>a+b,0)/values.length:null;
