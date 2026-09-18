@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -28,3 +28,21 @@ jobs:
           path: dist/GoldPairLocal-Windows.zip
           if-no-files-found: error
           retention-days: 14
+      - name: Publish online download link
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="windows-build-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" dist/GoldPairLocal-Windows.zip \
+            --title "GoldPairLocal Windows build ${GITHUB_RUN_NUMBER}" \
+            --notes "Built from ${GITHUB_SHA}. Test with a logged-in MT5 terminal before live use." \
+            --target "${GITHUB_SHA}"
+          link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${tag}/GoldPairLocal-Windows.zip"
+          {
+            echo "## Windows package"
+            echo
+            echo "[Download GoldPairLocal-Windows.zip](${link})"
+            echo
+            echo "This link is the release asset for this build."
+          } >> "$GITHUB_STEP_SUMMARY"

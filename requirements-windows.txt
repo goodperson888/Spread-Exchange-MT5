@@ -1,4 +1,7 @@
 # Runtime component is packaged into the executable, not installed by end users.
 MetaTrader5==5.0.6180; sys_platform == 'win32'
+# MetaTrader5 imports NumPy at runtime; pin it so the frozen EXE has the
+# matching binary dependency instead of failing during the package self-test.
+numpy==1.26.4; sys_platform == 'win32'
 PyInstaller==6.22.3; sys_platform == 'win32'
 websocket-client==1.9.0
