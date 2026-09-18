@@ -3,7 +3,7 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>黄金双边自动交易 · 本机</title><link rel="stylesheet" href="style.css"></head>
 <body><main>
-<header><div><p class="eyebrow">XAUUSDT × MT5 · LOCAL</p><h1>黄金双边自动交易</h1><p class="muted">本机连接与配置 · 无需 EA、独立桥接器或局域网服务</p></div><span id="connection" class="badge">连接本机应用…</span></header>
+<header><div><p class="eyebrow">XAUUSDT × MT5 · LOCAL</p><h1>黄金双边自动交易</h1><p class="muted">本机连接与配置 · 可选 EA 实时行情推送 · 不开放局域网</p></div><span id="connection" class="badge">连接本机应用…</span></header>
 <section class="notice"><strong>先纸面、再实盘</strong><span>Mac 可通过本机 MT5 MCP 读取真实行情，但只做纸面成交；实盘须在 Windows 的已登录 MT5 终端运行。进入实盘前，必须连接、对账并由用户点击启动自动开仓。</span></section>
 <section class="panel" aria-labelledby="setup-heading">
 <div class="heading"><div><p class="eyebrow">01 · MT5 适配器</p><h2 id="setup-heading">选择验证方式，然后检查</h2></div><button id="check-mt5" class="primary" disabled>检查 MT5 连接</button></div>
@@ -19,6 +19,7 @@
 <label>MCP Token（本机保存，刷新后保留）<span class="secret-input"><input id="mt5-mcp-token" type="password" autocomplete="off" placeholder="或启动前设置 MT5_TERMINAL_MCP_TOKEN"><button class="secret-toggle" type="button" data-toggle-secret="mt5-mcp-token" aria-controls="mt5-mcp-token" aria-label="显示 MCP Token" aria-pressed="false" title="显示 MCP Token"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 </div>
 <details id="native-path-fields"><summary>多个 Windows MT5 终端时指定路径</summary><label>MT5终端路径<input id="terminal-path" placeholder="C:\Program Files\经纪商 MT5\terminal64.exe" maxlength="1000"></label></details>
+<details class="risk-details"><summary>加速行情：MT5 EA 实时推送</summary><p class="note">EA 只推送行情，不下单。挂到对应黄金图表后，有新报价就发送到本机应用；未接入时继续使用轮询兼容。Mac 可配合 MCP 做纸面验证；Windows 仍使用原生适配器执行订单。</p><button id="push-setup" type="button">准备 EA 与本机参数</button><p id="push-result" class="note" role="status">先检查并应用 MT5 账号和品种，再准备参数。MT5 → 工具 → 选项 → EA 交易中允许访问 http://127.0.0.1；参数文件包含本机行情口令，请勿分享。</p></details>
 <div id="mt5-result" class="result" role="status" aria-live="polite">尚未检查。检查会保存上方 MT5 配置，然后读取本机终端；不会提交交易。</div>
 <div class="grid" aria-label="MT5自动读取规格">
 <label>每手盎司<input id="contract" readonly placeholder="检查后自动读取"></label>
@@ -110,7 +111,8 @@
 <details class="risk-details"><summary>风控与异常处理</summary><p class="note">系统会在开仓前检查报价年龄、双边时差、最大滑点、单边敞口时间、账户权限、保证金、数量步长、持仓模式和持仓对账。交易组数、总手数、网格次数、冷却时间、最低净收益、单组/总亏损和最长持仓也会限制策略。</p><p class="note">任一边部分成交、拒单、超时或回报不确定时，系统暂停新开仓，查询平台状态并按已成交数量处理，不盲目重发；行情或交易通道异常会自动停开仓。页面的“自动执行”状态、交易结果、订单流水和事件日志会显示告警与处理结果。浏览器关闭后不会发送外部通知。</p></details>
 </section>
 <section class="panel" aria-labelledby="chart-heading">
-<div class="heading"><div><p class="eyebrow">05 · 实时与历史价差</p><h2 id="chart-heading">真实可成交方向监控</h2><p class="muted">入场线：卖币安 Bid、买 MT5 Ask；退出线：买回币安 Ask、卖出 MT5 Bid。已完成分钟归档点不会被后续采样改写，最右侧当前分钟和实时点会继续增长；缩放最低到 1 秒，策略计算仍按 250 毫秒运行。</p></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
+<div class="heading"><div><p class="eyebrow">05 · 实时与历史价差</p><h2 id="chart-heading">真实可成交方向监控</h2><p class="muted">入场线：卖币安 Bid、买 MT5 Ask；退出线：买回币安 Ask、卖出 MT5 Bid。已完成分钟归档点不会被后续采样改写，最右侧当前分钟和实时点会继续增长；缩放最低到 1 秒；EA 接入后由新报价唤醒策略，订单串行执行，图表长连接推送，按浏览器绘制帧更新。历史稀疏展示，最近一分钟保留逐报价曲线。</p></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
+<p id="quote-latency" class="note">行情到达即推送图表；绘制随浏览器帧率合并，不限制策略计算速度。</p>
 <p id="quote-summary" class="state">等待双边行情。</p><span id="chart-live-status" class="badge neutral">未连接 · 图表保留历史</span>
 <div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>
 <div class="chart-wrap"><div id="spread-chart" class="chart" role="img" aria-label="入场与退出可成交价差历史折线图"></div><p id="chart-empty" class="chart-empty">连接后开始积累可成交价差历史。</p></div>
@@ -143,4 +145,4 @@
 </details>
 <section class="records" aria-labelledby="group-records-heading"><div class="subheading"><div><p class="eyebrow">06 · 收益与订单</p><h3 id="group-records-heading">交易组收益记录</h3></div><span class="note">实盘平仓后会用平台成交与费用记录复核</span></div><div id="pnl-stats" class="stats" aria-label="交易收益摘要"></div><div id="groups" class="table-wrap"></div><h3>双边订单流水</h3><div id="orders" class="table-wrap"></div><details><summary>技术事件日志</summary><div id="trade-events" class="events"></div></details></section>
 </section>
-</main><script src="echarts.min.js"></script><script src="app.js"></script><script src="trading-app.js"></script></body></html>
+</main><script src="echarts.min.js"></script><script src="app.js"></script><script src="quote-stream.js"></script><script src="trading-app.js"></script></body></html>

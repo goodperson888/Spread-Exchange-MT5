@@ -12,6 +12,8 @@ import hashlib
 import os
 import sys
 import tempfile
+import secrets
+import socket
 from decimal import Decimal
 import threading
 import time
@@ -28,9 +30,11 @@ from trading_config import validate as validate_trading, plan as executable_plan
 from trading_engine import Engine
 from trading_store import Store
 import position_adoption
+from market_push import PushBridge, QuoteEvents, QuotePump
 
 ROOT = Path(__file__).resolve().parent
 DATA = (Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GoldPairLocal') if getattr(sys, 'frozen', False) else ROOT / 'data'
+DATA = Path(os.environ.get('GOLD_PAIR_DATA_DIR', str(DATA)))
 DATA.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = DATA / "config.json"
 STATE_PATH = DATA / "state.json"
@@ -90,6 +94,10 @@ class TradingRuntime:
         self.reconciled = False
         self.last_error = ''
         self.market_meta = {}
+        self.quote_events = QuoteEvents()
+        self.market_wake = threading.Event()
+        self.pump = None
+        self.push_bridge = None
         self._last_mt5_snapshot = None
         self._last_mt5_snapshot_at = 0
         self.position_report = None
@@ -105,6 +113,9 @@ class TradingRuntime:
 
     def close(self):
         self.stop_event.set()
+        self.market_wake.set()
+        if self.pump: self.pump.close()
+        if self.push_bridge: self.push_bridge.close()
         if self.terminal:
             self.terminal.close()
         if self.market_stream:
@@ -212,6 +223,7 @@ class TradingRuntime:
                     new_terminal.close()
                 raise
 
+            if self.pump: self.pump.close()
             old_terminal = self.terminal
             old_stream = self.market_stream
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
@@ -233,6 +245,18 @@ class TradingRuntime:
             if mode == 'live':
                 self.engine.pause('实盘连接已建立，启动前必须完成持仓对账')
             self.store.sample(self.quote)
+            self.quote_events.publish(self.quote)
+            # Intake persists/pushes quotes without taking the order execution lock.
+            def publish(q):
+                self.store.sample(q)
+                self.quote_events.publish(q)
+            if self.push_bridge is None and (DATA / 'quote-push.json').exists():
+                try: self._start_push_bridge()
+                except OSError as exc: self.market_meta['push_warning']='EA 接收器未启动：'+str(exc)
+            self.pump = QuotePump(config, new_binance, new_stream, new_terminal, self.push_bridge,
+                                  inspect_paper_terminal, publish, self.market_wake)
+            self.pump.last_stamp = self.quote['time_ms']
+            self.pump.start()
             if old_terminal and old_terminal is not new_terminal:
                 old_terminal.close()
             if old_stream and old_stream is not new_stream:
@@ -250,64 +274,75 @@ class TradingRuntime:
             'exit': binance['ask'] * fx - mt5['bid'],
         }
 
+    def _start_push_bridge(self):
+        if self.push_bridge: return
+        path = DATA / 'quote-push.json'
+        settings = read_json(path, {})
+        if not settings.get('token'):
+            settings = {'token': secrets.token_hex(32), 'port': 8767}
+            atomic_write_json(path, settings)
+            try: path.chmod(0o600)
+            except OSError: pass
+        def notify():
+            if self.pump: self.pump.changed.set()
+        self.push_bridge = PushBridge(settings['token'], int(settings.get('port',8767)), notify).start()
+        if self.pump: self.pump.bridge = self.push_bridge
+
+    def push_setup(self):
+        with self.lock:
+            self._start_push_bridge()
+            c = self.config or load_config()
+            return dict(port=self.push_bridge.port, token=self.push_bridge.token,
+                        account=c['mt5'].get('account',''), server=c['mt5'].get('server',''),
+                        symbol=c['mt5'].get('symbol',''), source='/GoldPairQuotes.mq5',
+                        binary='/GoldPairQuotes.ex5' if (ROOT/'mt5/GoldPairQuotes.ex5').exists() else None)
+
     def _execution_quote(self):
-        """Read a fresh executable quote between the two paired legs."""
+        """Use the latest push tick between legs, falling back to a fresh native read."""
         c=self.config
+        mt5=self.push_bridge.quote(c['mt5'], c['strategy']['max_quote_age_ms']) if self.push_bridge else None
+        if c['mt5']['adapter']=='paper': mt5=None
+        if mt5 is None:
+            if c['mt5']['adapter']=='paper': mt5=inspect_paper_terminal(c['mt5'])['quote']
+            elif c['mt5']['adapter']=='mcp': mt5=self.terminal.call('snapshot')['quote']
+            else: mt5=self.terminal.call('quote')['quote']
         market=self.market_stream.quote(max_age_ms=c['strategy']['max_quote_age_ms']) if self.market_stream else None
         if market is None: market=self.binance.quote(c['symbol'])
-        if c['mt5']['adapter']=='paper': mt5=inspect_paper_terminal(c['mt5'])['quote']
-        elif c['mt5']['adapter']=='mcp': mt5=self.terminal.call('snapshot')['quote']
-        else: mt5=self.terminal.call('quote')['quote']
         return self._quote(mt5,market,c)
 
     def _poll(self):
         c = self.config
-        if c['costs']['usdt_usd_auto'] and time.monotonic()-self._last_fx_refresh>=30:
-            try:
-                fx=self.binance.usdt_usd();c['costs']['usdt_usd']=fx['value'];self.market_meta['fx']=fx
-                self._last_fx_refresh=time.monotonic()
-            except Exception as exc:
-                self.market_meta['fx_warning']='USDT/USD 更新失败，暂用上次数值：'+str(exc)
-                self._last_fx_refresh=time.monotonic()
-        market = self.market_stream.quote(max_age_ms=c['strategy']['max_quote_age_ms']) if self.market_stream else None
-        if market is None:
-            if self._last_rest_market and time.monotonic()-self._last_rest_market_at<1:
-                market = self._last_rest_market
-            else:
-                market = self.binance.quote(c['symbol'])
-                self._last_rest_market,self._last_rest_market_at=market,time.monotonic()
-            self.market_meta['binance_transport']='REST 回退（WebSocket 正在重连）'
-        else:
-            self.market_meta['binance_transport']='WebSocket bookTicker'
-        if c['mt5']['adapter'] == 'paper':
-            result = inspect_paper_terminal(c['mt5'])
-            if not result.get('connected'):
-                raise ValueError(result.get('message', '本地模拟 MT5 报价失效'))
-            mt5 = result['quote']
-        elif c['mt5']['adapter'] == 'mcp':
-            result = self.terminal.call('snapshot')
-            mt5 = result['quote']
-        else:
-            # MT5 Python has no push callback/WebSocket. Keep the terminal
-            # session alive, read the latest tick every strategy cycle, and
-            # refresh account/positions less often for reconciliation and Swap.
-            if (self._last_mt5_snapshot is None or
-                    time.monotonic()-self._last_mt5_snapshot_at >= 2):
-                self._last_mt5_snapshot = self.terminal.call('snapshot')
-                self._last_mt5_snapshot_at = time.monotonic()
-                if not self._last_mt5_snapshot['allowed']:
-                    raise ValueError('MT5 自动交易权限已关闭；已暂停开仓')
-                self._update_live_carry(self._last_mt5_snapshot['positions'])
-            tick=self.terminal.call('quote')
-            mt5 = tick['quote']
-        q = self._quote(mt5, market)
+        q, version, error = self.pump.read()
+        if error: raise ValueError(error)
+        if q is None: return
         self.quote = q
-        self.store.sample(q)
+        self.market_meta['mt5_transport'] = self.pump.mt5_transport
+        self.market_meta['binance_transport'] = self.pump.binance_transport
+        self.market_meta['strategy_trigger'] = '报价事件驱动；订单串行执行'
         if c['execution']['mode']=='paper' or self.reconciled:
             if any(g.get('imported') for g in self.engine.active()) and time.monotonic()-getattr(self,'_last_import_check',0)>=2:
                 self._guard_import_close()
                 self._last_import_check=time.monotonic()
+            # Slow account reads above must not leave the strategy using an old sample.
+            q, version, error = self.pump.read()
+            if error: raise ValueError(error)
+            self.quote = q
             self.engine.tick(c, self.plan, q)
+        # Maintenance is separate from quote intake. It can delay a strategy pass,
+        # but cannot freeze push reception or the chart; the next pass reads latest.
+        if c['mt5']['adapter']=='native' and time.monotonic()-self._last_mt5_snapshot_at>=2:
+            self._last_mt5_snapshot = self.terminal.call('snapshot')
+            self._last_mt5_snapshot_at = time.monotonic()
+            if not self._last_mt5_snapshot['allowed']:
+                raise ValueError('MT5 自动交易权限已关闭；已暂停开仓')
+            self._update_live_carry(self._last_mt5_snapshot['positions'])
+        if c['costs']['usdt_usd_auto'] and time.monotonic()-self._last_fx_refresh>=30:
+            try:
+                fx=self.binance.usdt_usd();c['costs']['usdt_usd']=fx['value'];self.market_meta['fx']=fx
+                self.market_meta.pop('fx_warning',None)
+            except Exception as exc:
+                self.market_meta['fx_warning']='USDT/USD 更新失败，暂用上次数值：'+str(exc)
+            self._last_fx_refresh=time.monotonic()
         self._verify_closed_costs()
 
     def _update_live_carry(self, positions):
@@ -456,13 +491,15 @@ class TradingRuntime:
         self.engine.save('adoption_closing_costs_checked',{'group':group['id']})
 
     def _loop(self):
-        while not self.stop_event.wait(.1):
+        while not self.stop_event.is_set():
+            changed = self.market_wake.wait(.1)
+            self.market_wake.clear()
             with self.lock:
                 if not self.connected or not self.config:
                     continue
                 poll = self.config['execution']['poll_ms'] / 1000
                 last = getattr(self, '_last_poll', 0)
-                if time.monotonic() - last < poll:
+                if not changed and time.monotonic() - last < poll:
                     continue
                 self._last_poll = time.monotonic()
                 try:
@@ -721,9 +758,9 @@ class TradingRuntime:
             st = self.engine.state
             return {
                 'connected': self.connected, 'last_error': self.last_error,
-                'quote': self.quote, 'plan': self.plan,
+                'quote': (self.pump.read()[0] if getattr(self,'pump',None) else None) or self.quote, 'plan': self.plan,
                 'state': st, 'events': self.store.events(),
-                'auto_values': self.market_meta,
+                'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,
                 'capabilities': {'live_orders': bool(self.config and self.config['execution']['mode'] == 'live'),
                                  'mode': self.config['execution']['mode'] if self.config else 'paper',
@@ -980,6 +1017,38 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def quote_stream(self):
+        origin = self.headers.get('Origin')
+        if origin and origin not in (f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}'):
+            self.send_json({'ok':False,'error':'仅接受本机页面'},403);return
+        hub = TRADING.quote_events
+        raw = self.headers.get('Last-Event-ID','')
+        try:
+            epoch, number = raw.split(':',1)
+            cursor = int(number) if epoch==hub.epoch else -1
+        except (ValueError, TypeError): cursor = -1
+        self.send_response(200)
+        self.send_header('Content-Type','text/event-stream; charset=utf-8')
+        self.send_header('Cache-Control','no-cache, no-transform')
+        self.send_header('X-Accel-Buffering','no')
+        self.end_headers()
+        self.connection.settimeout(15)
+        self.connection.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
+        try:
+            while True:
+                sequence, reset, rows = hub.read(cursor)
+                if cursor < 0 or reset:
+                    payload = {'reset':True,'samples':[q for _,q in rows[-1:]]}
+                else: payload = {'reset':False,'samples':[q for _,q in rows]}
+                if rows or cursor<0 or reset:
+                    data = json.dumps(payload,ensure_ascii=False,allow_nan=False)
+                    self.wfile.write(f'id: {hub.epoch}:{sequence}\nevent: quotes\ndata: {data}\n\n'.encode())
+                    cursor=sequence
+                else: self.wfile.write(b': heartbeat\n\n')
+                self.wfile.flush()
+        except (OSError, ValueError): pass
+        finally: self.close_connection=True
+
     def do_GET(self):
         if not self.local_request():
             return
@@ -996,7 +1065,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if path in ("/app.js", "/trading-app.js", "/style.css", "/echarts.min.js"):
+        if path in ("/app.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
             suffix = path[1:]
             data = (ROOT / suffix).read_bytes()
             content_type = "text/javascript; charset=utf-8" if suffix.endswith("js") else "text/css; charset=utf-8"
@@ -1007,6 +1076,18 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        if path == '/api/trading/stream':
+            self.quote_stream(); return
+        if path in ('/GoldPairQuotes.mq5','/GoldPairQuotes.ex5'):
+            asset = ROOT / 'mt5' / path[1:]
+            if not asset.exists():
+                self.send_json({'ok':False,'error':'EA 尚未编译'},404);return
+            data=asset.read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type','application/octet-stream')
+            self.send_header('Content-Disposition','attachment; filename="'+path[1:]+'"')
+            self.send_header('Content-Length',str(len(data)))
+            self.end_headers();self.wfile.write(data);return
         if path == "/api/status":
             with LOCK:
                 config = load_config()
@@ -1042,6 +1123,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             body = self.read_body()
+            if path == '/api/mt5/push/setup':
+                self.send_json({'ok':True, **TRADING.push_setup()});return
             if path == '/api/mt5/check':
                 if not PROBE_LOCK.acquire(blocking=False):
                     self.send_json({'ok': False, 'error': 'MT5 检查正在进行，请等待结果'}, 409)

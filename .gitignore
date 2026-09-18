@@ -12,3 +12,6 @@ data/events.jsonl
 data/*.sqlite*
 *.log
 .DS_Store
+
+data/quote-push.json
+*.set

@@ -246,7 +246,7 @@ class BinanceBookTicker:
         self.symbol=symbol.upper();self.production=production
         self.proxy_url=str(proxy_url or '').strip()
         self.lock=threading.RLock();self.stop_event=threading.Event();self.ready=threading.Event()
-        self.value=None;self.error='';self.socket=None;self.thread=None
+        self.value=None;self.error='';self.socket=None;self.thread=None;self.on_quote=None
 
     def start(self):
         if websocket is None:
@@ -278,6 +278,7 @@ class BinanceBookTicker:
                     if 0<q['bid']<=q['ask']:
                         with self.lock: self.value=q
                         self.ready.set()
+                        if self.on_quote: self.on_quote()
             except Exception as exc:
                 with self.lock: self.error=str(exc);self.socket=None
             finally:

@@ -16,7 +16,7 @@ jobs:
         with:
           node-version: "22"
       - name: Test trading button requests
-        run: node --test tests/trading_ui.test.cjs
+        run: node --test tests/trading_ui.test.cjs tests/quote_stream.test.cjs
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

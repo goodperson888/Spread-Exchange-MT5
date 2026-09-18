@@ -21,7 +21,7 @@ def main():
     if '--self-test' in sys.argv:
         from server import ROOT
         import MetaTrader5
-        for name in ('index.html', 'app.js', 'trading-app.js', 'echarts.min.js', 'style.css', 'config.example.json'):
+        for name in ('index.html', 'app.js', 'trading-app.js', 'quote-stream.js', 'mt5/GoldPairQuotes.mq5', 'mt5/GoldPairQuotes.ex5', 'echarts.min.js', 'style.css', 'config.example.json'):
             if not (ROOT / name).is_file():
                 raise RuntimeError('Missing bundled asset: ' + name)
         print('Bundled assets and MetaTrader5 import: OK')

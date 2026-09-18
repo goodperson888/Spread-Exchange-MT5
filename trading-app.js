@@ -8,6 +8,41 @@
   const usd = x => Number.isFinite(Number(x)) ? `${Number(x)>=0?'+':''}${Number(x).toFixed(2)} USD` : '—';
   const escape = value => String(value ?? '').replace(/[&<>'"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
   let chart, timer, busy=false, last=null, resetChartZoom=true, actionError='';
+  let chartView=null, stream=null, streamReady=false, paintPending=false, chartSamples=[], plotGeneration=0, latestLive=null;
+  const quoteBuffer=window.GoldPairQuotes?new window.GoldPairQuotes.QuoteBuffer():null;
+  function windowStart(){return Date.now()-Math.max(1,Number(el('chart-window').value)||1440)*60000;}
+  function paintSoon(){
+    if(paintPending)return;paintPending=true;
+    (window.requestAnimationFrame||((fn)=>setTimeout(fn,16)))(()=>{paintPending=false;drawChart(chartSamples);});
+  }
+  function streamLabel(){
+    const badge=el('chart-live-status');if(!badge)return;
+    const q=latestLive||last?.quote;
+    const stale=q&&(q.valid===false||Date.now()-Math.min(q.mt5?.time_ms||0,q.binance?.time_ms||0)>10000);
+    badge.textContent=!last?.connected?'未连接 · 图表保留历史':stale?'行情过期或双边不同步':streamReady?'图表长连接 · 收到报价即更新':'图表重连中 · 历史保留';
+    badge.classList.toggle('warning',!streamReady||stale||!last?.connected);
+  }
+  function startStream(){
+    if(!window.EventSource||stream)return;
+    stream=new window.EventSource('/api/trading/stream');
+    stream.onopen=()=>{streamReady=true;streamLabel();};
+    stream.onerror=()=>{streamReady=false;streamLabel();};
+    stream.addEventListener('quotes',event=>{
+      try {
+        const payload=JSON.parse(event.data),key=last?.quote?.key;
+        const rows=(payload.samples||[]).filter(q=>!key||q.key===key);
+        if(rows.length){
+          latestLive=rows.at(-1);
+          chartSamples=quoteBuffer.merge(rows,windowStart(),key);
+          const q=latestLive,age=x=>Math.max(0,Date.now()-(x?.time_ms||0));
+          el('quote-latency').textContent=`MT5 ${q.mt5_transport||'行情'} · 币安 ${q.binance_transport||'行情'} · 报价年龄：MT5 ${age(q.mt5)} ms / 币安 ${age(q.binance)} ms · 双边时差 ${Math.abs((q.mt5?.time_ms||0)-(q.binance?.time_ms||0))} ms${q.valid===false?' · 当前报价不满足交易校验':''}`;
+          showQuote(q);paintSoon();
+        }
+        streamLabel();
+        if(payload.reset)plot().catch(error=>text('trading-result','恢复历史失败：'+error.message,true));
+      } catch(error){text('trading-result','行情推送解析失败：'+error.message,true);}
+    });
+  }
   let adoptionPreview=null, adoptionReportTime=null, adoptionGroupId=null, adoptionRevision=0;
 
   async function request(path, body) {
@@ -76,16 +111,24 @@
       const quantity=o.leg==='mt5'&&g?`${n(filled)} 盎司 / ${n(filled/g.contract)} 手`:`${n(filled)} XAU`;
       const status=o.imported?'原持仓成本登记（本次未下单）':r.status==='done'?(filled>0?'已成交':'未成交'):(r.status==='pending'?'待确认':'状态未知');
       const fee=o.imported?'历史费用见接管汇总':Number.isFinite(Number(r.fee))?`${Number(r.fee).toFixed(4)} ${o.leg==='binance'?'USDT':'USD'}`:'未单独回填';
+      const timing=Number.isFinite(r.fill_time_ms)?`<br><span class="muted">发送→回报 ${Math.max(0,r.fill_time_ms-o.created_ms)} ms${Number.isFinite(o.signal_time_ms)?'<br>采样→发送 '+Math.max(0,o.created_ms-o.signal_time_ms)+' ms':''}</span>`:'';
       const signal=Number.isFinite(Number(o.signal_spread))?n(o.signal_spread):'—';
       const actual=Number.isFinite(Number(o.actual_spread))?n(o.actual_spread):'等待双边成交';
       const spreadDelta=Number.isFinite(Number(o.spread_slippage))?`${Number(o.spread_slippage)>=0?'+':''}${n(o.spread_slippage)}`:'—';
-      return `<tr><td>${dateTime(o.created_ms)}</td><td>#${escape(o.group)}</td><td>${o.leg==='binance'?'币安':'MT5'}<br>${escape(o.symbol)}</td><td>${o.action==='open'?'开仓':'平仓'} · ${direction}</td><td>申请 ${n(o.requested)} 盎司<br>成交 ${quantity}</td><td>${price?`${n(price)}<br>${(filled*price).toFixed(2)} ${o.leg==='binance'?'USDT':'USD'}`:'—'}</td><td>${signal}<br><span class="muted">${actual}</span><br><span class="muted">偏移 ${spreadDelta}</span></td><td>${fee}</td><td>${status}${r.error?'<br>'+escape(r.error):''}<br><span class="muted">${escape(r.ticket||o.id)}</span></td></tr>`;
+      return `<tr><td>${dateTime(o.created_ms)}${timing}</td><td>#${escape(o.group)}</td><td>${o.leg==='binance'?'币安':'MT5'}<br>${escape(o.symbol)}</td><td>${o.action==='open'?'开仓':'平仓'} · ${direction}</td><td>申请 ${n(o.requested)} 盎司<br>成交 ${quantity}</td><td>${price?`${n(price)}<br>${(filled*price).toFixed(2)} ${o.leg==='binance'?'USDT':'USD'}`:'—'}</td><td>${signal}<br><span class="muted">${actual}</span><br><span class="muted">偏移 ${spreadDelta}</span></td><td>${fee}</td><td>${status}${r.error?'<br>'+escape(r.error):''}<br><span class="muted">${escape(r.ticket||o.id)}</span></td></tr>`;
     }).join('');
     return `<table class="records-table"><thead><tr><th>时间</th><th>交易组</th><th>平台 / 品种</th><th>动作</th><th>申请 / 成交数量</th><th>成交价 / 金额</th><th>监控价差<br>实际成交价差<br>偏移</th><th>成交手续费</th><th>状态 / 票据</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
+  function showQuote(q) {
+    if(q) {
+      el('quote-summary').textContent=`币安 Bid/Ask ${n(q.binance.bid)} / ${n(q.binance.ask)}（${date(q.binance.time_ms)}） · MT5 Bid/Ask ${n(q.mt5.bid)} / ${n(q.mt5.ask)}（${date(q.mt5.time_ms)}） · 入场（卖币安 Bid − 买 MT5 Ask） ${n(q.entry)} · 退出（买回币安 Ask − 卖 MT5 Bid） ${n(q.exit)} USD/盎司`;
+      el('bid').value=q.binance.bid;el('binance-ask').value=q.binance.ask;
+      el('mt5-bid').value=q.mt5.bid;el('mt5-ask').value=q.mt5.ask;
+    }
+  }
   function render(result) {
     last=result;
-    const state=result.state||{}, q=result.quote;
+    const state=result.state||{}, q=(latestLive&&result.quote&&latestLive.key===result.quote.key&&latestLive.time_ms>result.quote.time_ms?latestLive:result.quote);
     const report=result.position_report;
     const display=x=>x===null||x===undefined?'—':escape(x);
     const table=(headers,rows)=>`<table class="records-table"><thead><tr>${headers.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${row.map(x=>`<td>${display(x)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
@@ -105,11 +148,7 @@
     const connectButton=el('trading-connect');
     connectButton.textContent=result.connected?'已连接双边行情（重新连接）':'连接双边行情';
     connectButton.classList.toggle('primary',!result.connected);
-    const chartStatus=el('chart-live-status');
-    if(chartStatus) {
-      chartStatus.textContent=result.connected?'实时采样中 · 策略每 250 毫秒检查':'未连接 · 图表保留历史';
-      chartStatus.classList.toggle('warning',!result.connected);
-    }
+    streamLabel();
     const oldManaging=(state.groups||[]).some(g=>g.imported&&g.status!=='closed'&&g.management_enabled);
     const stateText = !result.connected ? '未连接，不能开仓' : (!reconciled || state.recovery) ? '已连接，等待持仓对账' : state.enabled ? '自动开仓运行中'+(oldManaging?' · 旧仓管理运行中':'') : oldManaging?'旧仓管理运行中 · 新开仓未启动':'已连接，尚未启动自动开仓';
     const alarm=state.alarm||result.last_error;
@@ -145,11 +184,7 @@
       toggleButton.classList.add('primary');
     }
     
-    if(q) {
-      el('quote-summary').textContent=`币安 Bid/Ask ${n(q.binance.bid)} / ${n(q.binance.ask)}（${date(q.binance.time_ms)}） · MT5 Bid/Ask ${n(q.mt5.bid)} / ${n(q.mt5.ask)}（${date(q.mt5.time_ms)}） · 入场（卖币安 Bid − 买 MT5 Ask） ${n(q.entry)} · 退出（买回币安 Ask − 卖 MT5 Bid） ${n(q.exit)} USD/盎司`;
-      el('bid').value=q.binance.bid;el('binance-ask').value=q.binance.ask;
-      el('mt5-bid').value=q.mt5.bid;el('mt5-ask').value=q.mt5.ask;
-    }
+    showQuote(q);
     if(result.plan) {
       const p=result.plan, notional=q ? p.qty*q.binance.bid : null;
       text('plan-result',`MT5 ${el('mt5-symbol').value}：${n(p.lots)} 手 ↔ ${el('symbol').value}：${n(p.qty)} XAU\n黄金数量 ${n(p.qty)} 盎司；${notional===null?'等待行情':'当前名义金额约 '+Number(notional).toFixed(2)+' USDT（不是保证金）'}\n已按 MT5 与币安实际数量规则校验。`);
@@ -224,22 +259,36 @@
       take_contraction_usd:el('adoption-managed-take').value,min_net_profit_usd:el('adoption-managed-profit').value}));
   },'adoption-manage','正在切换旧仓管理…');
   async function plot() {
+    const generation=++plotGeneration;
     const minutes=Number(el('chart-window').value);
     const r=await request('/api/trading/chart?minutes='+minutes);
-    const samples=r.samples||[];
-    if(!chart) chart=echarts.init(el('spread-chart'));
+    if(generation!==plotGeneration)return;
+    chartSamples=quoteBuffer?quoteBuffer.replaceHistory(r.samples||[],windowStart(),last?.quote?.key):(r.samples||[]);
+    drawChart(chartSamples);
+  }
+  function drawChart(rawSamples) {
+    const samples=window.GoldPairQuotes?window.GoldPairQuotes.renderPoints(rawSamples,Math.max(1,Number(el('chart-window').value)||1440)*60000,chartView):rawSamples;
+    if(!chart) {
+      chart=echarts.init(el('spread-chart'));
+      if(chart.on)chart.on('datazoom',()=>{
+        const zoom=chart.getOption()?.dataZoom?.[0];
+        const first=chartSamples[0]?.time_ms||0,lastTime=chartSamples.at(-1)?.time_ms||first;
+        chartView={start:first+(lastTime-first)*(zoom?.start||0)/100,end:first+(lastTime-first)*(zoom?.end??100)/100};
+        paintSoon();
+      });
+    }
     const groups=last?.state?.groups||[];
     const marks=groups.filter(g=>g.status!=='closed').map(g=>({name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported&&!g.management_enabled?' 目标（暂停）':' 止盈'),yAxis:g.parameters.target_mode==='absolute'?g.parameters.exit_spread_usd:g.entry-g.parameters.take_contraction_usd}));
     const expected=samples.length>1?(samples.at(-1).time_ms-samples[0].time_ms)/(samples.length-1):0;
     const lines=[];let previous;
-    for(const x of samples){if(previous&&x.time_ms-previous.time_ms>Math.max(10000,expected*6))lines.push({time_ms:previous.time_ms+1,entry:null,exit:null});lines.push(x);previous=x;}
+    for(const x of samples){if(previous&&x.time_ms-previous.time_ms>Math.max(10000,expected*6,Math.max(1,Number(el('chart-window').value)||1440)*60000/3000))lines.push({time_ms:previous.time_ms+1,entry:null,exit:null});lines.push(x);previous=x;}
     const nearest=(at,field)=>{let best=null,distance=Infinity;for(const x of samples){const d=Math.abs(x.time_ms-at);if(d<distance){best=x;distance=d;}}return best&&Number.isFinite(best[field])?[at,best[field]]:null;};
     const firstTime=samples[0]?.time_ms??0,lastTime=samples.at(-1)?.time_ms??0;
     const opened=groups.filter(g=>!g.imported&&g.opened_ms>=firstTime&&g.opened_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.opened_ms,g.entry]}));
     const closed=groups.filter(g=>g.closed_ms>=firstTime&&g.closed_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.closed_ms,Number.isFinite(g.exit)?g.exit:nearest(g.closed_ms,'exit')?.[1]]})).filter(x=>Number.isFinite(x.value[1]));
     const entries=samples.map(x=>x.entry).filter(Number.isFinite), exits=samples.map(x=>x.exit).filter(Number.isFinite);
     const average=values=>values.length?values.reduce((a,b)=>a+b,0)/values.length:null;
-    const latest=samples.at(-1), all=entries.concat(exits);
+    const latest=rawSamples.at(-1), all=entries.concat(exits);
     const entryThreshold=Number(el('entry').value), threshold=Number.isFinite(entryThreshold)?entryThreshold:null;
     el('spread-stats').innerHTML=[['当前入场',latest?.entry],['当前退出',latest?.exit],['开仓阈值',threshold],['窗口入场均值',average(entries)],['价差范围',all.length?`${Math.min(...all).toFixed(3)} ～ ${Math.max(...all).toFixed(3)}`:null]].map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${typeof value==='number'?value.toFixed(3):value||'—'}</strong></div>`).join('');
     el('chart-empty').classList.toggle('is-hidden',samples.length>0);
@@ -248,8 +297,8 @@
     const start=resetChartZoom?0:(oldZoom?.start??0),end=resetChartZoom?100:(oldZoom?.end??100);resetChartZoom=false;
     const thresholdLine=threshold===null?[]:[{name:`开仓阈值 ${threshold.toFixed(2)}`,yAxis:threshold,lineStyle:{color:'#b75e24',width:2,type:'dashed'},label:{show:true,color:'#8a461e',formatter:`开仓阈值 ${threshold.toFixed(2)}`}}];
     chart.setOption({animation:false,legend:{top:5,type:'scroll'},tooltip:{trigger:'axis',confine:true,valueFormatter:v=>Number.isFinite(v)?v.toFixed(3):'—'},grid:{left:75,right:120,top:70,bottom:80},xAxis:{type:'time',minInterval:1000,axisPointer:{label:{formatter:params=>dateTime(params.value)}}},yAxis:{type:'value',scale:true,name:'价差 USD/盎司'},dataZoom:[{type:'inside',filterMode:'none',minValueSpan:1000,start,end},{type:'slider',filterMode:'none',minValueSpan:1000,bottom:15,start,end}],series:[
-      {id:'entry',name:'入场（卖币安Bid / 买MT5Ask）',type:'line',showSymbol:false,sampling:'lttb',connectNulls:false,data:lines.map(x=>[x.time_ms,x.entry]),itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:threshold===null?[]:[[{name:'开仓触发区',yAxis:threshold},{yAxis:'max'}]]},markLine:{symbol:'none',silent:true,data:[...thresholdLine,...marks],label:{formatter:'{b}: {c}'}}},
-      {id:'exit',name:'退出（买回币安Ask / 卖MT5Bid）',type:'line',showSymbol:false,sampling:'lttb',connectNulls:false,data:lines.map(x=>[x.time_ms,x.exit]),itemStyle:{color:'#247b68'},lineStyle:{width:2,type:'dashed'}},
+      {id:'entry',name:'入场（卖币安Bid / 买MT5Ask）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.entry]),itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:threshold===null?[]:[[{name:'开仓触发区',yAxis:threshold},{yAxis:'max'}]]},markLine:{symbol:'none',silent:true,data:[...thresholdLine,...marks],label:{formatter:'{b}: {c}'}}},
+      {id:'exit',name:'退出（买回币安Ask / 卖MT5Bid）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.exit]),itemStyle:{color:'#247b68'},lineStyle:{width:2,type:'dashed'}},
       {id:'open',name:'策略开仓',type:'scatter',symbol:'triangle',symbolSize:12,itemStyle:{color:'#b75e24'},data:opened},
       {id:'close',name:'策略平仓',type:'scatter',symbol:'diamond',symbolSize:12,itemStyle:{color:'#6b50a6'},data:closed}
     ]},{notMerge:true,lazyUpdate:true});
@@ -260,7 +309,7 @@
     render(r);
     // Keep the last chart visible when disconnected, but do not keep
     // re-fetching it as if live monitoring were still running.
-    if(withChart && (r.connected || !chart)) await plot();
+    if(withChart && (!chart || (!streamReady && r.connected))) await plot();
   }
   async function connect() {
     await saveConfig();
@@ -281,9 +330,23 @@
     }
   },'trading-toggle','正在切换自动开仓状态…');
   el('trading-close').onclick=()=>action(async()=>{render(await request('/api/trading/close',{reason:'用户请求全部平仓'}));},'trading-close','正在处理平仓请求…');
-  el('chart-window').onchange=()=>{resetChartZoom=true;action(plot,'chart-window','正在加载图表数据…');};
-  el('chart-latest').onclick=()=>{resetChartZoom=true;action(plot,'chart-latest','正在加载最新图表…');};
+  el('chart-window').onchange=()=>{resetChartZoom=true;chartView=null;action(plot,'chart-window','正在加载图表数据…');};
+  el('chart-latest').onclick=()=>{resetChartZoom=true;chartView=null;action(plot,'chart-latest','正在加载最新图表…');};
+  el('push-setup').onclick=()=>action(async()=>{
+    const r=await request('/api/mt5/push/setup',{});
+    const settings=`LocalPort=${r.port}\r\nLocalToken=${r.token}\r\n`;
+    const bytes=new Uint8Array(2+settings.length*2);bytes[0]=255;bytes[1]=254;
+    for(let i=0;i<settings.length;i++){const c=settings.charCodeAt(i);bytes[2+i*2]=c&255;bytes[3+i*2]=c>>8;}
+    const url=URL.createObjectURL(new Blob([bytes],{type:'application/octet-stream'}));
+    const link=document.createElement('a');link.href=url;link.download='GoldPairQuotes.set';link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),10000);
+    const asset=r.binary||r.source;
+    el('push-result').innerHTML=`本机接收器已启动（127.0.0.1:${Number(r.port)}），参数文件已下载。<a href="${escape(asset)}" download>下载${r.binary?'已编译 EA':'EA 源码'}</a>。将 EA 放入 MT5 数据目录的 MQL5/Experts，挂到当前黄金图表，在“输入”中载入刚下载的 .set 文件。`;
+  },'push-setup','正在准备 EA 接收器和本机参数…');
+  window.addEventListener('offline',()=>{stream?.close();stream=null;streamReady=false;streamLabel();});
+  window.addEventListener('online',startStream);
+  window.addEventListener('beforeunload',()=>stream?.close());
   window.addEventListener('resize',()=>chart?.resize());
-  setTimeout(()=>status().catch(error=>text('trading-result',error.message,true)),400);
+  setTimeout(()=>status().then(startStream).catch(error=>text('trading-result',error.message,true)),400);
   timer=setInterval(()=>{if(!busy&&!window.goldPairUiBusy)status().catch(error=>text('trading-result',error.message,true));},3000);
 })();
