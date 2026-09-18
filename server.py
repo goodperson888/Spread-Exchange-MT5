@@ -88,6 +88,7 @@ class TradingRuntime:
         self.reconciled = False
         self.last_error = ''
         self.market_meta = {}
+        self.position_report = None
         self._last_fx_refresh = 0
         self._last_carry_refresh = 0
         self._last_rest_market = None
@@ -208,6 +209,7 @@ class TradingRuntime:
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.quote, self.connected, self.last_error = new_quote, True, ''
             self.market_meta = meta
+            self.position_report = None
             self._last_fx_refresh = time.monotonic()
             self._last_carry_refresh = 0
             self._last_rest_market = market
@@ -433,7 +435,8 @@ class TradingRuntime:
             # 必须先连接才能进行对账
             if not self.connected:
                 raise ValueError('请先连接后再进行对账')
-            
+            self.position_report = None
+
             if self.config['execution']['mode'] == 'paper':
                 # Paper state is deterministic and is reconciled from journal.
                 for g in self.engine.active(): self.engine.resolve(g)
@@ -443,6 +446,7 @@ class TradingRuntime:
                 return self.snapshot()
             
             # 实盘模式对账：验证实际持仓与策略日志一致性
+            self.reconciled = False
             self.binance.refresh_position_mode()
             for g in self.engine.active():
                 self.engine.resolve(g)
@@ -450,6 +454,20 @@ class TradingRuntime:
             open_orders = self.binance.open_orders(self.config['symbol'])
             signed_bqty = sum(float(x.get('positionAmt', 0)) for x in positions)
             mt5 = self.terminal.call('snapshot')
+            # A read-only snapshot is also useful when reconciliation fails.
+            # Never turn external positions into managed groups here.
+            self.position_report = {
+                'time_ms': now_ms(), 'status': '已读取，核对尚未通过',
+                'symbol': self.config['symbol'], 'mt5_symbol': self.config['mt5']['symbol'],
+                'mt5_currency': mt5.get('account', {}).get('currency', 'USD'),
+                'binance': [{k: x.get(k) for k in ('symbol', 'positionSide', 'positionAmt',
+                            'entryPrice', 'markPrice', 'unRealizedProfit', 'updateTime')}
+                            for x in positions if float(x.get('positionAmt', 0)) != 0],
+                'binance_orders': [{k: x.get(k) for k in ('orderId', 'symbol', 'side',
+                                    'positionSide', 'type', 'origQty', 'executedQty', 'price', 'status')}
+                                   for x in open_orders],
+                'mt5': [dict(x, managed=False) for x in mt5['positions']],
+            }
             managed_mt5 = [x for x in mt5['positions'] if x['magic'] == self.config['execution']['magic']]
             lots = sum(float(x['lots']) for x in managed_mt5)
             expected_b = sum(self.engine.amounts(g)['binance'] for g in self.engine.active())
@@ -457,6 +475,9 @@ class TradingRuntime:
             expected_comments = {o['id'] for o in self.engine.state['orders']
                                  if o['group'] in {g['id'] for g in self.engine.active()}
                                  and o['leg'] == 'mt5' and o['action'] == 'open'}
+            for position in self.position_report['mt5']:
+                position['managed'] = (position.get('magic') == self.config['execution']['magic']
+                                       and position.get('comment') in expected_comments)
             by_comment = {x.get('comment'): x for x in managed_mt5 if x.get('comment')}
             for order in self.engine.state['orders']:
                 if (order['id'] in by_comment and order['leg'] == 'mt5' and order['action'] == 'open'
@@ -495,6 +516,7 @@ class TradingRuntime:
             if not self.engine.state['recovery']:
                 self.engine.state['alarm'] = ''
             self.reconciled = True
+            self.position_report['status'] = '本策略持仓核对通过；其他 MT5 持仓仅展示'
             self.engine.save('reconciled', {'binance_qty': signed_bqty, 'position_mode':position_mode, 'mt5_lots': lots})
             return self.snapshot()
 
@@ -506,6 +528,7 @@ class TradingRuntime:
                 'quote': self.quote, 'plan': self.plan,
                 'state': st, 'events': self.store.events(),
                 'auto_values': self.market_meta,
+                'position_report': self.position_report,
                 'capabilities': {'live_orders': bool(self.config and self.config['execution']['mode'] == 'live'),
                                  'mode': self.config['execution']['mode'] if self.config else 'paper',
                                  'reconciled': self.reconciled,

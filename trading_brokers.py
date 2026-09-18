@@ -389,6 +389,7 @@ def worker_main():
                                      trade_mode=a.trade_mode,free_margin=a.margin_free),
                         allowed=bool(t.trade_allowed and not t.tradeapi_disabled and a.trade_allowed and a.trade_expert),
                         positions=[dict(ticket=str(p.ticket),lots=p.volume,side=p.type,magic=p.magic,swap=p.swap,
+                                        symbol=p.symbol,price_open=p.price_open,time_ms=p.time_msc,
                                         profit=p.profit,comment=p.comment) for p in positions])
                 elif cmd=='history': data=[d._asdict() for d in history(r['start_ms']) if d.symbol==s.name and d.magic==magic]
                 elif cmd=='rates':

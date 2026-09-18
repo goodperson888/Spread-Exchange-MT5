@@ -115,6 +115,7 @@
 <div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>
 <div class="chart-wrap"><div id="spread-chart" class="chart" role="img" aria-label="入场与退出可成交价差历史折线图"></div><p id="chart-empty" class="chart-empty">连接后开始积累可成交价差历史。</p></div>
 <p id="chart-coverage" class="note">本机高频记录保留 24 小时，更早数据按分钟归档并保留 30 天；历史保存在本机数据目录，清理浏览器缓存不会删除。</p>
+<details><summary>平台当前持仓与币安挂单（只读）</summary><p class="note">点击“持仓对账”后更新，仅显示当前连接品种。纸面模式只核对本机模拟记录。外部仓位不自动加入策略，未接管仓位不由“全部平仓”处理。币安开仓均价可能合并多次成交，更新时间不是首次开仓时间；MT5 列出各持仓票据。历史开仓价差需双方成交配对及当时汇率，不能用当前报价倒推。此处未读取 MT5 挂单。</p><div id="platform-positions" class="table-wrap">尚未读取实盘平台持仓。</div></details>
 <section class="records" aria-labelledby="group-records-heading"><div class="subheading"><div><p class="eyebrow">06 · 收益与订单</p><h3 id="group-records-heading">交易组收益记录</h3></div><span class="note">实盘平仓后会用平台成交与费用记录复核</span></div><div id="pnl-stats" class="stats" aria-label="交易收益摘要"></div><div id="groups" class="table-wrap"></div><h3>双边订单流水</h3><div id="orders" class="table-wrap"></div><details><summary>技术事件日志</summary><div id="trade-events" class="events"></div></details></section>
 </section>
 </main><script src="echarts.min.js"></script><script src="app.js"></script><script src="trading-app.js"></script></body></html>

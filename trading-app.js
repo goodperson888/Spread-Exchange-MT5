@@ -51,8 +51,9 @@
       const funding=Number(v.binance_funding||0),swap=Number(v.mt5_swap||0);
       const carryDetail=('binance_funding' in v||'mt5_swap' in v)?`资金费 ${usd(funding)}<br>MT5 Swap ${usd(swap)}`:`合计 ${usd(v.carry||0)}`;
       const action=g.status==='closed'?'':`<button data-close="${escape(g.id)}">平仓</button>`;
+      const entryLabel=g.open_binance && Number.isFinite(Number(g.entry))?`<br><span class="muted" title="币安开仓成交价 × 该笔记录的 USDT/USD − MT5 开仓成交价；双边成交可能不在同一时刻">开仓成交价差 ${n(g.entry)} USD/盎司</span>`:'';
       const gridLabel=Number(g.grid_index||0)>0?`<br><span class="muted">网格补仓第 ${Number(g.grid_index)} 次</span>`:'';
-      return `<tr><td><strong>#${escape(g.id)}</strong>${gridLabel}<br><span class="muted">${dateTime(g.opened_ms)}${g.closed_ms?'<br>→ '+dateTime(g.closed_ms):''}</span></td><td>${escape(states[g.status]||g.status)}<br><span class="record-basis">${basis}</span></td><td>${n(g.lots)} 手 / ${n(g.qty)} 盎司<br><span class="muted">币安 ${amount('binance').toFixed(2)} USDT<br>MT5 ${amount('mt5').toFixed(2)} USD</span></td><td>毛收益 ${usd(v.gross)}<br>手续费 -${Number(v.fees||0).toFixed(2)} USD${Number(v.estimated_exit_fee)>0?'<br>预估平仓费 -'+Number(v.estimated_exit_fee).toFixed(2)+' USD':''}</td><td>${carryDetail}</td><td class="${Number(v.net)>=0?'pnl-positive':'pnl-negative'}"><strong>${usd(v.net)}</strong><br><span class="muted">${g.status==='closed'?'平仓净收益':'实时净收益'}</span></td><td>币安 ${n(remaining.binance||0)}<br>MT5 ${n(remaining.mt5||0)}${g.reason?'<br>'+escape(g.reason):''}</td><td>${action}</td></tr>`;
+      return `<tr><td><strong>#${escape(g.id)}</strong>${gridLabel}<br><span class="muted">${dateTime(g.opened_ms)}${g.closed_ms?'<br>→ '+dateTime(g.closed_ms):''}</span></td><td>${escape(states[g.status]||g.status)}<br><span class="record-basis">${basis}</span></td><td>${n(g.lots)} 手 / ${n(g.qty)} 盎司${entryLabel}<br><span class="muted">币安 ${amount('binance').toFixed(2)} USDT<br>MT5 ${amount('mt5').toFixed(2)} USD</span></td><td>毛收益 ${usd(v.gross)}<br>手续费 -${Number(v.fees||0).toFixed(2)} USD${Number(v.estimated_exit_fee)>0?'<br>预估平仓费 -'+Number(v.estimated_exit_fee).toFixed(2)+' USD':''}</td><td>${carryDetail}</td><td class="${Number(v.net)>=0?'pnl-positive':'pnl-negative'}"><strong>${usd(v.net)}</strong><br><span class="muted">${g.status==='closed'?'平仓净收益':'实时净收益'}</span></td><td>币安 ${n(remaining.binance||0)}<br>MT5 ${n(remaining.mt5||0)}${g.reason?'<br>'+escape(g.reason):''}</td><td>${action}</td></tr>`;
     }).join('');
     return `<table class="records-table"><thead><tr><th>交易组 / 时间</th><th>状态</th><th>配平量 / 开仓金额</th><th>交易收益与手续费</th><th>资金费 / Swap</th><th>净收益</th><th>剩余敞口 / 原因</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
@@ -72,6 +73,16 @@
   function render(result) {
     last=result;
     const state=result.state||{}, q=result.quote;
+    const report=result.position_report;
+    const display=x=>x===null||x===undefined?'—':escape(x);
+    const table=(headers,rows)=>`<table class="records-table"><thead><tr>${headers.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr>${row.map(x=>`<td>${display(x)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    el('platform-positions').innerHTML=report?
+      `<p class="note">${escape(dateTime(report.time_ms))} · ${escape(report.status)}（上次对账快照）</p><h3>币安 ${escape(report.symbol)}</h3>`+
+      (report.binance.length?table(['方向','数量 XAU','开仓均价 USDT','未实现盈亏 USDT'],report.binance.map(x=>[x.positionSide==='BOTH'?(Number(x.positionAmt)<0?'空头':'多头'):x.positionSide,Math.abs(Number(x.positionAmt)),x.entryPrice,x.unRealizedProfit])):'<p class="note">当前品种无持仓。</p>')+
+      `<h3>MT5 ${escape(report.mt5_symbol)}</h3>`+
+      (report.mt5.length?table(['票据','方向','手数','开仓价','开仓时间','盈亏 '+escape(report.mt5_currency),'归属'],report.mt5.map(x=>[x.ticket,x.side===0?'买入':'卖出',x.lots,x.price_open,x.time_ms?dateTime(x.time_ms):'—',x.profit,x.managed?'本策略':'未接管'])):'<p class="note">当前品种无持仓。</p>')+
+      '<h3>币安未成交委托</h3>'+(report.binance_orders.length?table(['订单号','方向','类型','委托数量','已成交数量','委托价','状态'],report.binance_orders.map(x=>[x.orderId,x.side,x.type,x.origQty,x.executedQty,x.price,x.status])):'<p class="note">当前品种无挂单。</p>'):
+      '<p class="note">尚无实盘持仓快照；连接实盘后点击“持仓对账”读取。纸面模式不读取真实账户持仓。</p>';
     const mode=result.capabilities?.mode||'paper';
     const reconciled=result.capabilities?.reconciled === true;
     const positionMode=result.capabilities?.position_mode;
@@ -186,7 +197,7 @@
   }
   async function closeOne(group) { render(await request('/api/trading/close',{group,reason:'用户请求平仓'})); }
   el('trading-connect').onclick=()=>action(connect,'trading-connect','正在检查行情、账户和合约规则…');
-  el('trading-reconcile').onclick=()=>action(async()=>{render(await request('/api/trading/reconcile'));await plot();},'trading-reconcile','正在核对两边持仓…');
+  el('trading-reconcile').onclick=()=>action(async()=>{try {render(await request('/api/trading/reconcile'));await plot();} catch(error) {await status(false).catch(()=>{});throw error;}},'trading-reconcile','正在核对两边持仓…');
   el('trading-toggle').onclick=()=>action(async()=>{
     const state = last?.state;
     if(state?.enabled) {
