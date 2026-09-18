@@ -112,7 +112,7 @@
 </section>
 <section class="panel" aria-labelledby="chart-heading">
 <div class="heading"><div><p class="eyebrow">05 · 实时与历史价差</p><h2 id="chart-heading">真实可成交方向监控</h2><p class="muted">入场线：卖币安 Bid、买 MT5 Ask；退出线：买回币安 Ask、卖出 MT5 Bid。已完成分钟归档点不会被后续采样改写，最右侧当前分钟和实时点会继续增长；缩放最低到 1 秒；EA 接入后由新报价唤醒策略，订单串行执行，图表长连接推送，按浏览器绘制帧更新。历史稀疏展示，最近一分钟保留逐报价曲线。</p></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
-<p id="quote-latency" class="note">行情到达即推送图表；绘制随浏览器帧率合并，不限制策略计算速度。</p>
+<p id="quote-latency" class="note">行情到达即推送图表；绘制随浏览器帧率合并，不限制策略计算速度。实时性看“报价年龄”和“本机收到时间差”；原始时间差可能来自 MT5 经纪商服务器时区，不单独代表延迟。</p>
 <p id="quote-summary" class="state">等待双边行情。</p><span id="chart-live-status" class="badge neutral">未连接 · 图表保留历史</span>
 <div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>
 <div class="chart-wrap"><div id="spread-chart" class="chart" role="img" aria-label="入场与退出可成交价差历史折线图"></div><p id="chart-empty" class="chart-empty">连接后开始积累可成交价差历史。</p></div>

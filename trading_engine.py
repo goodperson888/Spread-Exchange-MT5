@@ -14,8 +14,11 @@ def valid_quote(q, c, now=None):
     for side in ('binance','mt5'):
         x=q.get(side,{})
         if not 0<float(x.get('bid',0))<=float(x.get('ask',0)): return False
-        if not -1000<=now-int(x.get('time_ms',0))<=s['max_quote_age_ms']: return False
-    return abs(q['binance']['time_ms']-q['mt5']['time_ms'])<=s['max_clock_skew_ms']
+        observed=int(x.get('observed_ms',x.get('time_ms',0)))
+        if not -1000<=now-observed<=s['max_quote_age_ms']: return False
+    binance_observed=int(q['binance'].get('observed_ms',q['binance'].get('time_ms',0)))
+    mt5_observed=int(q['mt5'].get('observed_ms',q['mt5'].get('time_ms',0)))
+    return abs(binance_observed-mt5_observed)<=s['max_clock_skew_ms']
 
 
 class Engine:
@@ -231,7 +234,7 @@ class Engine:
         if g.get('imported') and hasattr(self,'before_import_close'):
             self.before_import_close()
             # Account reads can take longer than the quote budget. Wait for another tick.
-            if any(stamp()-int(q[leg]['time_ms'])>g['parameters']['max_quote_age_ms'] for leg in ('binance','mt5')):
+            if any(stamp()-int(q[leg].get('observed_ms',q[leg].get('time_ms',0)))>g['parameters']['max_quote_age_ms'] for leg in ('binance','mt5')):
                 self.state['alarm']='接管平仓核验完成时行情已过期，等待新报价'
                 return
         if not self.resolve(g): return

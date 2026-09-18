@@ -14,6 +14,14 @@ def milliseconds():
     return int(time.time() * 1000)
 
 
+def observed_quote(value, observed_ms=None):
+    """Keep broker/server tick time for display, but use local receipt time for freshness."""
+    result = dict(value)
+    result['source_time_ms'] = int(value.get('source_time_ms', value.get('time_ms', 0)))
+    result['observed_ms'] = int(value.get('observed_ms', value.get('received_ms', observed_ms or milliseconds())))
+    return result
+
+
 class QuoteEvents:
     """Bounded replay buffer shared by SSE clients; slow clients never block producers."""
     def __init__(self, capacity=10000):
@@ -100,18 +108,18 @@ class PushBridge:
     def accept(self, identity, owner, data):
         bid, ask, at = float(data['bid']), float(data['ask']), int(data['time_ms'])
         if not (math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask): return False
-        if not -1000 <= milliseconds() - at <= 10000: return False
         with self.lock:
             old = self.values.get(identity)
-            if self.owners.get(identity) is not owner or (old and at < old['time_ms']): return False
-            self.values[identity] = dict(bid=bid, ask=ask, time_ms=at, received_ms=milliseconds(), transport='EA Socket 推送')
+            if self.owners.get(identity) is not owner or (old and at < old['source_time_ms']): return False
+            self.values[identity] = observed_quote(dict(bid=bid, ask=ask, time_ms=at,
+                                                        transport='EA Socket 推送'))
         if self.notify: self.notify()
         return True
 
     def quote(self, settings, max_age_ms):
         with self.lock:
             value = self.values.get(self.identity(settings))
-            if not value or milliseconds() - value['time_ms'] > max_age_ms: return None
+            if not value or milliseconds() - value['observed_ms'] > max_age_ms: return None
             return dict(value)
 
     def close(self):
@@ -171,7 +179,10 @@ class QuotePump:
             self.binance_transport = 'REST 回退'
         else: self.binance_transport = 'WebSocket bookTicker'
         fx = c['costs']['usdt_usd']
-        signature = tuple((q['time_ms'], q['bid'], q['ask']) for q in (mt5, market)) + (fx,)
+        observed_at = milliseconds()
+        mt5 = observed_quote(mt5, observed_at)
+        market = observed_quote(market, observed_at)
+        signature = tuple((q['source_time_ms'], q['bid'], q['ask']) for q in (mt5, market)) + (fx,)
         if signature == self.last_signature: return
         from trading_config import pair_key
         from trading_engine import valid_quote

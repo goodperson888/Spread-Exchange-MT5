@@ -30,7 +30,7 @@ from trading_config import validate as validate_trading, plan as executable_plan
 from trading_engine import Engine
 from trading_store import Store
 import position_adoption
-from market_push import PushBridge, QuoteEvents, QuotePump
+from market_push import PushBridge, QuoteEvents, QuotePump, observed_quote
 
 ROOT = Path(__file__).resolve().parent
 DATA = (Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GoldPairLocal') if getattr(sys, 'frozen', False) else ROOT / 'data'
@@ -266,6 +266,9 @@ class TradingRuntime:
     def _quote(self, mt5, binance, config=None):
         c = config or self.config
         fx = c['costs']['usdt_usd']
+        observed_at = now_ms()
+        mt5 = observed_quote(mt5, observed_at)
+        binance = observed_quote(binance, observed_at)
         return {
             'key': pair_key(c), 'time_ms': now_ms(),
             'binance': binance, 'mt5': mt5,

@@ -274,7 +274,8 @@ class BinanceBookTicker:
                     if payload.get('s')!=self.symbol: continue
                     q=dict(bid=float(payload['b']),ask=float(payload['a']),
                            bid_qty=float(payload['B']),ask_qty=float(payload['A']),
-                           time_ms=int(payload.get('E') or payload.get('T') or time.time()*1000))
+                           time_ms=int(payload.get('E') or payload.get('T') or time.time()*1000),
+                           received_ms=int(time.time()*1000))
                     if 0<q['bid']<=q['ask']:
                         with self.lock: self.value=q
                         self.ready.set()
@@ -293,7 +294,7 @@ class BinanceBookTicker:
     def quote(self, max_age_ms=5000, wait_ms=0):
         if wait_ms: self.ready.wait(wait_ms/1000)
         with self.lock: value=dict(self.value) if self.value else None
-        if not value or int(time.time()*1000)-value['time_ms']>max_age_ms: return None
+        if not value or int(time.time()*1000)-value.get('received_ms',value['time_ms'])>max_age_ms: return None
         return value
 
     def close(self):

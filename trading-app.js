@@ -18,7 +18,7 @@
   function streamLabel(){
     const badge=el('chart-live-status');if(!badge)return;
     const q=latestLive||last?.quote;
-    const stale=q&&(q.valid===false||Date.now()-Math.min(q.mt5?.time_ms||0,q.binance?.time_ms||0)>10000);
+    const stale=q&&(q.valid===false||Date.now()-Math.min(q.mt5?.observed_ms||q.mt5?.time_ms||0,q.binance?.observed_ms||q.binance?.time_ms||0)>10000);
     badge.textContent=!last?.connected?'未连接 · 图表保留历史':stale?'行情过期或双边不同步':streamReady?'图表长连接 · 收到报价即更新':'图表重连中 · 历史保留';
     badge.classList.toggle('warning',!streamReady||stale||!last?.connected);
   }
@@ -34,8 +34,8 @@
         if(rows.length){
           latestLive=rows.at(-1);
           chartSamples=quoteBuffer.merge(rows,windowStart(),key);
-          const q=latestLive,age=x=>Math.max(0,Date.now()-(x?.time_ms||0));
-          el('quote-latency').textContent=`MT5 ${q.mt5_transport||'行情'} · 币安 ${q.binance_transport||'行情'} · 报价年龄：MT5 ${age(q.mt5)} ms / 币安 ${age(q.binance)} ms · 双边时差 ${Math.abs((q.mt5?.time_ms||0)-(q.binance?.time_ms||0))} ms${q.valid===false?' · 当前报价不满足交易校验':''}`;
+          const q=latestLive,age=x=>Math.max(0,Date.now()-(x?.observed_ms||x?.time_ms||0)),sourceTime=x=>x?.source_time_ms||x?.time_ms||0;
+          el('quote-latency').textContent=`MT5 ${q.mt5_transport||'行情'} · 币安 ${q.binance_transport||'行情'} · 报价年龄：MT5 ${age(q.mt5)} ms / 币安 ${age(q.binance)} ms · 本机收到时间差 ${Math.abs((q.mt5?.observed_ms||0)-(q.binance?.observed_ms||0))} ms · 原始时间差 ${Math.abs(sourceTime(q.mt5)-sourceTime(q.binance))} ms${q.valid===false?' · 当前报价不满足交易校验':''}`;
           showQuote(q);paintSoon();
         }
         streamLabel();
@@ -121,7 +121,7 @@
   }
   function showQuote(q) {
     if(q) {
-      el('quote-summary').textContent=`币安 Bid/Ask ${n(q.binance.bid)} / ${n(q.binance.ask)}（${date(q.binance.time_ms)}） · MT5 Bid/Ask ${n(q.mt5.bid)} / ${n(q.mt5.ask)}（${date(q.mt5.time_ms)}） · 入场（卖币安 Bid − 买 MT5 Ask） ${n(q.entry)} · 退出（买回币安 Ask − 卖 MT5 Bid） ${n(q.exit)} USD/盎司`;
+      el('quote-summary').textContent=`币安 Bid/Ask ${n(q.binance.bid)} / ${n(q.binance.ask)}（原始 ${date(q.binance.source_time_ms||q.binance.time_ms)}） · MT5 Bid/Ask ${n(q.mt5.bid)} / ${n(q.mt5.ask)}（原始 ${date(q.mt5.source_time_ms||q.mt5.time_ms)}） · 入场（卖币安 Bid − 买 MT5 Ask） ${n(q.entry)} · 退出（买回币安 Ask − 卖 MT5 Bid） ${n(q.exit)} USD/盎司`;
       el('bid').value=q.binance.bid;el('binance-ask').value=q.binance.ask;
       el('mt5-bid').value=q.mt5.bid;el('mt5-ask').value=q.mt5.ask;
     }

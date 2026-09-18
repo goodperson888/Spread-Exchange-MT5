@@ -70,7 +70,10 @@ void PublishTick()
 int OnInit()
 {
    if(StringLen(LocalToken)<32 || LocalPort<1024 || LocalPort>65535)
-   {Print("Generate the local EA setup in GoldPairLocal and load its .set file.");return INIT_PARAMETERS_INCORRECT;}
+   {
+      PrintFormat("GoldPairQuotes 参数无效：LocalPort=%d，LocalToken 长度=%d。请在网页点击‘准备 EA 与本机参数’，在 EA 输入中点击‘加载’选择 GoldPairQuotes.set；不要直接挂载未配置的 ex5。",LocalPort,StringLen(LocalToken));
+      return INIT_PARAMETERS_INCORRECT;
+   }
    EventSetTimer(1);
    Print("Quote-only EA started. Allow http://127.0.0.1 in Tools > Options > Expert Advisors.");
    return INIT_SUCCEEDED;

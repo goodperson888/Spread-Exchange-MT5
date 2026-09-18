@@ -49,15 +49,17 @@ class PushTests(unittest.TestCase):
         self.arrived.clear();first.sendall((json.dumps(self.quote())+'\n').encode())
         self.assertTrue(self.arrived.wait(1));self.assertIsNotNone(self.bridge.quote(self.identity,5000))
 
-    def test_reject_stale_invalid_and_backwards_ticks(self):
+    def test_accept_server_timezone_offset_but_reject_invalid_and_backwards_ticks(self):
         identity=self.bridge.identity(self.identity);owner=object();self.bridge.owners[identity]=owner
         q=self.quote()
-        self.assertFalse(self.bridge.accept(identity,owner,dict(q,time_ms=milliseconds()-20000)))
+        # MT5 broker/server timestamps may be hours away from local/Binance time;
+        # receipt time, not the raw server clock, controls freshness.
+        self.assertTrue(self.bridge.accept(identity,owner,dict(q,time_ms=milliseconds()-20000)))
         self.assertFalse(self.bridge.accept(identity,owner,dict(q,bid=float('nan'))))
         self.assertFalse(self.bridge.accept(identity,owner,dict(q,bid=4400)))
         self.assertTrue(self.bridge.accept(identity,owner,q))
         self.assertFalse(self.bridge.accept(identity,owner,dict(q,time_ms=q['time_ms']-1)))
-        self.assertEqual(self.bridge.quote(self.identity,5000)['time_ms'],q['time_ms'])
+        self.assertEqual(self.bridge.quote(self.identity,5000)['source_time_ms'],q['time_ms'])
 
 
 class PumpTests(unittest.TestCase):
@@ -95,16 +97,14 @@ class PumpTests(unittest.TestCase):
     def test_stopped_old_connection_cannot_publish(self):
         c,b,s,t,p,w,pump=self.fixture();pump.close();pump.collect();p.assert_not_called()
 
-    def test_stale_push_falls_back_to_native_and_bad_clock_does_not_trade(self):
+    def test_server_clock_offset_does_not_make_fresh_native_quote_invalid(self):
         c,b,s,t,p,w,pump=self.fixture();b.quote.return_value=None
         t.call.return_value={'quote':{'bid':4300,'ask':4300.2,'time_ms':milliseconds()-15000}}
-        pump.collect();t.call.assert_called_once_with('quote');q,_,_=pump.read();self.assertFalse(q['valid'])
-        with tempfile.TemporaryDirectory() as temp:
-            store=Store(Path(temp)/'test.db')
-            try:
-                engine=Engine(store,PaperBroker());engine.start(c);engine.tick(c,{'lots':.01,'qty':1,'contract':100},q)
-                self.assertEqual(engine.state['orders'],[])
-            finally:store.close()
+        pump.collect();t.call.assert_called_once_with('quote');q,_,_=pump.read()
+        # The quote was read now, so an old broker server timestamp is only a
+        # display field. Make the explicit source/receipt distinction visible.
+        self.assertTrue(q['valid'])
+        self.assertNotEqual(q['mt5']['source_time_ms'],q['mt5']['observed_ms'])
 
     def test_strategy_wakes_without_waiting_poll_interval(self):
         import server
