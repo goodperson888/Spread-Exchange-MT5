@@ -70,8 +70,8 @@ def stop_legacy_paper_on_boot(path=STATE_PATH):
 class TradingRuntime:
     """The only component allowed to poll or submit paired trades.
 
-    Credentials remain in process memory. They are deliberately not copied into
-    config.json, SQLite events, or any API response.
+    Credentials are loaded from the local config only when needed. They are
+    never copied into SQLite events or trading records.
     """
     def __init__(self):
         self.lock = threading.RLock()
@@ -115,7 +115,7 @@ class TradingRuntime:
         
         # 实盘模式需要API密钥，纸面模式使用正式环境行情但不需要密钥
         if mode == 'live' and (not api_key or not api_secret):
-            raise ValueError('实盘连接需要在本次会话输入币安 API Key 和 Secret Key；程序不会保存它们')
+            raise ValueError('实盘连接需要币安 API Key 和 Secret Key；请先保存本机连接配置')
         
         with self.lock:
             new_key = pair_key(config)
@@ -159,14 +159,30 @@ class TradingRuntime:
                     if mode == 'live':
                         if str(snapshot['account'].get('currency','')).upper()!='USD':
                             raise ValueError('当前 MT5 账户币种不是 USD，本版无法准确换算佣金和持仓费')
-                        new_binance.preflight()
+                        if int(snapshot['account'].get('margin_mode', -1)) != 2:
+                            raise ValueError('当前 MT5 账户不是对冲模式；本版按逐组持仓管理，只允许 MT5 对冲账户实盘')
+                        try:
+                            permissions = new_binance.api_permissions()
+                        except Exception as exc:
+                            permissions = None
+                            meta['binance_permission_warning'] = str(exc)
+                        new_binance.preflight(permissions)
                         if config['costs']['binance_fee_auto']:
                             fees = new_binance.commission_rate(config['symbol'])
                             config['costs']['binance_taker_percent'] = fees['taker']
                             meta['binance_fee'] = {**fees, 'source':'Binance account commission rate'}
-                        margin = new_terminal.call('margin', lots=config['strategy']['mt5_lots'])
+                        # Check the configured worst-case MT5 exposure, not just
+                        # the first group.  This covers repeated entries and
+                        # grid additions before any live order is sent.
+                        max_live_lots = float(config['strategy']['max_total_lots'])
+                        margin = new_terminal.call('margin', lots=max_live_lots)
+                        meta['mt5_margin_check'] = {
+                            'lots': max_live_lots,
+                            'required': float(margin['required']),
+                            'available': float(margin['available']),
+                        }
                         if margin['required'] > margin['available']:
-                            raise ValueError('MT5 可用保证金不足，不能启动')
+                            raise ValueError(f'按最大总持仓 {max_live_lots:g} 手核算，MT5 可用保证金不足，不能启动')
 
                 new_stream = BinanceBookTicker(config['symbol'], production=True,
                                                proxy_url=config['binance'].get('proxy_url', '')).start()
@@ -368,7 +384,10 @@ class TradingRuntime:
                     self.last_error = ''
                 except Exception as exc:
                     self.last_error = str(exc)
-                    if self.engine.active():
+                    # Fail closed even when there is no current position:
+                    # a transient channel failure must not leave an armed
+                    # live engine that resumes opening by itself later.
+                    if self.engine.state.get('enabled'):
                         self.engine.pause('行情或交易通道异常：' + self.last_error)
 
     def start(self, current_config=None):
@@ -385,6 +404,13 @@ class TradingRuntime:
                     raise ValueError('配置已修改，请重新点击“保存并连接”')
             if self.config['execution']['mode'] == 'live' and not self.reconciled:
                 raise ValueError('实盘启动前必须先完成持仓对账')
+            if self.config['execution']['mode'] == 'live':
+                mode_before=self.binance.position_mode
+                mode_now=self.binance.refresh_position_mode()
+                if mode_now != mode_before:
+                    self.reconciled=False
+                    self.engine.pause('币安持仓模式在连接后发生变化，请重新持仓对账')
+                    raise ValueError('币安持仓模式在连接后发生变化，请重新连接并完成持仓对账')
             self.engine.start(self.config)
             return self.snapshot()
 
@@ -417,6 +443,7 @@ class TradingRuntime:
                 return self.snapshot()
             
             # 实盘模式对账：验证实际持仓与策略日志一致性
+            self.binance.refresh_position_mode()
             for g in self.engine.active():
                 self.engine.resolve(g)
             positions = self.binance.positions(self.config['symbol'])
@@ -436,15 +463,28 @@ class TradingRuntime:
                         and not order.get('result', {}).get('position')):
                     order['result']['position'] = str(by_comment[order['id']]['ticket'])
 
-            # Binance is deliberately limited to one-way mode: our position
-            # must therefore be a short of exactly the journaled quantity.
+            # One-way mode returns a signed BOTH amount. Hedge Mode returns
+            # separate LONG/SHORT rows; this strategy owns only SHORT.
+            position_mode=getattr(self.binance, 'position_mode', 'one_way')
+            if position_mode=='hedge':
+                long_qty=sum(abs(float(x.get('positionAmt',0))) for x in positions if x.get('positionSide')=='LONG')
+                short_qty=sum(abs(float(x.get('positionAmt',0))) for x in positions if x.get('positionSide')=='SHORT')
+                other_qty=sum(abs(float(x.get('positionAmt',0))) for x in positions
+                              if x.get('positionSide') not in ('LONG','SHORT'))
+                signed_bqty=short_qty
+            else:
+                long_qty=0
+                short_qty=0
+                other_qty=0
+                signed_bqty=sum(float(x.get('positionAmt', 0)) for x in positions)
             bad_mt5 = any(int(x.get('side', -1)) != 0 or x.get('comment') not in expected_comments
                           for x in managed_mt5)
-            if open_orders or abs(signed_bqty + expected_b) > .000001 or abs(lots - expected_m) > .0000001 or bad_mt5:
+            binance_mismatch=(long_qty>0.000001 or other_qty>0.000001 or abs(short_qty-expected_b)>0.000001) if position_mode=='hedge' else abs(signed_bqty + expected_b)>0.000001
+            if open_orders or binance_mismatch or abs(lots - expected_m) > .0000001 or bad_mt5:
                 self.engine.pause('账户持仓与本策略日志不一致，禁止自动处理；请人工核对')
                 details = []
                 if open_orders: details.append('币安存在未完成委托')
-                if abs(signed_bqty + expected_b) > .000001: details.append('币安空头方向或数量不符')
+                if binance_mismatch: details.append('币安持仓模式、空头方向或数量不符')
                 if abs(lots - expected_m) > .0000001 or bad_mt5: details.append('MT5 持仓数量、方向或注释不符')
                 raise ValueError('实际持仓与本策略日志不一致：' + '；'.join(details))
             
@@ -455,7 +495,7 @@ class TradingRuntime:
             if not self.engine.state['recovery']:
                 self.engine.state['alarm'] = ''
             self.reconciled = True
-            self.engine.save('reconciled', {'binance_qty': signed_bqty, 'mt5_lots': lots})
+            self.engine.save('reconciled', {'binance_qty': signed_bqty, 'position_mode':position_mode, 'mt5_lots': lots})
             return self.snapshot()
 
     def snapshot(self):
@@ -468,12 +508,16 @@ class TradingRuntime:
                 'auto_values': self.market_meta,
                 'capabilities': {'live_orders': bool(self.config and self.config['execution']['mode'] == 'live'),
                                  'mode': self.config['execution']['mode'] if self.config else 'paper',
-                                 'reconciled': self.reconciled},
+                                 'reconciled': self.reconciled,
+                                 'position_mode': getattr(self.binance, 'position_mode', 'one_way') if self.connected else None},
             }
 
     def chart(self, since):
         with self.lock:
-            key = pair_key(self.config) if self.config else ''
+            # Keep history available after a page refresh or service restart,
+            # before a new connection has established the runtime key.
+            config = self.config or load_config()
+            key = pair_key(config) if config else ''
             return self.store.samples(key, since)
 
 
@@ -739,6 +783,7 @@ class Handler(BaseHTTPRequestHandler):
             content_type = "text/javascript; charset=utf-8" if suffix.endswith("js") else "text/css; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -755,9 +800,6 @@ class Handler(BaseHTTPRequestHandler):
             safe = json.loads(json.dumps(config))
             safe["binance"]["api_key_configured"] = bool(safe["binance"].get("api_key"))
             safe["binance"]["api_secret_configured"] = bool(safe["binance"].get("api_secret"))
-            safe["binance"]["api_key"] = ""
-            safe["binance"]["api_secret"] = ""
-            safe["mt5"].pop("mcp_token", None)
             self.send_json({"ok": True, "config": safe, "errors": validate_config(config)})
             return
         if path == "/api/trading/status":
@@ -789,7 +831,7 @@ class Handler(BaseHTTPRequestHandler):
                     with LOCK:
                         settings = load_config()['mt5']
                     LAST_PROBE = None
-                    token = str(body.get('mcp_token', ''))
+                    token = str(body.get('mcp_token') or settings.get('mcp_token', ''))
                     if settings.get('adapter', 'native') == 'paper':
                         result = inspect_paper_terminal(settings)
                     elif settings.get('adapter') == 'mcp':
@@ -818,7 +860,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/binance/check':
                 with LOCK:
                     config = load_config()
-                result = inspect_binance(config, str(body.get('api_key', '')), str(body.get('api_secret', '')))
+                result = inspect_binance(config, str(body.get('api_key') or config.get('binance', {}).get('api_key', '')),
+                                         str(body.get('api_secret') or config.get('binance', {}).get('api_secret', '')))
                 self.send_json({'ok': True, 'result': result})
                 return
             if path == '/api/binance/public-ip':
@@ -829,13 +872,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 with LOCK:
                     current = load_config()
+                    if body.get('clear_credentials'):
+                        current.setdefault('binance', {})['api_key'] = ''
+                        current.setdefault('binance', {})['api_secret'] = ''
+                        current.setdefault('mt5', {})['mcp_token'] = ''
                     incoming = deep_merge({}, body)
+                    incoming.pop('clear_credentials', None)
                     b = incoming.get("binance", {})
-                    # Secrets are accepted only by the one-shot check endpoint;
-                    # they are never written to config.json by the app.
-                    b.pop("api_key", None)
-                    b.pop("api_secret", None)
-                    incoming.get("mt5", {}).pop("mcp_token", None)
+                    for name in ('api_key', 'api_secret'):
+                        if name in b: b[name] = str(b[name] or '').strip()
+                    if 'mt5' in incoming and 'mcp_token' in incoming['mt5']:
+                        incoming['mt5']['mcp_token'] = str(incoming['mt5']['mcp_token'] or '').strip()
                     saved = deep_merge(current, incoming)
                     errors = validate_config(saved)
                     if errors:
@@ -849,8 +896,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == '/api/trading/connect':
                 config = load_config()
-                result = TRADING.connect(config, str(body.get('api_key', '')), str(body.get('api_secret', '')),
-                                         str(body.get('mt5_mcp_token', '')))
+                result = TRADING.connect(config,
+                                         str(body.get('api_key') or config.get('binance', {}).get('api_key', '')),
+                                         str(body.get('api_secret') or config.get('binance', {}).get('api_secret', '')),
+                                         str(body.get('mt5_mcp_token') or config.get('mt5', {}).get('mcp_token', '')))
                 self.send_json({'ok': True, **result})
                 return
             if path == '/api/trading/start':

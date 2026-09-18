@@ -35,12 +35,13 @@ def validate(c):
         raise ValueError('实盘必须使用真实行情及 Windows MT5 终端')
     if s['exit_mode'] not in ('group', 'basket') or s['target_mode'] not in ('contraction', 'absolute'):
         raise ValueError('退出方式无效')
-    for k in ('require_net_profit', 'group_loss_enabled', 'total_loss_enabled'):
+    for k in ('require_net_profit', 'group_loss_enabled', 'total_loss_enabled', 'grid_enabled'):
         if type(s[k]) is not bool:
             raise ValueError(k+' 必须是开关')
     bounds = {
         'mt5_lots': (0.000001, 10000), 'max_groups': (1, 50), 'cooldown_seconds': (1, 86400),
         'max_total_lots': (0.000001, 10000), 'entry_spread_usd': (0, 100000),
+        'grid_spacing_usd': (0.000001, 100000), 'grid_max_adds': (0, 49),
         'take_contraction_usd': (0.000001, 100000), 'exit_spread_usd': (-100000, 100000),
         'min_net_profit_usd': (0, 1e9), 'group_max_loss_usd': (0.01, 1e9), 'total_max_loss_usd': (0.01, 1e9),
         'max_hold_minutes': (0, 525600), 'max_quote_age_ms': (100, 10000),
@@ -50,8 +51,11 @@ def validate(c):
         v = s[k]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
             raise ValueError(f'{k} 必须在 {lo}～{hi} 范围内')
-    if int(s['max_groups']) != s['max_groups'] or s['mt5_lots'] > s['max_total_lots']:
+    if (int(s['max_groups']) != s['max_groups'] or int(s['grid_max_adds']) != s['grid_max_adds']
+            or s['mt5_lots'] > s['max_total_lots']):
         raise ValueError('组数必须是整数，每组手数不能超过总手数上限')
+    if s['grid_enabled'] and int(s['max_groups']) < 1 + int(s['grid_max_adds']):
+        raise ValueError('启用网格时，最大持仓组数必须至少为 1 + 网格补仓次数')
     for k, lo, hi in [('poll_ms', 250, 5000), ('magic', 1, 2147483647), ('close_retry_limit', 1, 5)]:
         v=e[k]
         if type(v) is not int or not lo <= v <= hi:

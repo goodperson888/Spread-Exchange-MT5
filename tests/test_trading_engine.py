@@ -4,6 +4,7 @@ import json
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import sys
@@ -83,6 +84,23 @@ class EngineTests(unittest.TestCase):
         self.assertIn('mt5_swap', closed['valuation'])
         self.assertEqual(closed['valuation']['remaining'], {'binance': 0, 'mt5': 0})
 
+    def test_grid_adds_only_after_each_spread_interval(self):
+        self.c['strategy'].update(grid_enabled=True, grid_spacing_usd=2, grid_max_adds=2, max_groups=3)
+        validate(self.c)
+        engine = Engine(self.store, PaperBroker())
+        engine.start(self.c)
+        engine.tick(self.c, self.plan, quote(self.c, bid=4305.3, ask=4305.4))
+        self.assertEqual([g['grid_index'] for g in engine.active()], [0])
+        engine.state['last_open_ms']=0
+        engine.tick(self.c, self.plan, quote(self.c, bid=4306.9, ask=4307.0))
+        self.assertEqual(len(engine.active()), 1)
+        engine.state['last_open_ms']=0
+        engine.tick(self.c, self.plan, quote(self.c, bid=4307.4, ask=4307.5))
+        self.assertEqual([g['grid_index'] for g in engine.active()], [0, 1])
+        engine.state['last_open_ms']=0
+        engine.tick(self.c, self.plan, quote(self.c, bid=4309.4, ask=4309.5))
+        self.assertEqual([g['grid_index'] for g in engine.active()], [0, 1, 2])
+
     def test_unknown_first_leg_pauses_without_resubmission(self):
         engine = Engine(self.store, UnknownBroker())
         engine.start(self.c)
@@ -130,13 +148,28 @@ class EngineTests(unittest.TestCase):
 
 class BinanceCostTests(unittest.TestCase):
     @staticmethod
-    def account_request(account, dual=False):
+    def account_request(account, dual=False, configuration=None):
         def request(path, params=None, method='GET', signed=False):
+            if path.endswith('/accountConfig'):
+                return configuration if configuration is not None else {k:account[k] for k in ('canTrade','multiAssetsMargin') if k in account}
             if path.endswith('/account'): return account
             if path.endswith('/dual'): return {'dualSidePosition':dual}
             if path.endswith('/time'): return {'serverTime':int(time.time()*1000)}
             raise AssertionError(path)
         return request
+
+    def test_v3_without_permission_fields_uses_account_configuration(self):
+        account={'assets':[{'asset':'USDT','walletBalance':'100','availableBalance':'90'}]}
+        broker=Binance(production=True)
+        broker.request=self.account_request(account, configuration={'canTrade':True,'multiAssetsMargin':False})
+        self.assertTrue(broker.preflight({'enable_futures':True})['can_trade'])
+
+    def test_missing_permission_is_unknown_not_false(self):
+        broker=Binance(production=True)
+        for flag in (None, 'false', 0):
+            broker.request=self.account_request({}, configuration={'canTrade':flag})
+            with self.assertRaisesRegex(ValueError,'未返回有效 canTrade'):
+                broker.preflight({'enable_futures':True})
 
     def test_multi_asset_mode_allows_usdt_only_and_reports_usdt_balance(self):
         account={'canTrade':True,'multiAssetsMargin':True,'availableBalance':'900',
@@ -171,8 +204,23 @@ class BinanceCostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'enableFutures=true.*canTrade=false'):
             broker.preflight({'enable_futures':True})
         account['canTrade']=True
-        with self.assertRaisesRegex(ValueError,'单向持仓模式'):
-            broker.request=self.account_request(account,dual=True);broker.preflight()
+        broker.request=self.account_request(account,dual=True)
+        self.assertEqual(broker.preflight()['position_mode'],'hedge')
+
+    def test_hedge_mode_order_uses_position_side_without_reduce_only(self):
+        broker=Binance(production=True)
+        broker.position_mode='hedge'
+        seen={}
+        def request(path, params=None, method='GET', signed=False):
+            seen.update(params or {})
+            return {'status':'FILLED','executedQty':'1','avgPrice':'100','orderId':123}
+        broker.request=request
+        spec={'filters':{'PRICE_FILTER':{'tickSize':'0.1'}}}
+        result=broker.submit({'action':'open','symbol':'XAUUSDT','requested':1,'limit':100,
+                              'id':'gphedge123','position_side':'SHORT'},spec)
+        self.assertEqual(result['status'],'done')
+        self.assertEqual(seen['positionSide'],'SHORT')
+        self.assertNotIn('reduceOnly',seen)
 
     def test_public_ip_uses_configured_opener_and_validates_response(self):
         broker = Binance(production=True, proxy_url='http://127.0.0.1:7890')

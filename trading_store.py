@@ -46,29 +46,53 @@ class Store:
                 self.db.execute('DELETE FROM quote_minutes WHERE time < ?', (now-30*86400000,))
                 self.last_cleanup = now
 
-    def _bucketed(self, table, key, start, end, limit):
+    def _bucketed(self, table, keys, start, end, limit):
         if end <= start or limit <= 0:
             return []
+        keys=list(dict.fromkeys(str(x) for x in (keys if isinstance(keys, (list, tuple, set)) else [keys]) if x))
+        if not keys:
+            return []
         bucket=max(1,(end-start+limit-1)//limit)
+        marks=','.join('?' for _ in keys)
         return self.db.execute(f'''
             SELECT data FROM {table}
-            WHERE symbol=? AND time>=? AND time<? AND time IN (
+            WHERE symbol IN ({marks}) AND time>=? AND time<? AND time IN (
                 SELECT MAX(time) FROM {table}
-                WHERE symbol=? AND time>=? AND time<?
+                WHERE symbol IN ({marks}) AND time>=? AND time<?
                 GROUP BY CAST((time-?)/? AS INTEGER)
             ) ORDER BY time
-        ''',(key,start,end,key,start,end,start,bucket)).fetchall()
+        ''',(*keys,start,end,*keys,start,end,start,bucket)).fetchall()
 
-    def samples(self, key, since=0, limit=5000):
+    def _history_keys(self, key):
+        """Return saved configuration keys for the same exchange symbol."""
+        key=str(key or '')
+        if not key:
+            return []
+        parts=key.split('|')
+        if len(parts)<3 or not parts[2]:
+            return [key]
+        symbol=parts[2]
+        pattern=f'%|{symbol}|%'
+        rows=self.db.execute('''
+            SELECT DISTINCT symbol FROM quote_minutes WHERE symbol=? OR symbol LIKE ?
+            UNION
+            SELECT DISTINCT symbol FROM quotes WHERE symbol=? OR symbol LIKE ?
+        ''',(key,pattern,key,pattern)).fetchall()
+        return list(dict.fromkeys([key]+[str(row[0]) for row in rows]))
+
+    def samples(self, key, since=0, limit=20000):
         with self.lock:
-            now=int(time.time()*1000); cutoff=now-86400000; limit=min(5000,max(100,int(limit)))
+            now=int(time.time()*1000); cutoff=now-86400000; limit=min(20000,max(100,int(limit)))
+            keys=self._history_keys(key)
             old_duration=max(0,cutoff-since); new_start=max(since,cutoff); new_duration=max(0,now-new_start)
             total=max(1,old_duration+new_duration)
             old_limit=int(limit*old_duration/total) if old_duration else 0
             new_limit=limit-old_limit
-            rows=self._bucketed('quote_minutes',key,since,cutoff,old_limit)
-            rows+=self._bucketed('quotes',key,new_start,now+1,new_limit)
-            return [json.loads(x[0]) for x in rows]
+            rows=self._bucketed('quote_minutes',keys,since,cutoff,old_limit)
+            rows+=self._bucketed('quotes',keys,new_start,now+1,new_limit)
+            # Keep the boundary between minute history and high-frequency
+            # samples deterministic even when a process was restarted.
+            return [json.loads(x[0]) for x in sorted(rows, key=lambda row: json.loads(row[0]).get('time_ms', 0))]
 
     def events(self, limit=100):
         with self.lock:

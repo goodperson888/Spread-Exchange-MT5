@@ -9,6 +9,6 @@ dist/
 data/config.json
 data/state.json
 data/events.jsonl
-data/*.sqlite3*
+data/*.sqlite*
 *.log
 .DS_Store

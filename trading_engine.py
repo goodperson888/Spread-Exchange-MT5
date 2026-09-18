@@ -61,6 +61,10 @@ class Engine:
                reference=reference,limit=reference+(-slip if sell else slip),slippage=slip,
                fx=q.get('usdt_usd',g['costs']['usdt_usd']),
                created_ms=stamp(),result={'status':'unknown','qty':0,'price':0})
+        if leg=='binance':
+            # The strategy always opens and closes the Binance SHORT leg.
+            # The broker adds this only when the account is in Hedge Mode.
+            o['position_side']='SHORT'
         if action=='close' and leg=='mt5':
             opened=next(x for x in self.state['orders'] if x['group']==g['id'] and x['leg']=='mt5' and x['action']=='open' and x['result'].get('qty',0)>0)
             o['position']=opened['result'].get('position') or opened['result'].get('ticket')
@@ -123,12 +127,13 @@ class Engine:
                     net=round(gross-fees-exit_fee+carry,8),remaining=owned,
                     costs_verified=verified,estimated=not flat or (g['mode']!='paper' and not verified))
 
-    def open(self, c, p, q):
+    def open(self, c, p, q, grid_index=0):
         now=stamp()
         g=dict(id=uuid.uuid4().hex[:12],status='opening',opened_ms=now,qty=p['qty'],lots=p['lots'],contract=p['contract'],
             symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],mode=c['execution']['mode'],
             parameters=copy.deepcopy(c['strategy']),costs=copy.deepcopy(c['costs']),attempts=0,
-            retry_limit=c['execution']['close_retry_limit'],entry=q['entry'],reason='',key=pair_key(c))
+            retry_limit=c['execution']['close_retry_limit'],entry=q['entry'],reason='',key=pair_key(c),
+            grid_index=int(grid_index))
         self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
         # MT5 is the less predictable leg. Fill it first, then the exchange with a bounded IOC.
         first=self.order(g,'mt5','open',p['qty'],q)
@@ -229,11 +234,21 @@ class Engine:
         for g in self.active():
             if g['status'] in ('closing','unwinding'):
                 exit_event=True;self.close_group(g,q)
-        s=c['strategy'];active=self.active()
+        s=c['strategy'];active=self.active();grid_index=0;open_threshold=s['entry_spread_usd'];grid_allowed=True
+        if s.get('grid_enabled') and active:
+            # Grid additions are separate paired groups. They only continue
+            # a homogeneous grid chain; unrelated/manual groups block adds.
+            if all(g.get('parameters',{}).get('grid_enabled') for g in active):
+                grid_index=max(int(g.get('grid_index',0)) for g in active)+1
+                open_threshold=s['entry_spread_usd']+grid_index*s['grid_spacing_usd']
+                grid_allowed=grid_index<=int(s['grid_max_adds'])
+            else:
+                grid_allowed=False
         if (self.state['enabled'] and not exit_event and all(g['status']=='open' for g in active)
-            and len(active)<s['max_groups'] and sum(g['lots'] for g in active)+p['lots']<=s['max_total_lots']+1e-9
-            and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and q['entry']>=s['entry_spread_usd']):
-            self.open(c,p,q)
+            and grid_allowed and len(active)<s['max_groups']
+            and sum(g['lots'] for g in active)+p['lots']<=s['max_total_lots']+1e-9
+            and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and q['entry']>=open_threshold):
+            self.open(c,p,q,grid_index=grid_index)
 
     @staticmethod
     def target(g, entry, exit_spread):

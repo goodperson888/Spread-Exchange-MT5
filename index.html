@@ -16,7 +16,7 @@
 </div>
 <div class="grid" id="mcp-fields">
 <label>MT5 MCP 地址<input id="mcp-url" value="http://127.0.0.1:22346/mcp" spellcheck="false"></label>
-<label>MCP Token（仅当前会话）<span class="secret-input"><input id="mt5-mcp-token" type="password" autocomplete="off" placeholder="或启动前设置 MT5_TERMINAL_MCP_TOKEN"><button class="secret-toggle" type="button" data-toggle-secret="mt5-mcp-token" aria-controls="mt5-mcp-token" aria-label="显示 MCP Token" aria-pressed="false" title="显示 MCP Token"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
+<label>MCP Token（本机保存，刷新后保留）<span class="secret-input"><input id="mt5-mcp-token" type="password" autocomplete="off" placeholder="或启动前设置 MT5_TERMINAL_MCP_TOKEN"><button class="secret-toggle" type="button" data-toggle-secret="mt5-mcp-token" aria-controls="mt5-mcp-token" aria-label="显示 MCP Token" aria-pressed="false" title="显示 MCP Token"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 </div>
 <details id="native-path-fields"><summary>多个 Windows MT5 终端时指定路径</summary><label>MT5终端路径<input id="terminal-path" placeholder="C:\Program Files\经纪商 MT5\terminal64.exe" maxlength="1000"></label></details>
 <div id="mt5-result" class="result" role="status" aria-live="polite">尚未检查。检查会保存上方 MT5 配置，然后读取本机终端；不会提交交易。</div>
@@ -24,7 +24,7 @@
 <label>每手盎司<input id="contract" readonly placeholder="检查后自动读取"></label>
 <label>最小手数<input id="volume-min" readonly placeholder="检查后自动读取"></label>
 <label>手数步长<input id="volume-step" readonly placeholder="检查后自动读取"></label>
-</div><p class="note">最小手数、步长和每手盎司数均从真实 MT5 读取。MCP Token 不保存到配置或 Git；MCP 适配器不会调用任何交易工具。</p>
+</div><p class="note">最小手数、步长和每手盎司数均从真实 MT5 读取。API Key、Secret 和 MCP Token 会保存到本机配置文件，不写入浏览器草稿、SQLite 交易记录或 Git；请勿共享 data 目录。MCP 适配器不会调用任何交易工具。</p>
 </section>
 <section class="panel" aria-labelledby="exchange-heading">
 <div class="heading"><div><p class="eyebrow">02 · 币安永续</p><h2 id="exchange-heading">币安连接配置</h2></div><div><button id="check-binance" class="primary" disabled>检查币安连接</button></div></div>
@@ -32,6 +32,7 @@
 <label>交易所品种<input id="symbol" value="XAUUSDT" maxlength="24" spellcheck="false"></label>
 <label>执行模式<select id="exec-mode"><option value="paper">纸面模拟（可用 MCP）</option><option value="live">实盘（仅 Windows MT5）</option></select></label>
 </div>
+<p id="mode-compatibility" class="note" role="status" aria-live="polite"></p>
 <div class="proxy-tools">
 <label>币安网络代理（可选）<input id="binance-proxy" placeholder="例如 http://127.0.0.1:7890" maxlength="300" spellcheck="false"></label>
 <button id="check-public-ip" type="button" disabled>获取币安出口 IP</button>
@@ -39,11 +40,12 @@
 </div>
 <p id="public-ip-result" class="note inline-status" role="status" aria-live="polite">尚未检测。币安白名单需要公网出口 IP，不是局域网 IP。</p>
 <div class="grid" id="api-keys-section" style="display:none;">
-<label>API Key（仅实盘模式）<span class="secret-input"><input id="trading-api-key" type="password" autocomplete="off" placeholder="实盘连接时输入"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-key" aria-controls="trading-api-key" aria-label="显示 API Key" aria-pressed="false" title="显示 API Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
-<label>Secret Key（仅实盘模式）<span class="secret-input"><input id="trading-api-secret" type="password" autocomplete="new-password" placeholder="实盘连接时输入"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-secret" aria-controls="trading-api-secret" aria-label="显示 Secret Key" aria-pressed="false" title="显示 Secret Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
+<label>API Key（本机保存）<span class="secret-input"><input id="trading-api-key" type="password" autocomplete="off" placeholder="输入后自动保存"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-key" aria-controls="trading-api-key" aria-label="显示 API Key" aria-pressed="false" title="显示 API Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
+<label>Secret Key（本机保存）<span class="secret-input"><input id="trading-api-secret" type="password" autocomplete="new-password" placeholder="输入后自动保存"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-secret" aria-controls="trading-api-secret" aria-label="显示 Secret Key" aria-pressed="false" title="显示 Secret Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 </div>
-<p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。网络受限时可填写 HTTP/Mixed 代理，REST、WebSocket 与实盘请求会统一使用；地址会自动保存，请勿在其中填写账号密码。出口 IP 只代表检测当时结果；代理节点、家庭公网 IP 或代理分流规则变化后需重新检测，并以“检查币安连接”的白名单结果为准。实盘还会检查账户交易权限、持仓模式和费率；检查不会下单。API Key/Secret 仅在本次会话使用，不写入文件。</p>
+<p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。网络受限时可填写 HTTP/Mixed 代理，REST、WebSocket 与实盘请求会统一使用；地址会自动保存，请勿在其中填写账号密码。出口 IP 只代表检测当时结果；代理节点、家庭公网 IP 或代理分流规则变化后需重新检测，并以“检查币安连接”的白名单结果为准。实盘会自动识别单向或双向持仓；本策略永续侧始终使用 SHORT 持仓方向，并检查账户交易权限和费率。检查不会下单。API Key 和 Secret 会保存到本机配置，刷新页面后自动恢复。</p>
 <div id="binance-result" class="result" role="status" aria-live="polite">尚未检查币安连接。</div>
+<div class="actions"><button id="save-config" type="button" disabled>保存连接与策略配置</button><button id="clear-credentials" type="button" disabled>清除已保存凭据</button></div>
 <p id="config-status" class="note" role="status" aria-live="polite">正在读取配置…</p>
 </section>
 <section class="panel" aria-labelledby="plan-heading">
@@ -54,10 +56,9 @@
 <label>币安 Ask（USDT）<input id="binance-ask" type="number" step="any" placeholder="纸面撮合用" readonly></label>
 <label>MT5 Bid（USDT）<input id="mt5-bid" type="number" step="any" placeholder="纸面撮合用" readonly></label>
 <label>MT5 Ask（USDT）<input id="mt5-ask" type="number" step="any" placeholder="纸面撮合用" readonly></label>
-<label>入场价差（USD/盎司）<input id="entry" type="number" step="0.1" value="5"></label>
 </div>
 <details><summary>高级执行保护参数</summary><div class="grid">
-<label>最多持仓组数<input id="max-groups" type="number" value="1" min="1" max="50"></label>
+<label>最多持仓组数（含网格补仓）<input id="max-groups" type="number" value="1" min="1" max="50"></label>
 <label>报价最大年龄（毫秒）<input id="max-age" type="number" value="3000"></label>
 <label>双边报价最大时差（毫秒）<input id="max-clock-skew" type="number" value="2000"></label>
 <label>最大单边敞口时间（毫秒）<input id="max-unhedged" type="number" value="1500"></label>
@@ -70,23 +71,27 @@
 <section class="panel" id="legacy-paper-panel"><div class="heading"><h2>旧版纸面验证状态</h2></div><p id="state" class="state">正在读取本机服务状态…</p><p class="note">保留旧流程用于手动复核。自动执行请使用下方的持续行情与配对执行区；程序重启后必须重新连接并对账。</p></section>
 <section class="panel" aria-labelledby="execution-heading">
 <div class="heading"><div><p class="eyebrow">04 · 自动执行</p><h2 id="execution-heading">持续行情、策略与配对执行</h2></div><span id="trading-mode" class="badge">未连接</span></div>
-<p class="note">固定方向：卖币安永续、买 MT5 黄金。先连通和对账，才能启动自动开仓。暂停只停止新开仓；已有交易组会继续按已锁定的规则管理。</p>
+<p class="note">固定方向：卖币安永续、买 MT5 黄金。入场价差 = 卖币安 Bid − 买 MT5 Ask；退出价差 = 买回币安 Ask − 卖出 MT5 Bid。先连通和对账，才能启动自动开仓。暂停只停止新开仓；已有交易组会继续按已锁定的规则管理。网格补仓会按“开仓阈值 + 间距 × 次数”逐级增加配对交易组，并受总手数和持仓组数上限共同限制。整篮子模式会等价差条件和整篮子净收益条件同时满足后一次性平仓。</p>
 <div class="grid">
+<label>自动开仓阈值（USD/盎司）<input id="entry" type="number" step="0.1" value="5" min="0"></label>
 <label>重复开仓间隔（秒）<input id="cooldown" type="number" value="60" min="1"></label>
 <label>策略总手数上限<input id="max-total" type="number" value="0.1" min="0.01" step="0.01"></label>
+<label class="check"><input id="grid-enabled" type="checkbox"> 启用网格补仓</label>
+<label id="grid-spacing-field">网格补仓间距（USD/盎司）<input id="grid-spacing" type="number" value="2" min="0.1" step="0.1"></label>
+<label id="grid-adds-field">最多网格补仓次数<input id="grid-adds" type="number" value="0" min="0" max="49" step="1"></label>
 <label>平仓方式<select id="exit-mode"><option value="group">逐组平仓</option><option value="basket">整篮子平仓</option></select></label>
 <label>止盈规则<select id="target-mode"><option value="contraction">价差收窄幅度</option><option value="absolute">目标退出价差</option></select></label>
 <label id="contraction-field">收窄幅度（USD/盎司）<input id="take" type="number" step="0.1" value="2"></label>
 <label id="absolute-field">目标退出价差（USD/盎司）<input id="absolute-exit" type="number" value="0" step="0.1"></label>
+<label class="check"><input id="require-net" type="checkbox" checked> 平仓要求达到最低净收益</label>
+<label id="min-net-field"><span id="min-net-label">最低净收益（USD）</span><input id="min-net" type="number" value="0" min="0" step="0.01"></label>
 </div>
 <details><summary>高级连接与执行参数</summary><div class="grid">
 <label>策略计算间隔（毫秒）<input id="poll-ms" type="number" value="250" min="250" max="5000"></label>
 <label>平仓重试次数<input id="close-retries" type="number" value="3" min="1" max="5"></label>
 <label>MT5 策略识别码（Magic）<input id="magic" type="number" value="9121701" min="1" max="2147483647"></label>
-</div><p class="note">Magic 仅用于识别本策略下的 MT5 订单与持仓，防止程序误处理其他手工单或 EA 订单。正常使用保持默认值即可。</p></details>
+</div><p class="note">策略执行默认每 250 毫秒检查一次双边报价；实际成交还会受平台撮合、网络和滑点影响。图表仅限制到秒级缩放，不会改变监控、开平仓或成交判断频率。Magic 仅用于识别本策略下的 MT5 订单与持仓，防止程序误处理其他手工单或 EA 订单。正常使用保持默认值即可。</p></details>
 <details><summary>净收益、止损与费用设置</summary><div class="grid">
-<label class="check"><input id="require-net" type="checkbox" checked> 正常止盈要求达到最低净收益</label>
-<label id="min-net-field">最低预计净收益（USD）<input id="min-net" type="number" value="0" min="0" step="0.01"></label>
 <label class="check"><input id="group-loss-on" type="checkbox"> 启用单组亏损退出</label>
 <label id="group-loss-field">单组最大亏损（USD）<input id="group-loss" type="number" value="50" min="0.01" step="0.01"></label>
 <label class="check"><input id="total-loss-on" type="checkbox"> 启用策略总亏损退出</label>
@@ -97,18 +102,19 @@
 <label class="check" id="auto-binance-fee-field"><input id="auto-binance-fee" type="checkbox" checked> 实盘连接后自动读取币安费率</label>
 <label>币安吃单费率（%/单边）<input id="binance-fee" type="number" value="0.05" min="0" step="0.0001"></label>
 <label>MT5 佣金预估（USD/手/单边）<input id="mt5-fee" type="number" value="0" min="0" step="0.01"></label>
-<label id="mt5-swap-field">MT5 纸面持仓费（USD/手/日，可为负）<input id="mt5-swap" type="number" value="0" step="0.01"></label>
-<label id="paper-funding-field">纸面资金费（%/日）<input id="paper-funding" type="number" value="0" step="0.001"></label>
-</div><p id="cost-source" class="note">连接后显示自动读取来源。实盘的 MT5 佣金/持仓费和币安资金费以账户实际入账为准。</p></details>
+<label id="mt5-swap-field">MT5 纸面 Swap/持仓费估算（USD/手/日，可为负）<input id="mt5-swap" type="number" value="0" step="0.01"></label>
+<label id="paper-funding-field">币安纸面资金费估算（%/日）<input id="paper-funding" type="number" value="0" step="0.001"></label>
+</div><p id="cost-source" class="note">纸面 Swap/资金费只是回测估算，不是下单手续费；MT5 佣金另行填写。实盘模式会隐藏纸面估算，使用 MT5 实际 Swap、成交佣金和币安实际资金费。</p></details>
 <div class="actions"><button id="trading-connect" class="primary">连接双边行情</button><button id="trading-reconcile">持仓对账</button><button id="trading-toggle" class="primary">启动自动开仓</button><button id="trading-close">全部平仓</button></div>
-<div id="trading-result" class="result" role="status">未连接。实盘凭据只在本次连接时使用，不写入文件。</div>
+<div id="trading-result" class="result" role="status">未连接。实盘凭据从本机配置读取；启动前请确认 API Key 没有提币权限。</div>
+<details class="risk-details"><summary>风控与异常处理</summary><p class="note">系统会在开仓前检查报价年龄、双边时差、最大滑点、单边敞口时间、账户权限、保证金、数量步长、持仓模式和持仓对账。交易组数、总手数、网格次数、冷却时间、最低净收益、单组/总亏损和最长持仓也会限制策略。</p><p class="note">任一边部分成交、拒单、超时或回报不确定时，系统暂停新开仓，查询平台状态并按已成交数量处理，不盲目重发；行情或交易通道异常会自动停开仓。页面的“自动执行”状态、交易结果、订单流水和事件日志会显示告警与处理结果。浏览器关闭后不会发送外部通知。</p></details>
 </section>
 <section class="panel" aria-labelledby="chart-heading">
-<div class="heading"><div><p class="eyebrow">05 · 实时与历史价差</p><h2 id="chart-heading">真实可成交方向监控</h2><p class="muted">实线为 Bid/Ask 可成交口径，标记显示策略开平仓；不混入收盘价参考曲线。</p></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
-<p id="quote-summary" class="state">等待双边行情。</p>
+<div class="heading"><div><p class="eyebrow">05 · 实时与历史价差</p><h2 id="chart-heading">真实可成交方向监控</h2><p class="muted">入场线：卖币安 Bid、买 MT5 Ask；退出线：买回币安 Ask、卖出 MT5 Bid。图表显示可成交价差，缩放最低到 1 秒；策略计算仍按 250 毫秒运行。</p></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
+<p id="quote-summary" class="state">等待双边行情。</p><span id="chart-live-status" class="badge neutral">未连接 · 图表保留历史</span>
 <div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>
 <div class="chart-wrap"><div id="spread-chart" class="chart" role="img" aria-label="入场与退出可成交价差历史折线图"></div><p id="chart-empty" class="chart-empty">连接后开始积累可成交价差历史。</p></div>
-<p id="chart-coverage" class="note">本机高频记录保留 24 小时，更早数据按分钟归档并保留 30 天。</p>
+<p id="chart-coverage" class="note">本机高频记录保留 24 小时，更早数据按分钟归档并保留 30 天；历史保存在本机数据目录，清理浏览器缓存不会删除。</p>
 <section class="records" aria-labelledby="group-records-heading"><div class="subheading"><div><p class="eyebrow">06 · 收益与订单</p><h3 id="group-records-heading">交易组收益记录</h3></div><span class="note">实盘平仓后会用平台成交与费用记录复核</span></div><div id="pnl-stats" class="stats" aria-label="交易收益摘要"></div><div id="groups" class="table-wrap"></div><h3>双边订单流水</h3><div id="orders" class="table-wrap"></div><details><summary>技术事件日志</summary><div id="trade-events" class="events"></div></details></section>
 </section>
 </main><script src="echarts.min.js"></script><script src="app.js"></script><script src="trading-app.js"></script></body></html>

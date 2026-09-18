@@ -189,15 +189,17 @@ class HttpTests(unittest.TestCase):
         self.assertFalse(self.request('/api/status')[1]['capabilities']['real_orders'])
         self.assertEqual(self.request('/api/config', {'mode':'live'})[0], 400)
 
-    def test_masked_secrets_and_blank_preserve(self):
+    def test_persisted_secrets_and_clear(self):
         self.request('/api/config', {'binance':{'api_key':'test-key', 'api_secret':'test-secret'},
                                      'mt5':{'mcp_token':'mcp-secret'}})
-        self.request('/api/config', {'binance':{'api_key':'', 'api_secret':''}})
         response = self.request('/api/config')[1]
-        self.assertNotIn('test-secret', json.dumps(response))
-        self.assertNotIn('mcp-secret', json.dumps(response))
-        self.assertNotIn('mcp_token', server.load_config()['mt5'])
+        self.assertEqual(response['config']['binance']['api_key'], 'test-key')
+        self.assertEqual(response['config']['binance']['api_secret'], 'test-secret')
+        self.assertEqual(response['config']['mt5']['mcp_token'], 'mcp-secret')
+        self.assertTrue(response['config']['binance']['api_key_configured'])
+        self.request('/api/config', {'clear_credentials': True})
         self.assertEqual(server.load_config()['binance']['api_secret'], '')
+        self.assertEqual(server.load_config()['mt5']['mcp_token'], '')
 
     def test_binance_check_is_read_only(self):
         result = {'message':'ok','orders_sent':False,'quote':{'bid':4300,'ask':4301}}

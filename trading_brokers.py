@@ -33,6 +33,7 @@ class Binance:
         self.base = 'https://fapi.binance.com' if production else 'https://demo-fapi.binance.com'
         self.key, self.secret, self.offset = key, secret, 0
         self.recv_window_ms = int(recv_window_ms)
+        self.position_mode = 'one_way'
         self.proxy_url = str(proxy_url or '').strip()
         proxies = {'http': self.proxy_url, 'https': self.proxy_url} if self.proxy_url else {}
         self.opener = build_opener(ProxyHandler(proxies)) if proxies else build_opener()
@@ -114,17 +115,26 @@ class Binance:
     def preflight(self, api_permissions=None):
         self.sync()
         a=self.request('/fapi/v3/account', signed=True)
-        if not a.get('canTrade'):
+        # V3 supplies balances/positions; permission and mode flags live in
+        # accountConfig. Missing fields must never be reported as false.
+        configuration=self.request('/fapi/v1/accountConfig', signed=True)
+        if api_permissions and api_permissions.get('enable_futures') is False:
+            raise ValueError('当前 API Key 权限返回 enableFutures=false；请确认修改并保存的是页面中这把 Key 的“允许合约”权限')
+        if type(configuration.get('canTrade')) is not bool:
+            raise ValueError('账户配置接口未返回有效 canTrade，暂不能确认交易权限；这不等同于 canTrade=false')
+        if not configuration['canTrade']:
             if api_permissions and not api_permissions.get('enable_futures'):
                 raise ValueError('当前 API Key 权限返回 enableFutures=false；请确认修改并保存的是页面中这把 Key 的“允许合约”权限')
             if api_permissions and api_permissions.get('enable_futures'):
-                raise ValueError('当前 API Key 已允许合约（enableFutures=true），但 USDⓈ-M 合约账户返回 canTrade=false；请检查主/子账户是否对应，以及账户是否处于组合保证金、冷静期、风控或地区限制。这不是 IP 白名单报错')
+                raise ValueError('当前 API Key 已允许合约（enableFutures=true），但 /fapi/v1/accountConfig 明确返回 canTrade=false；具体原因未由接口提供，请向币安核实账户交易状态；本次不是 IP 白名单拒绝响应')
             raise ValueError('USDⓈ-M 合约账户返回 canTrade=false；API Key 权限明细未能读取，请检查主/子账户、组合保证金及账户风控状态')
         assets=list(a.get('assets') or [])
         usdt=next((x for x in assets if str(x.get('asset','')).upper()=='USDT'),None)
         if not usdt:
             raise ValueError('币安合约账户未返回 USDT 资产信息')
-        multi=bool(a.get('multiAssetsMargin'))
+        if type(configuration.get('multiAssetsMargin')) is not bool:
+            raise ValueError('账户配置接口未返回有效保证金模式，暂不能完成核验')
+        multi=configuration['multiAssetsMargin']
         non_usdt=[]
         for item in assets:
             asset=str(item.get('asset','')).upper()
@@ -136,10 +146,11 @@ class Binance:
         if multi and non_usdt:
             names='、'.join(sorted(set(non_usdt)))
             raise ValueError(f'多资产模式检测到非 USDT 资产余额、盈亏或占用保证金：{names}；请清零后重试')
-        if self.request('/fapi/v1/positionSide/dual', signed=True).get('dualSidePosition'):
-            raise ValueError('第一版执行适配币安单向持仓模式，请在无仓位时自行设置账户')
+        dual_side=self.refresh_position_mode()=='hedge'
         return {
             'can_trade':True,
+            'position_mode':self.position_mode,
+            'position_mode_label':'双向持仓（对冲模式）' if dual_side else '单向持仓',
             'available':float(usdt.get('availableBalance',a.get('availableBalance',0)) or 0),
             'wallet':float(usdt.get('walletBalance',a.get('totalWalletBalance',0)) or 0),
             'asset_mode':'multi' if multi else 'single',
@@ -148,6 +159,13 @@ class Binance:
             'account_available_usd':float(a.get('availableBalance',0) or 0),
             'account_wallet_usd':float(a.get('totalWalletBalance',0) or 0),
         }
+
+    def refresh_position_mode(self):
+        dual_flag=self.request('/fapi/v1/positionSide/dual', signed=True).get('dualSidePosition')
+        if type(dual_flag) is not bool:
+            raise ValueError('持仓模式接口未返回有效 dualSidePosition，暂不能安全判断订单参数；本次未下单')
+        self.position_mode='hedge' if dual_flag else 'one_way'
+        return self.position_mode
 
     def positions(self, symbol):
         return self.request('/fapi/v3/positionRisk', {'symbol':symbol}, signed=True)
@@ -172,7 +190,10 @@ class Binance:
         args=dict(symbol=order['symbol'],side=side,type='LIMIT',timeInForce='IOC',
                   quantity=format(Decimal(str(order['requested'])), 'f'),price=format(price,'f'),
                   newClientOrderId=order['id'],newOrderRespType='RESULT')
-        if side=='BUY': args['reduceOnly']='true'
+        if self.position_mode=='hedge':
+            args['positionSide']=str(order.get('position_side') or 'SHORT').upper()
+        elif side=='BUY':
+            args['reduceOnly']='true'
         try:
             return self.normalize(self.request('/fapi/v1/order', args, 'POST', True))
         except ApiError as exc:
