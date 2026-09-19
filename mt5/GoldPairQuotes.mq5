@@ -119,7 +119,11 @@ void OnTimer()
       SocketTimeouts(channel,10,10);
       if(!SocketConnect(channel,"127.0.0.1",(uint)LocalPort,100))
       {
-         PrintFormat("GoldPairQuotes: SocketConnect 127.0.0.1:%d 失败，错误码=%d。请确认网页应用在同一台 Windows 电脑运行且端口正在监听。",LocalPort,GetLastError());
+         int socket_error=GetLastError();
+         if(socket_error==4014)
+            Print("GoldPairQuotes: SocketConnect 被 MT5 拒绝，错误码=4014。请在工具→选项→EA交易中勾选‘允许 WebRequest 请求下列 URL’，添加 http://127.0.0.1，然后重新加载 EA。");
+         else
+            PrintFormat("GoldPairQuotes: SocketConnect 127.0.0.1:%d 失败，错误码=%d。请确认网页应用在同一台 Windows 电脑运行且端口正在监听。",LocalPort,socket_error);
          Disconnect();return;
       }
       PrintFormat("GoldPairQuotes: TCP 已连接到 127.0.0.1:%d，正在验证 LocalToken。",LocalPort);
