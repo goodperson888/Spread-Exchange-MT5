@@ -182,7 +182,11 @@ class QuotePump:
         observed_at = milliseconds()
         mt5 = observed_quote(mt5, observed_at)
         market = observed_quote(market, observed_at)
-        signature = tuple((q['source_time_ms'], q['bid'], q['ask']) for q in (mt5, market)) + (fx,)
+        # Transport changes are observable state too.  A pushed tick can have
+        # the same broker timestamp and prices as the compatibility poll; keep
+        # one fresh event so the UI changes from polling to EA push immediately.
+        signature = tuple((q['source_time_ms'], q['bid'], q['ask']) for q in (mt5, market)) + (
+            fx, self.mt5_transport, self.binance_transport)
         if signature == self.last_signature: return
         from trading_config import pair_key
         from trading_engine import valid_quote
