@@ -583,6 +583,30 @@ class TradingRuntime:
             self.engine.pause()
             return self.snapshot()
 
+    def apply_entry_threshold(self, value):
+        """Apply only the live opening threshold without reconnecting.
+
+        Connection/account changes remain gated by reconnect and reconciliation;
+        this setting is safe to change while the quote stream is running.
+        """
+        with self.lock:
+            if not self.connected:
+                raise ValueError('请先连接双边行情，再应用开仓阈值')
+            try:
+                threshold = float(value)
+            except (TypeError, ValueError):
+                raise ValueError('开仓阈值必须是数字')
+            if not math.isfinite(threshold) or threshold < 0 or threshold > 100000:
+                raise ValueError('开仓阈值必须在 0 到 100000 USD/盎司之间')
+            self.config['strategy']['entry_spread_usd'] = threshold
+            # Keep the setting after a refresh/restart as well. Credentials are
+            # already stored by the normal config-save path; this writes the
+            # same local-only config file with the newly applied value.
+            write_config(copy.deepcopy(self.config))
+            self.engine.save('entry_threshold_applied', {'value': threshold})
+            self.market_meta['strategy_trigger'] = '报价事件驱动；开仓阈值已应用'
+            return self.snapshot()
+
     def close_group(self, group=None, reason='用户请求平仓'):
         with self.lock:
             if self.config and self.config['execution']['mode']=='live' and not self.reconciled:
@@ -818,6 +842,7 @@ class TradingRuntime:
                 'state': st, 'events': self.store.events(),
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,
+                'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd']} if self.config else None,
                 'capabilities': {'live_orders': bool(self.config and self.config['execution']['mode'] == 'live'),
                                  'mode': self.config['execution']['mode'] if self.config else 'paper',
                                  'reconciled': self.reconciled,
@@ -1265,6 +1290,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == '/api/trading/pause':
                 self.send_json({'ok': True, **TRADING.pause()})
+                return
+            if path == '/api/trading/apply-entry':
+                self.send_json({'ok': True, **TRADING.apply_entry_threshold(body.get('entry_spread_usd'))})
                 return
             if path == '/api/trading/close':
                 group = body.get('group')

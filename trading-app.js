@@ -77,7 +77,7 @@
   }
   function lock(value, activeId, label) {
     busy=value;
-    for(const id of ['trading-connect','trading-reconcile','trading-toggle','trading-close','adoption-read','adoption-preview','adoption-confirm','adoption-manage']) {
+    for(const id of ['trading-connect','trading-reconcile','trading-toggle','trading-close','apply-entry','adoption-read','adoption-preview','adoption-confirm','adoption-manage']) {
       el(id).disabled=value;
       el(id).classList.toggle('processing', value);
     }
@@ -130,7 +130,7 @@
       const quantity=o.leg==='mt5'&&g?`${n(filled)} 盎司 / ${n(filled/g.contract)} 手`:`${n(filled)} XAU`;
       const status=o.imported?'原持仓成本登记（本次未下单）':r.status==='done'?(filled>0?'已成交':'未成交'):(r.status==='pending'?'待确认':'状态未知');
       const fee=o.imported?'历史费用见接管汇总':Number.isFinite(Number(r.fee))?`${Number(r.fee).toFixed(4)} ${o.leg==='binance'?'USDT':'USD'}`:'未单独回填';
-      const timing=Number.isFinite(r.fill_time_ms)?`<br><span class="muted">发送→回报 ${Math.max(0,r.fill_time_ms-o.created_ms)} ms${Number.isFinite(o.signal_time_ms)?'<br>采样→发送 '+Math.max(0,o.created_ms-o.signal_time_ms)+' ms':''}</span>`:'';
+      const timing=o.imported?'':Number.isFinite(r.fill_time_ms)?`<br><span class="muted">发送→回报 ${Math.max(0,r.fill_time_ms-o.created_ms)} ms${Number.isFinite(o.signal_time_ms)?'<br>采样→发送 '+Math.max(0,o.created_ms-o.signal_time_ms)+' ms':''}</span>`:Number.isFinite(r.reconcile_time_ms)?`<br><span class="muted">查询确认 ${Math.max(0,r.reconcile_time_ms-o.created_ms)} ms（非实际下单延迟）</span>`:r.status==='done'?'<br><span class="muted">原始回报时间缺失，已通过对账确认</span>':'';
       const signal=Number.isFinite(Number(o.signal_spread))?n(o.signal_spread):'—';
       const actual=Number.isFinite(Number(o.actual_spread))?n(o.actual_spread):'等待双边成交';
       const spreadDelta=Number.isFinite(Number(o.spread_slippage))?`${Number(o.spread_slippage)>=0?'+':''}${n(o.spread_slippage)}`:'—';
@@ -162,6 +162,12 @@
     const reconciled=result.capabilities?.reconciled === true;
     const positionMode=result.capabilities?.position_mode;
     const positionLabel=positionMode==='hedge'?'双向持仓':positionMode==='one_way'?'单向持仓':'';
+    const runtimeEntry=Number(result.strategy_runtime?.entry_spread_usd);
+    const effectiveEntry=el('entry-effective');
+    if(effectiveEntry) {
+      effectiveEntry.dataset.value=Number.isFinite(runtimeEntry)?String(runtimeEntry):'';
+      effectiveEntry.textContent=Number.isFinite(runtimeEntry)?`当前生效：${n(runtimeEntry)}（已有交易组不变）`:'当前生效：未连接';
+    }
     el('trading-mode').textContent=result.connected ? `${mode} 已连接${positionLabel?' · '+positionLabel:''}` : '未连接';
     el('trading-mode').classList.toggle('warning', Boolean(state.alarm||result.last_error||(!reconciled&&result.connected)));
     const connectButton=el('trading-connect');
@@ -341,7 +347,8 @@
     const entries=samples.map(x=>x.entry).filter(Number.isFinite), exits=samples.map(x=>x.exit).filter(Number.isFinite);
     const average=values=>values.length?values.reduce((a,b)=>a+b,0)/values.length:null;
     const latest=rawSamples.at(-1), all=entries.concat(exits);
-    const entryThreshold=Number(el('entry').value), threshold=Number.isFinite(entryThreshold)?entryThreshold:null;
+    const effective=Number(el('entry-effective')?.dataset.value), configured=Number(el('entry').value);
+    const entryThreshold=Number.isFinite(effective)?effective:configured, threshold=Number.isFinite(entryThreshold)?entryThreshold:null;
     el('spread-stats').innerHTML=[['当前入场',latest?.entry],['当前退出',latest?.exit],['开仓阈值',threshold],['窗口入场均值',average(entries)],['价差范围',all.length?`${Math.min(...all).toFixed(3)} ～ ${Math.max(...all).toFixed(3)}`:null]].map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${typeof value==='number'?value.toFixed(3):value||'—'}</strong></div>`).join('');
     el('chart-empty').classList.toggle('is-hidden',samples.length>0);
     el('chart-coverage').textContent=samples.length?`本机可成交价差 ${samples.length.toLocaleString('zh-CN')} 个采样 · ${new Date(samples[0].time_ms).toLocaleString()} 至 ${new Date(samples.at(-1).time_ms).toLocaleString()} · 高频记录保留 24 小时，更早按分钟归档保留 30 天；历史保存在本机数据目录。`:'尚无本机历史；连接后开始记录真实 Bid/Ask 可成交价差，历史会保存到本机数据目录。';
@@ -385,6 +392,10 @@
       await plot();
     }
   },'trading-toggle','正在切换自动开仓状态…');
+  el('apply-entry').onclick=()=>action(async()=>{
+    await saveConfig();
+    render(await request('/api/trading/apply-entry',{entry_spread_usd:el('entry').value}));
+  },'apply-entry','正在应用开仓阈值…');
   el('trading-close').onclick=()=>action(async()=>{render(await request('/api/trading/close',{reason:'用户请求全部平仓'}));},'trading-close','正在处理平仓请求…');
   el('chart-window').onchange=()=>{resetChartZoom=true;chartView=null;action(plot,'chart-window','正在加载图表数据…');};
   el('chart-latest').onclick=()=>{resetChartZoom=true;chartView=null;action(plot,'chart-latest','正在加载最新图表…');};

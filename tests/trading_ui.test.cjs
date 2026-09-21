@@ -70,6 +70,21 @@ test('reconcile, start and pause buttons send POST; chart remains GET', async ()
   assert.ok(calls.some(x=>x.url.includes('chart?') && x.method==='GET'));
 });
 
+test('entry threshold can be applied while connected without reconnecting', async () => {
+  const {el, calls} = pageFixture(false, {
+    '/api/trading/apply-entry': body => {
+      assert.equal(body.entry_spread_usd, '3.5');
+      return {connected:true, state:{enabled:true, groups:[], orders:[]}, capabilities:{mode:'live', reconciled:true}, strategy_runtime:{entry_spread_usd:3.5}};
+    }
+  });
+  el('entry').value='3.5';
+  await el('apply-entry').onclick();
+  const call=calls.find(x=>x.url==='/api/trading/apply-entry');
+  assert.equal(call.method,'POST');
+  assert.equal(el('entry-effective').textContent,'当前生效：3.5（已有交易组不变）');
+  assert.equal(calls.some(x=>x.url==='/api/trading/connect'),false);
+});
+
 test('failed reconcile refreshes status and preserves the actionable error', async () => {
   const {el, calls} = pageFixture(true);
   await el('trading-reconcile').onclick();

@@ -140,6 +140,11 @@ class Engine:
             if self.result_valid(r,o['requested']) and r.get('qty',0)>=o['result'].get('qty',0):
                 merged={**o['result'],**r}
                 if r.get('status')=='done': merged.pop('error',None)
+                # A later query confirms the fill but cannot reconstruct the
+                # broker's original execution timestamp. Keep this separate
+                # from fill_time_ms so the UI never presents it as latency.
+                if r.get('status')=='done' and float(r.get('qty',0))>0 and not merged.get('fill_time_ms'):
+                    merged['reconcile_time_ms']=stamp()
                 o['result']=merged;self.save('order_reconciled',{'id':o['id'],'result':merged})
         if self.uncertain(g):
             self.pause('订单状态未知，禁止重发；正在查询成交和持仓');return False
