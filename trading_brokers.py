@@ -46,7 +46,12 @@ class Binance:
         if signed:
             if not self.key or not self.secret:
                 raise ValueError('请先配置当前网络的币安凭据')
-            params.update(timestamp=int(time.time()*1000)+self.offset, recvWindow=self.recv_window_ms)
+            # A timestamp rejection triggers a fresh server-time sync below.
+            # Use Binance's maximum allowed window on that one retry so a
+            # transient round-trip delay cannot turn a valid retry into a
+            # false reject. The configured window remains unchanged.
+            window=self.recv_window_ms if _time_retry else max(self.recv_window_ms,60000)
+            params.update(timestamp=int(time.time()*1000)+self.offset, recvWindow=window)
         query = urlencode(params)
         if signed:
             query += '&signature='+hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()
