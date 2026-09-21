@@ -436,7 +436,7 @@ async function loadInitialConfig() {
   finally { configLoading=false; }
 }
 async function refresh() {
-  if (pollBusy) return;
+  if (document.hidden || pollBusy) return;
   pollBusy = true;
   try {
     const j = await api('/api/status');

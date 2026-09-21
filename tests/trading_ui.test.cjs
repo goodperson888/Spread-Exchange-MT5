@@ -6,7 +6,14 @@ const vm = require('node:vm');
 
 // Execute the actual button handlers without contacting any trading account.
 function pageFixture(reconcileFails = false, handlers = {}) {
-  const elements = new Map(), calls = [], charts=[];
+  const elements = new Map(), calls = [], charts=[], streams=[], listeners={};
+  const doc={hidden:false, getElementById:id=>el(id),addEventListener:(name,fn)=>{listeners[name]=fn;}};
+  class FakeStream {
+    constructor(){this.handlers={};this.closed=false;streams.push(this);}
+    addEventListener(name,fn){this.handlers[name]=fn;}
+    close(){this.closed=true;}
+    emit(payload){this.handlers.quotes?.({data:JSON.stringify(payload)});}
+  }
   const el = id => {
     if (!elements.has(id)) elements.set(id, {
       tagName:'BUTTON', value:'', textContent:'', innerHTML:'', dataset:{},
@@ -18,7 +25,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   const snapshot = () => ({connected:true, state:{enabled, groups:[], orders:[]},
     capabilities:{mode:'live', reconciled}});
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../trading-app.js'), 'utf8'), {
-    document:{getElementById:el}, window:{addEventListener(){}},
+    document:doc, window:{addEventListener(){},EventSource:FakeStream,GoldPairQuotes:require('../quote-stream.js')},
     loaded:false, saveConfig:async()=>{}, AbortController,
     setTimeout(){}, clearTimeout(){}, setInterval(){},
     echarts:{init:()=>({getOption:()=>({}), setOption(option){charts.push(option);}})},
@@ -26,7 +33,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
       calls.push({url, ...options});
       const action = url.split('/').at(-1);
       let body = {}, status = 200;
-      if (handlers[url]) body=handlers[url](options.body===undefined?undefined:JSON.parse(options.body));
+      if (handlers[url]) body=await handlers[url](options.body===undefined?undefined:JSON.parse(options.body));
       else if (['reconcile','start','pause'].includes(action)) {
         if (options.method !== 'POST') {status=404; body={error:'未找到'};}
         else if (action==='reconcile' && reconcileFails) {status=400; body={error:'持仓不一致'};}
@@ -42,7 +49,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
       return {ok:status===200, json:async()=>body};
     }
   });
-  return {el, calls, charts};
+  return {el, calls, charts, streams, doc, listeners};
 }
 
 test('reconcile, start and pause buttons send POST; chart remains GET', async () => {
@@ -105,4 +112,36 @@ test('adoption buttons send explicit POST, confirmation stays paused, management
   assert.doesNotMatch(el('trading-result').textContent,/本次操作未完成/);
   assert.equal(charts.at(-1).series.find(s=>s.id==='open').data.length,0);
   assert.ok(charts.at(-1).series[0].markLine.data.some(x=>x.name.includes('旧仓')&&x.name.includes('暂停')));
+});
+
+
+test('hidden page disconnects quotes; resume loads history once and never sends trading commands',async()=>{
+  const {doc,listeners,streams,calls,charts}=pageFixture();
+  const flush=()=>new Promise(resolve=>setImmediate(resolve));
+  listeners.visibilitychange();await flush();
+  assert.equal(streams.length,1);
+  streams[0].emit({reset:true,samples:[]});await flush();
+  const initial=calls.length;
+  doc.hidden=true;listeners.visibilitychange();
+  assert.equal(streams[0].closed,true);
+  streams[0].emit({reset:true,samples:[]});await flush();
+  assert.equal(calls.length,initial);
+  doc.hidden=false;listeners.visibilitychange();await flush();
+  assert.equal(streams.length,2);
+  streams[0].emit({reset:true,samples:[]});
+  streams[1].emit({reset:true,samples:[]});await flush();
+  assert.equal(calls.filter(c=>c.url.includes('/chart?')).length,2);
+  assert.ok(calls.every(c=>c.method==='GET'));
+  assert.equal(charts.length,2);
+});
+
+test('hidden page cancels outstanding historical request and ignores late response',async()=>{
+  let release,signal;
+  const f=pageFixture(false,{'/api/trading/chart?minutes=0':()=>new Promise(r=>{release=r;})});
+  const work=f.el('chart-latest').onclick();
+  signal=f.calls.find(c=>c.url.includes('/chart?')).signal;
+  f.doc.hidden=true;f.listeners.visibilitychange();
+  assert.equal(signal.aborted,true);
+  release({samples:[]});await work;
+  assert.equal(f.charts.length,0);
 });

@@ -1,22 +1,35 @@
 /* Bounded immutable client sample buffer; transport cadence is independent of paint cadence. */
 (function(root) {
   class QuoteBuffer {
-    constructor(capacity=100000) {this.capacity=capacity;this.points=new Map();}
+    constructor(capacity=100000) {this.capacity=capacity;this.points=new Map();this.rows=[];this.key=null;}
     merge(samples, since=0, key=null) {
-      for(const q of samples) {
-        if(!Number.isFinite(q.time_ms)||!Number.isFinite(q.entry)||!Number.isFinite(q.exit))continue;
-        if(key && q.key && q.key!==key)continue;
-        if(!this.points.has(q.time_ms))this.points.set(q.time_ms,q);
+      if(key!==this.key){
+        this.rows=this.rows.filter(q=>!key||!q.key||q.key===key);
+        this.points=new Map(this.rows.map(q=>[q.time_ms,q]));this.key=key;
       }
-      let rows=[...this.points.values()].filter(q=>q.time_ms>=since&&(!key||!q.key||q.key===key)).sort((a,b)=>a.time_ms-b.time_ms);
-      rows=rows.slice(-this.capacity);this.points=new Map(rows.map(q=>[q.time_ms,q]));
-      return rows;
+      let unordered=false,tail=this.rows.at(-1)?.time_ms??-Infinity;
+      for(const q of samples) {
+        if(!Number.isFinite(q.time_ms)||!Number.isFinite(q.entry)||!Number.isFinite(q.exit)||q.time_ms<since)continue;
+        if(key && q.key && q.key!==key)continue;
+        if(this.points.has(q.time_ms))continue;
+        if(q.time_ms<tail)unordered=true;
+        tail=Math.max(tail,q.time_ms);this.points.set(q.time_ms,q);this.rows.push(q);
+      }
+      // Normal live batches are ordered appends. Only backfilled history needs sorting.
+      if(unordered)this.rows.sort((a,b)=>a.time_ms-b.time_ms);
+      let remove=Math.max(0,this.rows.length-this.capacity);
+      while(remove<this.rows.length&&this.rows[remove].time_ms<since)remove++;
+      if(remove){
+        for(let i=0;i<remove;i++)this.points.delete(this.rows[i].time_ms);
+        this.rows=this.rows.slice(remove);
+      }
+      return this.rows;
     }
     replaceHistory(samples,since,key) {
       const fresh=new QuoteBuffer(this.capacity);
       // Live samples already shown take precedence over repeated history rows.
       fresh.merge([...this.points.values()],since,key);
-      const rows=fresh.merge(samples,since,key);this.points=fresh.points;return rows;
+      const rows=fresh.merge(samples,since,key);this.points=fresh.points;this.rows=fresh.rows;this.key=fresh.key;return rows;
     }
   }
   // Fixed UTC buckets keep past representatives stable as the right edge grows.

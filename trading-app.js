@@ -9,16 +9,26 @@
   const escape = value => String(value ?? '').replace(/[&<>'"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
   let chart, timer, busy=false, last=null, resetChartZoom=true, actionError='';
   let chartView=null, stream=null, streamReady=false, paintPending=false, lastPaintAt=0, chartSamples=[], plotGeneration=0, latestLive=null, statusBusy=false;
+  let pendingQuotes=[], paintTimer=null, paintFrame=null, plotController=null;
   // Keep the browser-side high-frequency window bounded; longer history comes
   // from the local SQLite chart endpoint and is already downsampled for display.
   const quoteBuffer=window.GoldPairQuotes?new window.GoldPairQuotes.QuoteBuffer(30000):null;
   function windowStart(){return Date.now()-Math.max(1,Number(el('chart-window').value)||1440)*60000;}
   function paintSoon(){
-    if(paintPending)return;paintPending=true;
-    const run=()=>{paintPending=false;lastPaintAt=Date.now();drawChart(chartSamples);renderIncome(latestLive||last?.quote);};
+    if(document.hidden||paintPending)return;paintPending=true;
+    const run=()=>{
+      paintPending=false;paintTimer=null;paintFrame=null;
+      if(document.hidden)return;
+      if(pendingQuotes.length){
+        chartSamples=quoteBuffer.merge(pendingQuotes,windowStart(),last?.quote?.key);
+        pendingQuotes=[];
+      }
+      lastPaintAt=Date.now();drawChart(chartSamples);renderIncome(latestLive||last?.quote);
+    };
     const delay=Math.max(0,200-(Date.now()-lastPaintAt));
-    if(delay) setTimeout(run,delay);
-    else (window.requestAnimationFrame||((fn)=>setTimeout(fn,16)))(run);
+    if(delay) paintTimer=setTimeout(run,delay);
+    else if(window.requestAnimationFrame) paintFrame=window.requestAnimationFrame(run);
+    else paintTimer=setTimeout(run,16);
   }
   function streamLabel(){
     const badge=el('chart-live-status');if(!badge)return;
@@ -28,17 +38,20 @@
     badge.classList.toggle('warning',!streamReady||stale||!last?.connected);
   }
   function startStream(){
-    if(!window.EventSource||stream)return;
+    if(document.hidden||!window.EventSource||stream)return;
     stream=new window.EventSource('/api/trading/stream');
+    const source=stream;
     stream.onopen=()=>{streamReady=true;streamLabel();};
     stream.onerror=()=>{streamReady=false;streamLabel();};
     stream.addEventListener('quotes',event=>{
+      if(document.hidden||source!==stream)return;
       try {
         const payload=JSON.parse(event.data),key=last?.quote?.key;
         const rows=(payload.samples||[]).filter(q=>!key||q.key===key);
         if(rows.length){
           latestLive=rows.at(-1);
-          chartSamples=quoteBuffer.merge(rows,windowStart(),key);
+          for(const row of rows)pendingQuotes.push(row);
+          if(pendingQuotes.length>30000)pendingQuotes=pendingQuotes.slice(-30000);
           const q=latestLive,age=x=>Math.max(0,Date.now()-(x?.observed_ms||x?.time_ms||0)),sourceTime=x=>x?.source_time_ms||x?.time_ms||0;
           el('quote-latency').textContent=`MT5 ${q.mt5_transport||'行情'} · 币安 ${q.binance_transport||'行情'} · 报价年龄：MT5 ${age(q.mt5)} ms / 币安 ${age(q.binance)} ms · 本机收到时间差 ${Math.abs((q.mt5?.observed_ms||0)-(q.binance?.observed_ms||0))} ms · 原始时间差 ${Math.abs(sourceTime(q.mt5)-sourceTime(q.binance))} ms${q.valid===false?' · 当前报价不满足交易校验':''}`;
           showQuote(q);paintSoon();
@@ -50,8 +63,7 @@
   }
   let adoptionPreview=null, adoptionReportTime=null, adoptionGroupId=null, adoptionRevision=0;
 
-  async function request(path, body) {
-    const controller=new AbortController();
+  async function request(path, body, controller=new AbortController()) {
     const timeout=setTimeout(()=>controller.abort(),30000);
     try {
       const response = await fetch(path, {signal:controller.signal,method:body === undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Local-App':'GoldPairLocal'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});
@@ -291,12 +303,20 @@
       take_contraction_usd:el('adoption-managed-take').value,min_net_profit_usd:el('adoption-managed-profit').value}));
   },'adoption-manage','正在切换旧仓管理…');
   async function plot() {
+    if(document.hidden)return;
     const generation=++plotGeneration;
-    const minutes=Number(el('chart-window').value);
-    const r=await request('/api/trading/chart?minutes='+minutes);
-    if(generation!==plotGeneration)return;
-    chartSamples=quoteBuffer?quoteBuffer.replaceHistory(r.samples||[],windowStart(),last?.quote?.key):(r.samples||[]);
-    drawChart(chartSamples);
+    plotController?.abort();
+    const controller=new AbortController();plotController=controller;
+    try {
+      const minutes=Number(el('chart-window').value);
+      const r=await request('/api/trading/chart?minutes='+minutes,undefined,controller);
+      if(document.hidden||generation!==plotGeneration)return;
+      // Keep ticks received during the history request; merge only once per paint.
+      chartSamples=quoteBuffer?quoteBuffer.replaceHistory(r.samples||[],windowStart(),last?.quote?.key):(r.samples||[]);
+      drawChart(chartSamples);
+    } catch(error) {
+      if(generation===plotGeneration&&!document.hidden)throw error;
+    } finally {if(plotController===controller)plotController=null;}
   }
   function drawChart(rawSamples) {
     const samples=window.GoldPairQuotes?window.GoldPairQuotes.renderPoints(rawSamples,Math.max(1,Number(el('chart-window').value)||1440)*60000,chartView):rawSamples;
@@ -336,11 +356,11 @@
     ]},{notMerge:true,lazyUpdate:true});
   }
   async function status(withChart=true) {
-    if(statusBusy)return;
+    if(document.hidden||statusBusy)return;
     statusBusy=true;
     try {
       const r=await request('/api/trading/status');
-      if(window.goldPairUiBusy) return;
+      if(document.hidden||window.goldPairUiBusy) return;
       render(r);
       // Keep the last chart visible when disconnected, but do not keep
       // re-fetching it as if live monitoring were still running.
@@ -381,8 +401,24 @@
   },'push-setup','正在准备 EA 接收器和本机参数…');
   window.addEventListener('offline',()=>{stream?.close();stream=null;streamReady=false;streamLabel();});
   window.addEventListener('online',startStream);
-  window.addEventListener('beforeunload',()=>stream?.close());
+  function suspendPage(){
+    stream?.close();stream=null;streamReady=false;
+    pendingQuotes=[];
+    clearTimeout(paintTimer);window.cancelAnimationFrame?.(paintFrame);
+    paintPending=false;paintTimer=null;paintFrame=null;
+    ++plotGeneration;plotController?.abort();plotController=null;
+  }
+  document.addEventListener?.('visibilitychange',()=>{
+    if(document.hidden){suspendPage();return;}
+    // A new stream sends the latest quote and requests one history refresh.
+    // No trading start/pause/close request is sent by visibility changes.
+    chart?.resize?.();startStream();
+    status(false).catch(error=>text('trading-result',error.message,true));
+  });
+  window.addEventListener('pagehide',suspendPage);
+  window.addEventListener('pageshow',()=>{if(!document.hidden)startStream();});
+  window.addEventListener('beforeunload',suspendPage);
   window.addEventListener('resize',()=>chart?.resize());
   setTimeout(()=>status().then(startStream).catch(error=>text('trading-result',error.message,true)),400);
-  timer=setInterval(()=>{if(!busy&&!window.goldPairUiBusy)status().catch(error=>text('trading-result',error.message,true));},3000);
+  timer=setInterval(()=>{if(!document.hidden&&!busy&&!window.goldPairUiBusy)status().catch(error=>text('trading-result',error.message,true));},3000);
 })();
