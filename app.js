@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const bindings = {
   mt5: {adapter:'mt5-adapter', symbol:'mt5-symbol', terminal_path:'terminal-path', mcp_url:'mcp-url', account:'account', server:'mt5-server'},
-  strategy: {mt5_lots:'lots', entry_spread_usd:'entry', take_contraction_usd:'take', max_groups:'max-groups', max_quote_age_ms:'max-age', max_clock_skew_ms:'max-clock-skew', max_unhedged_ms:'max-unhedged', max_slippage_usd:'slippage', grid_spacing_usd:'grid-spacing', grid_max_adds:'grid-adds'},
+  strategy: {mt5_lots:'lots', entry_spread_usd:'entry', take_contraction_usd:'take', max_groups:'max-groups', max_quote_age_ms:'max-age', max_clock_skew_ms:'max-clock-skew', max_unhedged_ms:'max-unhedged', max_slippage_usd:'slippage', unwind_slippage_usd:'unwind-slippage', grid_spacing_usd:'grid-spacing', grid_max_adds:'grid-adds'},
 };
 const DRAFT_KEY = 'GoldPairLocal.configDraft.v2';
 const LEGACY_DRAFT_KEY = 'GoldPairLocal.configDraft.v1';

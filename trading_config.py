@@ -46,6 +46,7 @@ def validate(c):
         'min_net_profit_usd': (0, 1e9), 'group_max_loss_usd': (0.01, 1e9), 'total_max_loss_usd': (0.01, 1e9),
         'max_hold_minutes': (0, 525600), 'max_quote_age_ms': (100, 10000),
         'max_clock_skew_ms': (0, 5000), 'max_unhedged_ms': (100, 30000), 'max_slippage_usd': (0.01, 1000),
+        'unwind_slippage_usd': (0.01, 1000),
     }
     for k, (lo, hi) in bounds.items():
         v = s[k]
@@ -54,6 +55,8 @@ def validate(c):
     if (int(s['max_groups']) != s['max_groups'] or int(s['grid_max_adds']) != s['grid_max_adds']
             or s['mt5_lots'] > s['max_total_lots']):
         raise ValueError('组数必须是整数，每组手数不能超过总手数上限')
+    if s['unwind_slippage_usd'] < s['max_slippage_usd']:
+        raise ValueError('保护性平仓滑点不能小于普通最大滑点')
     if s['grid_enabled'] and int(s['max_groups']) < 1 + int(s['grid_max_adds']):
         raise ValueError('启用网格时，最大持仓组数必须至少为 1 + 网格补仓次数')
     for k, lo, hi in [('poll_ms', 250, 5000), ('magic', 1, 2147483647), ('close_retry_limit', 1, 5)]:

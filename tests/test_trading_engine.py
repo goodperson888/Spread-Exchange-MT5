@@ -49,7 +49,12 @@ class RejectMt5CloseBroker(PaperBroker):
 
 
 class RejectBinanceOpenBroker(PaperBroker):
+    def __init__(self):
+        super().__init__()
+        self.submitted=[]
+
     def submit(self, order):
+        self.submitted.append(copy.deepcopy(order))
         if order['leg'] == 'binance' and order['action'] == 'open':
             return dict(status='done', qty=0, price=0, error='rejected')
         return super().submit(order)
@@ -137,13 +142,17 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(binance_closes, [])
 
     def test_second_leg_rejection_immediately_unwinds_mt5(self):
-        engine = Engine(self.store, RejectBinanceOpenBroker())
+        broker = RejectBinanceOpenBroker()
+        engine = Engine(self.store, broker)
         engine.start(self.c)
         engine.tick(self.c, self.plan, quote(self.c))
         self.assertEqual(engine.active(), [])
         group = engine.state['groups'][0]
         self.assertEqual(group['status'], 'closed')
         self.assertEqual(engine.amounts(group), {'binance': 0, 'mt5': 0})
+        mt5_close = next(o for o in broker.submitted if o['leg']=='mt5' and o['action']=='close')
+        self.assertEqual(mt5_close['slippage'], self.c['strategy']['unwind_slippage_usd'])
+        self.assertIn('保护性平仓', group['reason'])
 
 
 class BinanceCostTests(unittest.TestCase):

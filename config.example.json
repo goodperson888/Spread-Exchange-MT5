@@ -30,6 +30,7 @@
     "max_clock_skew_ms": 2000,
     "max_unhedged_ms": 1500,
     "max_slippage_usd": 0.5,
+    "unwind_slippage_usd": 2,
     "cooldown_seconds": 60,
     "max_total_lots": 0.1,
     "grid_enabled": false,

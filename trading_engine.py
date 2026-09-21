@@ -60,7 +60,8 @@ class Engine:
         if qty<=1e-9: return
         side=q[leg]; sell=(leg=='binance')==(action=='open')
         reference=side['bid' if sell else 'ask']
-        slip=g['parameters']['max_slippage_usd']/(g['costs']['usdt_usd'] if leg=='binance' else 1)
+        slippage_key='unwind_slippage_usd' if g.get('status')=='unwinding' else 'max_slippage_usd'
+        slip=g['parameters'][slippage_key]/(g['costs']['usdt_usd'] if leg=='binance' else 1)
         o=dict(id='gp'+uuid.uuid4().hex[:24],group=g['id'],leg=leg,action=action,
                requested=qty,symbol=g['symbol'] if leg=='binance' else g['mt5_symbol'],
                reference=reference,limit=reference+(-slip if sell else slip),slippage=slip,
@@ -204,19 +205,19 @@ class Engine:
         if first['result']['status']!='done':
             self.pause('MT5 开仓状态未知，等待对账');return
         if abs(first['result']['qty']-p['qty'])>1e-8:
-            g['status']='unwinding';g['reason']='MT5 拒单或部分成交';self.pause(g['reason'])
+            g['status']='unwinding';g['reason']='MT5 开仓拒单或部分成交，正在保护性平仓';self.pause(g['reason'])
             self.close_group(g,q);return
         if stamp()-now>c['strategy']['max_unhedged_ms'] or not valid_quote(q,c):
-            g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期';self.pause(g['reason'])
+            g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期，正在保护性平仓';self.pause(g['reason'])
             self.close_group(g,q);return
         second_q=q
         provider=getattr(self,'quote_provider',None)
         if provider:
             try: second_q=provider()
             except Exception as exc:
-                g['status']='unwinding';g['reason']='第二腿前无法取得新报价：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return
+                g['status']='unwinding';g['reason']='第二腿前无法取得新报价，正在保护性平仓：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return
             if stamp()-now>c['strategy']['max_unhedged_ms'] or not valid_quote(second_q,c):
-                g['status']='unwinding';g['reason']='第一腿成交后报价过期或超出敞口期限';self.pause(g['reason']);self.close_group(g,second_q);return
+                g['status']='unwinding';g['reason']='第一腿成交后报价过期或超出敞口期限，正在保护性平仓';self.pause(g['reason']);self.close_group(g,second_q);return
         second=self.order(g,'binance','open',p['qty'],second_q)
         if second['result']['status']=='done' and abs(second['result']['qty']-p['qty'])<1e-8:
             actual=self._record_spread(g,'open',q['entry'])
@@ -231,7 +232,9 @@ class Engine:
                 g['execution_warning']=f'实际成交价差 {actual:.6f} 低于触发阈值 {threshold:.6f}，按实际开仓价差管理；未反向平仓'
             self.save('group_opened',{'group':g['id'],'entry':g['entry']})
         else:
-            g['status']='unwinding';g['reason']='币安拒单、部分成交或状态未知';self.pause(g['reason'])
+            error=str(second.get('error') or '')
+            suffix='：'+error if error else ''
+            g['status']='unwinding';g['reason']='币安拒单、部分成交或状态未知，正在保护性平仓'+suffix;self.pause(g['reason'])
             self.close_group(g,q)
 
     def request_close(self, group_id=None, reason='用户平仓'):

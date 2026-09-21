@@ -1007,10 +1007,12 @@ def validate_config(config):
         errors.append("单边敞口时间范围应为 0 到 60000 毫秒")
     if not all(math.isfinite(x) for x in (lots, contract, step, vmin)):
         errors.append('数量和规格必须是有限数值')
-    for key in ('entry_spread_usd', 'take_contraction_usd', 'max_slippage_usd'):
+    for key in ('entry_spread_usd', 'take_contraction_usd', 'max_slippage_usd', 'unwind_slippage_usd'):
         value = float(strategy.get(key, 0))
         if not math.isfinite(value) or value < 0:
             errors.append('价差、目标和滑点应为有限的非负数')
+    if float(strategy.get('unwind_slippage_usd', 0)) < float(strategy.get('max_slippage_usd', 0)):
+        errors.append('保护性平仓滑点不能小于普通最大滑点')
     window = float(config.get('binance', {}).get('recv_window_ms', 1000))
     if not math.isfinite(window) or not 1 <= window <= 60000:
         errors.append('请求有效窗口应为 1 到 60000 毫秒')
