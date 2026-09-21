@@ -32,6 +32,7 @@
 <div class="grid">
 <label>交易所品种<input id="symbol" value="XAUUSDT" maxlength="24" spellcheck="false"></label>
 <label>执行模式<select id="exec-mode"><option value="paper">纸面模拟（可用 MCP）</option><option value="live">实盘（仅 Windows MT5）</option></select></label>
+<label>入场优先腿<select id="entry-leg"><option value="binance">币安优先（先卖币安，再买 MT5）</option><option value="mt5">MT5 优先（先买 MT5，再卖币安）</option></select></label>
 </div>
 <p id="mode-compatibility" class="note" role="status" aria-live="polite"></p>
 <div class="proxy-tools">

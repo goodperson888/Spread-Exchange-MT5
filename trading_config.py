@@ -29,6 +29,8 @@ def validate(c):
         raise ValueError('币安合约名称无效，请填写平台实际名称，例如 XAUUSDT')
     if e['mode'] not in ('paper', 'live') or e['quote_source'] != 'market':
         raise ValueError('运行模式或行情来源无效')
+    if e.get('entry_leg') not in ('binance', 'mt5'):
+        raise ValueError('入场优先腿必须选择币安或 MT5')
     if c['mt5']['adapter'] not in ('paper', 'mcp', 'native'):
         raise ValueError('MT5 适配器无效')
     if e['mode'] == 'live' and (e['quote_source'] != 'market' or c['mt5']['adapter'] != 'native'):

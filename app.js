@@ -11,7 +11,7 @@ const dirtySecrets = new Set();
 const sectionFields = {
   mt5: new Set([...Object.values(bindings.mt5), 'mt5-mcp-token']),
   binance: new Set(['symbol','recv-window','binance-proxy','trading-api-key','trading-api-secret']),
-  execution: new Set(['exec-mode','poll-ms','magic','close-retries']),
+  execution: new Set(['exec-mode','entry-leg','poll-ms','magic','close-retries']),
 };
 let credentialsDirty = false;
 let saveQueue = Promise.resolve();
@@ -67,7 +67,7 @@ function formConfig() {
       cooldown_seconds:Number(value('cooldown')),max_total_lots:Number(value('max-total')),exit_mode:value('exit-mode'),target_mode:value('target-mode'),exit_spread_usd:Number(value('absolute-exit')),
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
       total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold'))},
-    execution:{mode:value('exec-mode'), quote_source:'market', poll_ms:Number(value('poll-ms')), magic:Number(value('magic')), close_retry_limit:Number(value('close-retries'))},
+    execution:{mode:value('exec-mode'), quote_source:'market', entry_leg:value('entry-leg'), poll_ms:Number(value('poll-ms')), magic:Number(value('magic')), close_retry_limit:Number(value('close-retries'))},
     costs:{usdt_usd_auto:$('auto-fx').checked,usdt_usd:Number(value('usdt-fx')),binance_fee_auto:$('auto-binance-fee').checked,binance_taker_percent:Number(value('binance-fee')), mt5_commission_per_lot_side:Number(value('mt5-fee')), mt5_swap_per_lot_day:Number(value('mt5-swap')), paper_funding_percent_day:Number(value('paper-funding'))},
   };
 }
@@ -127,6 +127,7 @@ function populate(c) {
   $('mt5-mcp-token').value = c.mt5?.mcp_token ?? '';
   $('symbol').value = c.symbol;
   $('exec-mode').value = c.execution?.mode ?? 'paper';
+  $('entry-leg').value = c.execution?.entry_leg ?? 'binance';
   // 只支持 paper 和 live 两种模式
   $('poll-ms').value = c.execution?.poll_ms ?? 250;
   $('magic').value = c.execution?.magic ?? 9121701;

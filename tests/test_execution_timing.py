@@ -24,7 +24,7 @@ class ExecutionTimingTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store=Store(Path(self.tmp.name)/'state.sqlite3');self.addCleanup(self.store.close)
-        self.c=config();self.c['strategy']['entry_spread_usd']=5
+        self.c=config();self.c['strategy']['entry_spread_usd']=5;self.c['execution']['entry_leg']='mt5'
         self.plan={'lots':.02,'qty':2,'contract':100}
 
     def test_duplicate_timestamps_are_immutable(self):

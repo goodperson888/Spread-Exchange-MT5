@@ -47,6 +47,6 @@
     "total_max_loss_usd": 150,
     "max_hold_minutes": 0
   },
-  "execution": {"mode": "paper", "quote_source": "market", "poll_ms": 250, "magic": 9121701, "close_retry_limit": 3},
+  "execution": {"mode": "paper", "quote_source": "market", "entry_leg": "binance", "poll_ms": 250, "magic": 9121701, "close_retry_limit": 3},
   "costs": {"usdt_usd_auto": true, "usdt_usd": 1, "binance_fee_auto": true, "binance_taker_percent": 0.05, "mt5_commission_per_lot_side": 0, "mt5_swap_per_lot_day": 0, "paper_funding_percent_day": 0}
 }

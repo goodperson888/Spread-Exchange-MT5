@@ -205,12 +205,17 @@ class Engine:
             retry_limit=c['execution']['close_retry_limit'],entry=q['entry'],reason='',key=pair_key(c),
             grid_index=int(grid_index))
         self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
-        # MT5 is the less predictable leg. Fill it first, then the exchange with a bounded IOC.
-        first=self.order(g,'mt5','open',p['qty'],q)
+        # Choose the first leg explicitly. Binance-first avoids creating an
+        # MT5 position when the exchange rejects a signed order; MT5-first is
+        # retained as a fallback for users whose exchange route is reliable.
+        first_leg='binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5'
+        second_leg='mt5' if first_leg=='binance' else 'binance'
+        first_label='币安' if first_leg=='binance' else 'MT5'
+        first=self.order(g,first_leg,'open',p['qty'],q)
         if first['result']['status']!='done':
-            self.pause('MT5 开仓状态未知，等待对账');return
+            self.pause(f'{first_label} 开仓状态未知，等待对账');return
         if abs(first['result']['qty']-p['qty'])>1e-8:
-            g['status']='unwinding';g['reason']='MT5 开仓拒单或部分成交，正在保护性平仓';self.pause(g['reason'])
+            g['status']='unwinding';g['reason']=f'{first_label} 开仓拒单或部分成交，正在保护性平仓';self.pause(g['reason'])
             self.close_group(g,q);return
         if stamp()-now>c['strategy']['max_unhedged_ms'] or not valid_quote(q,c):
             g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期，正在保护性平仓';self.pause(g['reason'])
@@ -223,7 +228,7 @@ class Engine:
                 g['status']='unwinding';g['reason']='第二腿前无法取得新报价，正在保护性平仓：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return
             if stamp()-now>c['strategy']['max_unhedged_ms'] or not valid_quote(second_q,c):
                 g['status']='unwinding';g['reason']='第一腿成交后报价过期或超出敞口期限，正在保护性平仓';self.pause(g['reason']);self.close_group(g,second_q);return
-        second=self.order(g,'binance','open',p['qty'],second_q)
+        second=self.order(g,second_leg,'open',p['qty'],second_q)
         if second['result']['status']=='done' and abs(second['result']['qty']-p['qty'])<1e-8:
             actual=self._record_spread(g,'open',q['entry'])
             if actual is None:
@@ -239,7 +244,8 @@ class Engine:
         else:
             error=str(second.get('error') or '')
             suffix='：'+error if error else ''
-            g['status']='unwinding';g['reason']='币安拒单、部分成交或状态未知，正在保护性平仓'+suffix;self.pause(g['reason'])
+            second_label='币安' if second_leg=='binance' else 'MT5'
+            g['status']='unwinding';g['reason']=f'{second_label} 拒单、部分成交或状态未知，正在保护性平仓'+suffix;self.pause(g['reason'])
             self.close_group(g,q)
 
     def request_close(self, group_id=None, reason='用户平仓'):

@@ -60,6 +60,18 @@ class RejectBinanceOpenBroker(PaperBroker):
         return super().submit(order)
 
 
+class RejectMt5OpenBroker(PaperBroker):
+    def __init__(self):
+        super().__init__()
+        self.submitted=[]
+
+    def submit(self, order):
+        self.submitted.append(copy.deepcopy(order))
+        if order['leg'] == 'mt5' and order['action'] == 'open':
+            return dict(status='done', qty=0, price=0, error='rejected')
+        return super().submit(order)
+
+
 class EngineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -142,6 +154,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(binance_closes, [])
 
     def test_second_leg_rejection_immediately_unwinds_mt5(self):
+        self.c['execution']['entry_leg']='mt5'
         broker = RejectBinanceOpenBroker()
         engine = Engine(self.store, broker)
         engine.start(self.c)
@@ -153,6 +166,28 @@ class EngineTests(unittest.TestCase):
         mt5_close = next(o for o in broker.submitted if o['leg']=='mt5' and o['action']=='close')
         self.assertEqual(mt5_close['slippage'], self.c['strategy']['unwind_slippage_usd'])
         self.assertIn('保护性平仓', group['reason'])
+
+    def test_binance_first_rejection_does_not_open_mt5(self):
+        broker = RejectBinanceOpenBroker()
+        engine = Engine(self.store, broker)
+        engine.start(self.c)
+        engine.tick(self.c, self.plan, quote(self.c))
+        group = engine.state['groups'][0]
+        self.assertEqual(group['status'], 'closed')
+        self.assertEqual(engine.amounts(group), {'binance': 0, 'mt5': 0})
+        self.assertEqual([(o['leg'], o['action']) for o in broker.submitted], [('binance', 'open')])
+
+    def test_binance_first_mt5_failure_buys_back_binance(self):
+        broker = RejectMt5OpenBroker()
+        engine = Engine(self.store, broker)
+        engine.start(self.c)
+        engine.tick(self.c, self.plan, quote(self.c))
+        group = engine.state['groups'][0]
+        self.assertEqual(group['status'], 'closed')
+        self.assertEqual(engine.amounts(group), {'binance': 0, 'mt5': 0})
+        self.assertEqual([(o['leg'], o['action']) for o in broker.submitted],
+                         [('binance', 'open'), ('mt5', 'open'), ('binance', 'close')])
+        self.assertEqual(broker.submitted[-1]['slippage'], self.c['strategy']['unwind_slippage_usd'])
 
 
 class BinanceCostTests(unittest.TestCase):
