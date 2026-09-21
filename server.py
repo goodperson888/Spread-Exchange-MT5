@@ -925,6 +925,13 @@ def deep_merge(base, incoming):
 
 def load_config():
     config = deep_merge(DEFAULT, read_json(CONFIG_PATH, {}))
+    # 1000 ms was the old example value and is too narrow for many stable
+    # internet/proxy routes.  Migrate that untouched legacy default so an
+    # existing installation does not keep failing signed requests after an
+    # upgrade.  Other user-selected values remain unchanged.
+    binance = config.setdefault('binance', {})
+    if binance.get('recv_window_ms') == 1000:
+        binance['recv_window_ms'] = 5000
     # Keep older saved configurations valid after adding the dedicated
     # protective-close budget.  A user who previously chose a larger normal
     # slippage must not get a validation error on the new default.

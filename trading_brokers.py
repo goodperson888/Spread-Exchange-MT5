@@ -79,7 +79,8 @@ class Binance:
                 # this does not duplicate an accepted order.
                 self.sync()
                 return self.request(path, original_params, method, signed, base, _time_retry=False)
-            message = (f'币安接口错误 -1021：请求时间校验失败（已同步服务器时间并重试一次，recvWindow={self.recv_window_ms} ms）；请检查 Windows 时间同步和网络延迟'
+            timing = f'最近校时 RTT={self.sync_rtt_ms} ms，时钟偏移={self.offset} ms' if self.sync_rtt_ms is not None else '尚未取得校时 RTT'
+            message = (f'币安接口错误 -1021：请求时间校验失败（已同步服务器时间并重试一次，recvWindow={self.recv_window_ms} ms，{timing}）；请检查 Windows 时间同步、代理和网络延迟'
                        if code == -1021 else f'币安接口错误 {code}')
             raise ApiError(code, message, exc.code >= 500 or code in (-1006, -1007)) from None
         except Exception:
