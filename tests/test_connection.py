@@ -304,3 +304,34 @@ class HttpTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+class RuntimeThresholdTests(unittest.TestCase):
+    def runtime(self):
+        runtime = server.TradingRuntime.__new__(server.TradingRuntime)
+        runtime.lock = threading.RLock()
+        runtime.connected = True
+        runtime.config = {'strategy': {'entry_spread_usd': 5}, 'binance': {'api_key': 'old-test-key'}}
+        runtime.market_meta = {}
+        runtime.engine = NS(save=unittest.mock.Mock(), state={'enabled': True, 'groups': [{'parameters': {'entry_spread_usd': 5}}]})
+        runtime.snapshot = unittest.mock.Mock(return_value={'connected': True})
+        return runtime
+
+    def test_apply_changes_only_threshold_preserving_newer_saved_config(self):
+        runtime = self.runtime()
+        saved = {'strategy': {'entry_spread_usd': 5, 'take_contraction_usd': 3}, 'binance': {'api_key': 'new-test-key'}}
+        with patch.object(server, 'load_config', return_value=copy.deepcopy(saved)), patch.object(server, 'write_config') as write:
+            runtime.apply_entry_threshold('3.5')
+        expected = copy.deepcopy(saved)
+        expected['strategy']['entry_spread_usd'] = 3.5
+        write.assert_called_once_with(expected)
+        self.assertEqual(runtime.config['strategy']['entry_spread_usd'], 3.5)
+        self.assertTrue(runtime.engine.state['enabled'])
+        self.assertEqual(runtime.engine.state['groups'][0]['parameters']['entry_spread_usd'], 5)
+
+    def test_invalid_or_failed_save_does_not_change_effective_threshold(self):
+        runtime = self.runtime()
+        for value in (None, '', ' ', True, 'nan', 'inf', -1):
+            with self.assertRaises(ValueError): runtime.apply_entry_threshold(value)
+        with patch.object(server, 'load_config', return_value=copy.deepcopy(runtime.config)), patch.object(server, 'write_config', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError): runtime.apply_entry_threshold(3.5)
+        self.assertEqual(runtime.config['strategy']['entry_spread_usd'], 5)

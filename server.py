@@ -592,17 +592,20 @@ class TradingRuntime:
         with self.lock:
             if not self.connected:
                 raise ValueError('请先连接双边行情，再应用开仓阈值')
+            if value is None or isinstance(value, bool) or not str(value).strip():
+                raise ValueError('请填写开仓阈值')
             try:
                 threshold = float(value)
             except (TypeError, ValueError):
                 raise ValueError('开仓阈值必须是数字')
             if not math.isfinite(threshold) or threshold < 0 or threshold > 100000:
                 raise ValueError('开仓阈值必须在 0 到 100000 USD/盎司之间')
+            # Persist only this field; never overwrite newer saved credentials
+            # or other pending edits with the older runtime configuration.
+            saved = load_config()
+            saved['strategy']['entry_spread_usd'] = threshold
+            write_config(saved)
             self.config['strategy']['entry_spread_usd'] = threshold
-            # Keep the setting after a refresh/restart as well. Credentials are
-            # already stored by the normal config-save path; this writes the
-            # same local-only config file with the newly applied value.
-            write_config(copy.deepcopy(self.config))
             self.engine.save('entry_threshold_applied', {'value': threshold})
             self.market_meta['strategy_trigger'] = '报价事件驱动；开仓阈值已应用'
             return self.snapshot()

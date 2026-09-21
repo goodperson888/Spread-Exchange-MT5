@@ -251,3 +251,37 @@ class BinanceCostTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class BinanceTimestampRetryTests(unittest.TestCase):
+    def test_timestamp_retry_is_bounded_and_preserves_order_and_window(self):
+        from urllib.error import HTTPError
+        from urllib.parse import parse_qs, urlsplit
+        from trading_brokers import ApiError
+        broker = Binance(production=True, key='test-key', secret='test-secret', recv_window_ms=5000)
+        def rejection():
+            return HTTPError('https://fapi.binance.com/fapi/v1/order',400,'bad timestamp',{},io.BytesIO(b'{"code":-1021}'))
+        broker.opener.open = unittest.mock.Mock(side_effect=[rejection(), io.BytesIO(b'{"serverTime":1000000}'), rejection()])
+        params={'symbol':'XAUUSDT','newClientOrderId':'gp-test'}
+        with self.assertRaises(ApiError) as error:
+            broker.request('/fapi/v1/order',params,'POST',True)
+        self.assertEqual(error.exception.code,-1021)
+        self.assertFalse(error.exception.uncertain)
+        self.assertIn('请求时间校验失败',str(error.exception))
+        calls=broker.opener.open.call_args_list
+        self.assertEqual(len(calls),3)
+        for index in (0,2):
+            request=calls[index].args[0]
+            query=parse_qs(urlsplit(request.full_url).query)
+            self.assertEqual(query['recvWindow'],['5000'])
+            self.assertEqual(query['newClientOrderId'],['gp-test'])
+            self.assertEqual(request.method,'POST')
+        self.assertEqual(params,{'symbol':'XAUUSDT','newClientOrderId':'gp-test'})
+
+    def test_uncertain_network_result_never_retries_submission(self):
+        from trading_brokers import ApiError
+        broker=Binance(production=True,key='test-key',secret='test-secret')
+        broker.opener.open=unittest.mock.Mock(side_effect=TimeoutError())
+        with self.assertRaises(ApiError) as error:
+            broker.request('/fapi/v1/order',{'newClientOrderId':'gp-test'},'POST',True)
+        self.assertTrue(error.exception.uncertain)
+        broker.opener.open.assert_called_once()

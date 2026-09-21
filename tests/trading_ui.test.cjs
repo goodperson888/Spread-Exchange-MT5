@@ -17,7 +17,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   const el = id => {
     if (!elements.has(id)) elements.set(id, {
       tagName:'BUTTON', value:'', textContent:'', innerHTML:'', dataset:{},
-      classList:{toggle(){}, add(){}, remove(){}}, querySelectorAll(){return [];}
+      classList:{toggle(){}, add(){}, remove(){}}, querySelectorAll(){return [];}, addEventListener(name,fn){this['on'+name]=fn;}
     });
     return elements.get(id);
   };
@@ -159,4 +159,28 @@ test('hidden page cancels outstanding historical request and ignores late respon
   assert.equal(signal.aborted,true);
   release({samples:[]});await work;
   assert.equal(f.charts.length,0);
+});
+
+test('chart keeps backend threshold while input is pending; no zero threshold before connection',async()=>{
+  let connected=false;
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({connected,state:{groups:[],orders:[]},strategy_runtime:connected?{entry_spread_usd:3.5}:null})});
+  f.el('entry').value='9';
+  await f.el('trading-reconcile').onclick();
+  assert.equal(f.charts.at(-1).series[0].markLine.data.length,0);
+  connected=true;
+  await f.el('trading-reconcile').onclick();
+  assert.equal(f.charts.at(-1).series[0].markLine.data[0].yAxis,3.5);
+  assert.match(f.el('entry-effective').textContent,/当前生效：3.5 · 待应用：9/);
+  f.el('entry').value='8';f.el('entry').oninput();
+  assert.match(f.el('entry-effective').textContent,/待应用：8/);
+});
+
+test('unwound group and cumulative carry are explicit; rejected order never claims confirmed fill',async()=>{
+  const g={id:'failed-pair',status:'closed',reason:'币安拒单、部分成交或状态未知',qty:1,lots:.01,contract:100,valuation:{net:-.47,carry:0}};
+  const order={id:'rejected',group:g.id,leg:'binance',action:'open',requested:1,created_ms:1000,result:{status:'done',qty:0,price:0,error:'币安接口错误 -1021'}};
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({state:{groups:[g],orders:[order]}})});
+  await f.el('trading-reconcile').onclick();
+  assert.match(f.el('groups').innerHTML,/异常撤回已完成/);
+  assert.match(f.el('pnl-stats').innerHTML,/累计资金费 \+ Swap（含已平仓）/);
+  assert.doesNotMatch(f.el('orders').innerHTML,/已通过对账确认|查询确认|发送→回报/);
 });

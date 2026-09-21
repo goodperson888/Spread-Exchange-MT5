@@ -46,12 +46,7 @@ class Binance:
         if signed:
             if not self.key or not self.secret:
                 raise ValueError('请先配置当前网络的币安凭据')
-            # A timestamp rejection triggers a fresh server-time sync below.
-            # Use Binance's maximum allowed window on that one retry so a
-            # transient round-trip delay cannot turn a valid retry into a
-            # false reject. The configured window remains unchanged.
-            window=self.recv_window_ms if _time_retry else max(self.recv_window_ms,60000)
-            params.update(timestamp=int(time.time()*1000)+self.offset, recvWindow=window)
+            params.update(timestamp=int(time.time()*1000)+self.offset, recvWindow=self.recv_window_ms)
         query = urlencode(params)
         if signed:
             query += '&signature='+hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()
@@ -73,7 +68,9 @@ class Binance:
                 # this does not duplicate an accepted order.
                 self.sync()
                 return self.request(path, original_params, method, signed, base, _time_retry=False)
-            raise ApiError(code, f'币安接口错误 {code}', exc.code >= 500 or code in (-1006, -1007)) from None
+            message = (f'币安接口错误 -1021：请求时间校验失败（已同步服务器时间并重试一次，recvWindow={self.recv_window_ms} ms）；请检查 Windows 时间同步和网络延迟'
+                       if code == -1021 else f'币安接口错误 {code}')
+            raise ApiError(code, message, exc.code >= 500 or code in (-1006, -1007)) from None
         except Exception:
             raise ApiError('NETWORK', '币安请求超时或网络不可用，交易结果需要查询确认', True) from None
 
