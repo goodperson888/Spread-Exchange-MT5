@@ -36,9 +36,11 @@
       const b=Number(v.remaining?.binance||0),m=Number(v.remaining?.mt5||0);
       const fx=q.usdt_usd??c.usdt_usd, oldFx=basis.usdt_usd??c.usdt_usd;
       const gross=v.gross-b*(q.binance.ask*fx-basis.binance.ask*oldFx)+m*(q.mt5.bid-basis.mt5.bid);
-      const exit=b*q.binance.ask*fx*c.binance_taker_percent/100+m/g.contract*c.mt5_commission_per_lot_side;
+      const exitBinance=b*q.binance.ask*fx*c.binance_taker_percent/100;
+      const exitMt5=m/g.contract*c.mt5_commission_per_lot_side;
+      const exit=exitBinance+exitMt5;
       if(![gross,exit,v.fees,v.carry].every(Number.isFinite))return g;
-      return {...g,valuation:{...v,gross,estimated_exit_fee:exit,net:gross-v.fees-exit+v.carry}};
+      return {...g,valuation:{...v,gross,estimated_exit_fee:exit,estimated_exit_fee_binance:exitBinance,estimated_exit_fee_mt5:exitMt5,net:gross-v.fees-exit+v.carry}};
     });
   }
   const api={QuoteBuffer,renderPoints,markGroups};

@@ -155,7 +155,9 @@ class Engine:
             fees+=r.get('fee', qty*price*c['binance_taker_percent']/100 if o['leg']=='binance' else qty/g['contract']*c['mt5_commission_per_lot_side'])*(order_fx if o['leg']=='binance' else 1)
         gross-=owned['binance']*q['binance']['ask']*fx
         gross+=owned['mt5']*q['mt5']['bid']
-        exit_fee=owned['binance']*q['binance']['ask']*fx*c['binance_taker_percent']/100+owned['mt5']/g['contract']*c['mt5_commission_per_lot_side']
+        exit_fee_binance=owned['binance']*q['binance']['ask']*fx*c['binance_taker_percent']/100
+        exit_fee_mt5=owned['mt5']/g['contract']*c['mt5_commission_per_lot_side']
+        exit_fee=exit_fee_binance+exit_fee_mt5
         days=max(0,(g.get('closed_ms',stamp())-g['opened_ms'])/86400000)
         if g['mode']!='paper':
             verified=g.get('costs_verified',False)
@@ -172,6 +174,7 @@ class Engine:
             carry=mt5_swap+funding
         flat=max(owned.values())<1e-8
         return dict(gross=round(gross,8),fees=round(fees,8),estimated_exit_fee=round(exit_fee,8),
+                    estimated_exit_fee_binance=round(exit_fee_binance,8),estimated_exit_fee_mt5=round(exit_fee_mt5,8),
                     mt5_swap=round(mt5_swap,8),binance_funding=round(funding,8),carry=round(carry,8),
                     net=round(gross-fees-exit_fee+carry,8),remaining=owned,
                     costs_verified=verified,estimated=not flat or (g['mode']!='paper' and not verified))
