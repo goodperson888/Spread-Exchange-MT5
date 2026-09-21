@@ -105,6 +105,7 @@ class TradingRuntime:
         self.engine.before_import_close = self._guard_import_close
         self._last_fx_refresh = 0
         self._last_carry_refresh = 0
+        self._last_auto_reconcile_at = 0
         self._last_rest_market = None
         self._last_rest_market_at = 0
         self.stop_event = threading.Event()
@@ -322,6 +323,8 @@ class TradingRuntime:
         self.market_meta['mt5_transport'] = self.pump.mt5_transport
         self.market_meta['binance_transport'] = self.pump.binance_transport
         self.market_meta['strategy_trigger'] = '报价事件驱动；订单串行执行'
+        if c['execution']['mode']=='live' and not self.reconciled:
+            self._auto_reconcile_flat()
         if c['execution']['mode']=='paper' or self.reconciled:
             if any(g.get('imported') for g in self.engine.active()) and time.monotonic()-getattr(self,'_last_import_check',0)>=2:
                 self._guard_import_close()
@@ -347,6 +350,41 @@ class TradingRuntime:
                 self.market_meta['fx_warning']='USDT/USD 更新失败，暂用上次数值：'+str(exc)
             self._last_fx_refresh=time.monotonic()
         self._verify_closed_costs()
+
+    def _auto_reconcile_flat(self):
+        """Recover a close that finished while the account was in recovery.
+
+        During a two-leg close one platform can briefly be flat while the
+        other is still closing. If that transient mismatch trips recovery,
+        keep checking at a slow cadence and clear it automatically only after
+        both broker accounts and all journal orders are flat.
+        """
+        now = time.monotonic()
+        if now-self._last_auto_reconcile_at < 2: return False
+        self._last_auto_reconcile_at = now
+        active = self.engine.active()
+        if not active or any(g.get('status') not in ('closing','unwinding') for g in active): return False
+        try:
+            for group in active: self.engine.resolve(group)
+            if any(self.engine.uncertain(group) or max(self.engine.amounts(group).values())>=1e-8 for group in active):
+                return False
+            positions = self.binance.positions(self.config['symbol'])
+            if self.binance.open_orders(self.config['symbol']) or any(abs(float(x.get('positionAmt',0)))>1e-8 for x in positions):
+                return False
+            mt5 = self.terminal.call('snapshot')
+            imported_tickets={ticket for group in active if group.get('imported') for ticket in self.engine.mt5_tickets(group)}
+            managed=[x for x in mt5.get('positions',[]) if x.get('magic')==self.config['execution']['magic']
+                     or str(x.get('ticket')) in imported_tickets]
+            if managed: return False
+            if self.quote:
+                for group in list(active): self.engine.finalize_flat(group,self.quote)
+            self.engine.state['recovery']=False
+            self.engine.state['alarm']=''
+            self.reconciled=True
+            self.engine.save('auto_reconciled_flat')
+            return True
+        except Exception:
+            return False
 
     def _update_live_carry(self, positions):
         if self.config['execution']['mode']!='live': return
@@ -714,6 +752,14 @@ class TradingRuntime:
                                        and position.get('comment') in expected_comments) or str(position['ticket']) in imported_tickets
             if imported_tickets:
                 self._validate_import_exposure(mt5,positions,open_orders)
+                # A close can be confirmed by the platform before the next
+                # strategy tick. Finalize flat closing groups here so the UI
+                # does not remain stuck in `closing` or offer a duplicate
+                # close button.
+                current_quote=getattr(self,'quote',None)
+                for group in list(self.engine.active()):
+                    if group.get('imported') and current_quote and self.engine.finalize_flat(group, current_quote):
+                        group['import_closing_costs_checked'] = False
             by_comment = {x.get('comment'): x for x in managed_mt5 if x.get('comment')}
             for order in self.engine.state['orders']:
                 if (order['id'] in by_comment and order['leg'] == 'mt5' and order['action'] == 'open'

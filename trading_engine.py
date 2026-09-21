@@ -138,7 +138,9 @@ class Engine:
             try: r=self.broker.query(copy.deepcopy(o))
             except Exception: continue
             if self.result_valid(r,o['requested']) and r.get('qty',0)>=o['result'].get('qty',0):
-                o['result']={**o['result'],**r};self.save('order_reconciled',{'id':o['id'],'result':r})
+                merged={**o['result'],**r}
+                if r.get('status')=='done': merged.pop('error',None)
+                o['result']=merged;self.save('order_reconciled',{'id':o['id'],'result':merged})
         if self.uncertain(g):
             self.pause('订单状态未知，禁止重发；正在查询成交和持仓');return False
         return True
@@ -233,6 +235,16 @@ class Engine:
         if group_id and not found: raise ValueError('未找到活动交易组')
         self.save('close_requested',{'group':group_id,'reason':reason})
 
+    def finalize_flat(self, g, q):
+        """Record a completed close once both broker legs report zero exposure."""
+        if not q or g.get('status') not in ('closing','unwinding') or self.uncertain(g): return False
+        if max(self.amounts(g).values())>=1e-8: return False
+        actual=self._record_spread(g,'close',g.get('exit_signal',q.get('exit')))
+        g.update(status='closed',closed_ms=stamp(),exit=actual if actual is not None else q.get('exit'))
+        g['valuation']=self.valuation(g,q)
+        self.save('group_closed',{'group':g['id'],'net_estimate':g['valuation']['net']})
+        return True
+
     def close_group(self, g, q):
         if g.get('imported') and hasattr(self,'before_import_close'):
             self.before_import_close()
@@ -243,9 +255,7 @@ class Engine:
         if not self.resolve(g): return
         amounts=self.amounts(g)
         if max(amounts.values())<1e-8:
-            actual=self._record_spread(g,'close',g.get('exit_signal',q['exit']))
-            g.update(status='closed',closed_ms=stamp(),exit=actual if actual is not None else q['exit']);g['valuation']=self.valuation(g,q)
-            self.save('group_closed',{'group':g['id'],'net_estimate':g['valuation']['net']});return
+            self.finalize_flat(g,q);return
         if g['attempts']>=g['retry_limit']:
             g['status']='attention';self.pause('减仓重试达到上限，仍有敞口；请检查账户后使用“重试平仓”');return
         g['attempts']+=1;self.save('close_attempt',{'group':g['id'],'attempt':g['attempts']})
@@ -276,8 +286,7 @@ class Engine:
             if after['mt5']<before_m-1e-8 and abs(after['mt5']-after['binance'])<1e-8:
                 g['attempts']=0
         if not self.uncertain(g) and max(self.amounts(g).values())<1e-8:
-            g.update(status='closed',closed_ms=stamp(),exit=q['exit']);g['valuation']=self.valuation(g,q)
-            self.save('group_closed',{'group':g['id'],'net_estimate':g['valuation']['net']})
+            self.finalize_flat(g,q)
 
     def tick(self, c, p, q):
         if self.state['recovery']: return

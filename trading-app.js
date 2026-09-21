@@ -8,12 +8,17 @@
   const usd = x => Number.isFinite(Number(x)) ? `${Number(x)>=0?'+':''}${Number(x).toFixed(2)} USD` : '—';
   const escape = value => String(value ?? '').replace(/[&<>'"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
   let chart, timer, busy=false, last=null, resetChartZoom=true, actionError='';
-  let chartView=null, stream=null, streamReady=false, paintPending=false, chartSamples=[], plotGeneration=0, latestLive=null;
-  const quoteBuffer=window.GoldPairQuotes?new window.GoldPairQuotes.QuoteBuffer():null;
+  let chartView=null, stream=null, streamReady=false, paintPending=false, lastPaintAt=0, chartSamples=[], plotGeneration=0, latestLive=null, statusBusy=false;
+  // Keep the browser-side high-frequency window bounded; longer history comes
+  // from the local SQLite chart endpoint and is already downsampled for display.
+  const quoteBuffer=window.GoldPairQuotes?new window.GoldPairQuotes.QuoteBuffer(30000):null;
   function windowStart(){return Date.now()-Math.max(1,Number(el('chart-window').value)||1440)*60000;}
   function paintSoon(){
     if(paintPending)return;paintPending=true;
-    (window.requestAnimationFrame||((fn)=>setTimeout(fn,16)))(()=>{paintPending=false;drawChart(chartSamples);renderIncome(latestLive||last?.quote);});
+    const run=()=>{paintPending=false;lastPaintAt=Date.now();drawChart(chartSamples);renderIncome(latestLive||last?.quote);};
+    const delay=Math.max(0,200-(Date.now()-lastPaintAt));
+    if(delay) setTimeout(run,delay);
+    else (window.requestAnimationFrame||((fn)=>setTimeout(fn,16)))(run);
   }
   function streamLabel(){
     const badge=el('chart-live-status');if(!badge)return;
@@ -95,7 +100,7 @@
       const basis=g.imported?'接管旧仓 · 成本估算':g.mode==='paper'?'纸面估算':v.costs_verified?'平台已复核':'实盘估算';
       const funding=Number(v.binance_funding||0),swap=Number(v.mt5_swap||0);
       const carryDetail=('binance_funding' in v||'mt5_swap' in v)?`资金费 ${usd(funding)}<br>MT5 Swap ${usd(swap)}`:`合计 ${usd(v.carry||0)}`;
-      const action=g.status==='closed'?'':`<button data-close="${escape(g.id)}">平仓</button>`;
+      const action=g.status==='closed'?'':g.status==='closing'?'<button disabled>平仓处理中…</button>':`<button data-close="${escape(g.id)}">平仓</button>`;
       const entryLabel=g.open_binance && Number.isFinite(Number(g.entry))?`<br><span class="muted" title="币安开仓成交价 × 该笔记录的 USDT/USD − MT5 开仓成交价；双边成交可能不在同一时刻">开仓成交价差 ${n(g.entry)} USD/盎司</span>`:'';
       const gridLabel=Number(g.grid_index||0)>0?`<br><span class="muted">网格补仓第 ${Number(g.grid_index)} 次</span>`:'';
       const exitFee=Number(v.estimated_exit_fee||0), exitBinance=Number(v.estimated_exit_fee_binance||0), exitMt5=Number(v.estimated_exit_fee_mt5||0);
@@ -331,12 +336,16 @@
     ]},{notMerge:true,lazyUpdate:true});
   }
   async function status(withChart=true) {
-    const r=await request('/api/trading/status');
-    if(window.goldPairUiBusy) return;
-    render(r);
-    // Keep the last chart visible when disconnected, but do not keep
-    // re-fetching it as if live monitoring were still running.
-    if(withChart && (!chart || (!streamReady && r.connected))) await plot();
+    if(statusBusy)return;
+    statusBusy=true;
+    try {
+      const r=await request('/api/trading/status');
+      if(window.goldPairUiBusy) return;
+      render(r);
+      // Keep the last chart visible when disconnected, but do not keep
+      // re-fetching it as if live monitoring were still running.
+      if(withChart && (!chart || (!streamReady && r.connected))) await plot();
+    } finally { statusBusy=false; }
   }
   async function connect() {
     await saveConfig();
