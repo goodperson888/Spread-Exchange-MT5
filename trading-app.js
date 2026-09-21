@@ -192,10 +192,28 @@
     connectButton.classList.toggle('primary',!result.connected);
     streamLabel();
     const oldManaging=(state.groups||[]).some(g=>g.imported&&g.status!=='closed'&&g.management_enabled);
-    const stateText = !result.connected ? '未连接，不能开仓' : (!reconciled || state.recovery) ? '已连接，等待持仓对账' : state.enabled ? '自动开仓运行中'+(oldManaging?' · 旧仓管理运行中':'') : oldManaging?'旧仓管理运行中 · 新开仓未启动':'已连接，尚未启动自动开仓';
-    const alarm=state.alarm||result.last_error;
+    const groups=state.groups||[];
+    const protectionPending=groups.some(g=>['unwinding','closing'].includes(g.status));
+    const rawAlarm=state.alarm||result.last_error;
+    // A rollback can finish after the pause alarm was written. Keep the
+    // durable group reason in the history, but do not present the old
+    // "正在保护性平仓" text as if an exposure were still open.
+    const staleProtectionAlarm=!protectionPending&&/正在保护性平仓/.test(String(rawAlarm||''));
+    const alarm=staleProtectionAlarm
+      ? '上一笔异常已完成保护性处理，当前等待手动恢复自动开仓'
+      : rawAlarm;
+    const stateText = !result.connected ? '未连接，不能开仓'
+      : (!reconciled || state.recovery) ? '已连接，等待持仓对账'
+      : protectionPending ? '已连接，自动开仓已暂停：保护性平仓处理中'
+      : state.enabled ? '自动开仓运行中'+(oldManaging?' · 旧仓管理运行中':'')
+      : oldManaging ? '旧仓管理运行中 · 新开仓未启动'
+      : '已连接，尚未启动自动开仓';
     const message=result.message ? `\n${result.message}` : '';
-    const next=(!result.connected ? '请先连接行情。' : ((!reconciled||state.recovery) ? '请先点击“持仓对账”，对账通过后才能启动自动开仓。' : result.capabilities?.live_orders ? '实盘通道已连接、持仓已对账；启动时仍会检查配置和策略状态。' : '纸面模式不会发送真实订单。'));
+    const next=(!result.connected ? '请先连接行情。'
+      : ((!reconciled||state.recovery) ? '请先点击“持仓对账”，对账通过后才能启动自动开仓。'
+      : protectionPending ? '保护性处理完成前不能启动自动开仓，程序会继续处理已有敞口。'
+      : result.capabilities?.live_orders ? '实盘通道已连接、持仓已对账；启动时仍会检查配置和策略状态。'
+      : '纸面模式不会发送真实订单。'));
     text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${message}\n${next}\n${result.plan?`每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: '请保存参数后连接。'}`,Boolean(alarm||actionError));
     const auto=result.auto_values||{}, details=[];
     if(auto.fx?.value) {
