@@ -216,6 +216,20 @@
       el('adoption-managed-status').textContent=`接管篮子 #${group.id} · ${managing?'管理已启动':'管理已暂停'} · ${group.status==='open'?'持仓中':group.status} · 数量 ${n(group.qty)} XAU / ${n(group.lots)} 手 · 开仓参考价差 ${n(group.entry)} USD/盎司 · 净收益 ${usd(group.valuation?.net)}（估算）`;
     } else adoptionGroupId=null;
     const report=result.position_report;
+    const binanceSummary=el('adoption-binance-summary');
+    if(binanceSummary) {
+      if(!report) binanceSummary.textContent='读取后显示币安配平仓位。';
+      else if(!report.binance?.length) binanceSummary.textContent='币安当前品种没有持仓，暂时不能接管。';
+      else {
+        const mode=result.capabilities?.position_mode==='hedge'?'双向持仓':'单向持仓';
+        const rows=report.binance.map(x=>{
+          const amount=Math.abs(Number(x.positionAmt)||0);
+          const side=x.positionSide==='BOTH'?(Number(x.positionAmt)<0?'空头':'多头'):x.positionSide;
+          return `${side} ${n(amount)} XAU，均价 ${n(x.entryPrice)} USDT`;
+        });
+        binanceSummary.textContent=`币安当前仓位（${mode}）：${rows.join('；')}。接管要求只有对应空头，且数量必须与所选 MT5 票据配平。`;
+      }
+    }
     if(report && report.time_ms!==adoptionReportTime) {
       const selected=new Set(Array.from(el('adoption-tickets').querySelectorAll('input:checked'),x=>x.value));
       el('adoption-tickets').innerHTML=report.mt5.filter(p=>p.side===0&&!p.managed).map(p=>`<label class="check"><input type="checkbox" value="${escape(p.ticket)}" ${selected.has(String(p.ticket))?'checked':''} />票据 ${escape(p.ticket)} · ${n(p.lots)} 手 · 开仓 ${n(p.price_open)} · ${dateTime(p.time_ms)}</label>`).join('')||'没有可接管的 MT5 多头票据。';
