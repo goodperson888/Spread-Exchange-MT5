@@ -38,8 +38,11 @@ class Binance:
         proxies = {'http': self.proxy_url, 'https': self.proxy_url} if self.proxy_url else {}
         self.opener = build_opener(ProxyHandler(proxies)) if proxies else build_opener()
 
-    def request(self, path, params=None, method='GET', signed=False, base=None):
-        params = dict(params or {})
+    def request(self, path, params=None, method='GET', signed=False, base=None, _time_retry=True):
+        # Keep the caller's parameters separate from the per-request timestamp
+        # so a one-time -1021 retry can rebuild a fresh signature safely.
+        original_params = dict(params or {})
+        params = dict(original_params)
         if signed:
             if not self.key or not self.secret:
                 raise ValueError('请先配置当前网络的币安凭据')
@@ -57,6 +60,14 @@ class Binance:
                 payload=json.loads(exc.read()); code=payload.get('code', exc.code)
             except Exception:
                 code=exc.code
+            if signed and code == -1021 and _time_retry:
+                # The lightweight connection check uses a temporary client and
+                # may have corrected its own clock offset while the long-lived
+                # trading client drifted.  Re-sync once, then rebuild the
+                # signed request.  A -1021 response is rejected by Binance, so
+                # this does not duplicate an accepted order.
+                self.sync()
+                return self.request(path, original_params, method, signed, base, _time_retry=False)
             raise ApiError(code, f'币安接口错误 {code}', exc.code >= 500 or code in (-1006, -1007)) from None
         except Exception:
             raise ApiError('NETWORK', '币安请求超时或网络不可用，交易结果需要查询确认', True) from None
