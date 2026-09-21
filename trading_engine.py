@@ -188,6 +188,11 @@ class Engine:
 
     def open(self, c, p, q, grid_index=0, min_entry_spread=None):
         now=stamp()
+        threshold=min_entry_spread if min_entry_spread is not None else c['strategy']['entry_spread_usd']
+        guard=getattr(self, 'entry_preflight', None)
+        if guard and not guard(q, threshold):
+            self.save('entry_preflight_blocked', {'threshold':threshold})
+            return
         g=dict(id=uuid.uuid4().hex[:12],status='opening',opened_ms=now,qty=p['qty'],lots=p['lots'],contract=p['contract'],
             symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],mode=c['execution']['mode'],
             parameters=copy.deepcopy(c['strategy']),costs=copy.deepcopy(c['costs']),attempts=0,
@@ -215,7 +220,6 @@ class Engine:
         second=self.order(g,'binance','open',p['qty'],second_q)
         if second['result']['status']=='done' and abs(second['result']['qty']-p['qty'])<1e-8:
             actual=self._record_spread(g,'open',q['entry'])
-            threshold=min_entry_spread if min_entry_spread is not None else c['strategy']['entry_spread_usd']
             if actual is None:
                 # Both legs reported full fills, but the pair basis could not
                 # be reconstructed. Keep the hedge untouched and require a

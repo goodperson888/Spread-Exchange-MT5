@@ -32,6 +32,8 @@ class Binance:
     def __init__(self, production=False, key='', secret='', recv_window_ms=5000, proxy_url=''):
         self.base = 'https://fapi.binance.com' if production else 'https://demo-fapi.binance.com'
         self.key, self.secret, self.offset = key, secret, 0
+        self._clock_anchor = None
+        self.sync_rtt_ms = None
         self.recv_window_ms = int(recv_window_ms)
         self.position_mode = 'one_way'
         self.proxy_url = str(proxy_url or '').strip()
@@ -46,7 +48,9 @@ class Binance:
         if signed:
             if not self.key or not self.secret:
                 raise ValueError('请先配置当前网络的币安凭据')
-            params.update(timestamp=int(time.time()*1000)+self.offset, recvWindow=self.recv_window_ms)
+            anchor = self._clock_anchor
+            timestamp = int(anchor[0]+(time.monotonic()-anchor[1])*1000) if anchor else int(time.time()*1000)+self.offset
+            params.update(timestamp=timestamp, recvWindow=self.recv_window_ms)
         query = urlencode(params)
         if signed:
             query += '&signature='+hmac.new(self.secret.encode(), query.encode(), hashlib.sha256).hexdigest()
@@ -75,9 +79,16 @@ class Binance:
             raise ApiError('NETWORK', '币安请求超时或网络不可用，交易结果需要查询确认', True) from None
 
     def sync(self):
-        before=int(time.time()*1000)
+        before=time.monotonic()
         t=self.request('/fapi/v1/time')['serverTime']
-        self.offset=int(t)-(before+int(time.time()*1000))//2
+        after=time.monotonic()
+        rtt=(after-before)*1000
+        if not math.isfinite(float(t)) or rtt > min(1500, self.recv_window_ms/2):
+            raise ValueError('币安校时往返耗时过长或时间无效，请检查网络后重试')
+        server_now=float(t)+rtt/2
+        self._clock_anchor=(server_now,after)
+        self.offset=round(server_now-time.time()*1000)
+        self.sync_rtt_ms=round(rtt)
 
     def public_ip(self):
         """Return the public egress IP observed through this client's route."""
@@ -125,8 +136,8 @@ class Binance:
             'trading_authority_expiration_time':int(r.get('tradingAuthorityExpirationTime') or 0),
         }
 
-    def preflight(self, api_permissions=None):
-        self.sync()
+    def preflight(self, api_permissions=None, sync_clock=True):
+        if sync_clock: self.sync()
         a=self.request('/fapi/v3/account', signed=True)
         # V3 supplies balances/positions; permission and mode flags live in
         # accountConfig. Missing fields must never be reported as false.
@@ -195,18 +206,26 @@ class Binance:
         return dict(status='done' if final else 'pending', qty=qty, price=price,
                     ticket=str(r.get('orderId','')), raw_status=status)
 
-    def submit(self, order, spec):
+    def order_args(self, order, spec):
         side='SELL' if order['action']=='open' else 'BUY'
         tick=Decimal(spec['filters']['PRICE_FILTER']['tickSize'])
         limit=Decimal(str(order['limit']))
         price=(limit/tick).to_integral_value(rounding=ROUND_CEILING if side=='SELL' else ROUND_FLOOR)*tick
         args=dict(symbol=order['symbol'],side=side,type='LIMIT',timeInForce='IOC',
                   quantity=format(Decimal(str(order['requested'])), 'f'),price=format(price,'f'),
-                  newClientOrderId=order['id'],newOrderRespType='RESULT')
+                  newClientOrderId=order.get('id') or 'check'+uuid.uuid4().hex[:24],newOrderRespType='RESULT')
         if self.position_mode=='hedge':
             args['positionSide']=str(order.get('position_side') or 'SHORT').upper()
         elif side=='BUY':
             args['reduceOnly']='true'
+        return args
+
+    def test_order(self, order, spec):
+        # Production validation endpoint; explicitly never use /order here.
+        return self.request('/fapi/v1/order/test', self.order_args(order, spec), 'POST', True)
+
+    def submit(self, order, spec):
+        args=self.order_args(order,spec)
         try:
             return self.normalize(self.request('/fapi/v1/order', args, 'POST', True))
         except ApiError as exc:

@@ -31,6 +31,7 @@ from trading_engine import Engine
 from trading_store import Store
 import position_adoption
 from market_push import PushBridge, QuoteEvents, QuotePump, observed_quote
+from entry_preflight import EntryPreflight
 
 ROOT = Path(__file__).resolve().parent
 DATA = (Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GoldPairLocal') if getattr(sys, 'frozen', False) else ROOT / 'data'
@@ -108,6 +109,7 @@ class TradingRuntime:
         self._last_auto_reconcile_at = 0
         self._last_rest_market = None
         self._last_rest_market_at = 0
+        self.entry_preflight = None
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._loop, name='gold-pair-market', daemon=True)
         self.thread.start()
@@ -121,6 +123,8 @@ class TradingRuntime:
             self.terminal.close()
         if self.market_stream:
             self.market_stream.close()
+        if self.entry_preflight:
+            self.entry_preflight.close()
         self.store.close()
 
     def connect(self, config, api_key='', api_secret='', mt5_mcp_token=''):
@@ -151,6 +155,7 @@ class TradingRuntime:
                                    proxy_url=config['binance'].get('proxy_url', ''))
             new_terminal = None
             new_stream = None
+            new_preflight = None
             meta = {'mt5_transport':'工作进程持久会话 + tick 轮询'}
             try:
                 new_spec = new_binance.spec(config['symbol'])
@@ -217,19 +222,26 @@ class TradingRuntime:
                 new_plan = executable_plan(config, snapshot['spec'], new_spec, market['bid'])
                 new_quote = self._quote(snapshot['quote'], market, config)
                 broker = PaperBroker() if mode == 'paper' else LiveBroker(config, new_binance, new_terminal, new_spec)
+                if mode == 'live':
+                    new_preflight = EntryPreflight(new_binance, new_binance, new_spec)
             except Exception:
                 if new_stream:
                     new_stream.close()
                 if new_terminal:
                     new_terminal.close()
+                if new_preflight:
+                    new_preflight.close()
                 raise
 
             if self.pump: self.pump.close()
             old_terminal = self.terminal
             old_stream = self.market_stream
+            old_preflight = self.entry_preflight
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
+            self.entry_preflight = new_preflight
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.engine.quote_provider = self._execution_quote
+            self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
             self._last_mt5_snapshot = snapshot if config['mt5']['adapter']=='native' else None
             self._last_mt5_snapshot_at = time.monotonic()
             self.quote, self.connected, self.last_error = new_quote, True, ''
@@ -262,6 +274,8 @@ class TradingRuntime:
                 old_terminal.close()
             if old_stream and old_stream is not new_stream:
                 old_stream.close()
+            if old_preflight and old_preflight is not new_preflight:
+                old_preflight.close()
             return self.snapshot()
 
     def _quote(self, mt5, binance, config=None):
@@ -314,6 +328,21 @@ class TradingRuntime:
         if market is None: market=self.binance.quote(c['symbol'])
         return self._quote(mt5,market,c)
 
+    def _entry_preflight_guard(self, q, threshold):
+        preflight = self.entry_preflight
+        if preflight is None:
+            return True
+        near = float(q.get('entry', -float('inf'))) >= float(threshold) - preflight.NEAR_USD
+        if near:
+            preflight.update(dict(key=q.get('key'), symbol=self.config['symbol'],
+                                  position_mode=self.binance.position_mode,
+                                  price=float(q['binance']['bid']), qty=float(self.plan['qty'])))
+        status = preflight.status()
+        if near and not status['ready']:
+            self.engine.state['alarm'] = '开仓预检未通过或已过期：' + status['message']
+            return False
+        return True
+
     def _poll(self):
         c = self.config
         q, version, error = self.pump.read()
@@ -323,6 +352,8 @@ class TradingRuntime:
         self.market_meta['mt5_transport'] = self.pump.mt5_transport
         self.market_meta['binance_transport'] = self.pump.binance_transport
         self.market_meta['strategy_trigger'] = '报价事件驱动；订单串行执行'
+        if self.entry_preflight:
+            self.market_meta['entry_preflight'] = self.entry_preflight.status()
         if c['execution']['mode']=='live' and not self.reconciled:
             self._auto_reconcile_flat()
         if c['execution']['mode']=='paper' or self.reconciled:
@@ -333,6 +364,10 @@ class TradingRuntime:
             q, version, error = self.pump.read()
             if error: raise ValueError(error)
             self.quote = q
+            if self.entry_preflight and q.get('entry', -float('inf')) >= c['strategy']['entry_spread_usd'] - self.entry_preflight.NEAR_USD:
+                self.entry_preflight.update(dict(key=q.get('key'), symbol=c['symbol'],
+                                                  position_mode=self.binance.position_mode,
+                                                  price=float(q['binance']['bid']), qty=float(self.plan['qty'])))
             self.engine.tick(c, self.plan, q)
         # Maintenance is separate from quote intake. It can delay a strategy pass,
         # but cannot freeze push reception or the chart; the next pass reads latest.
@@ -846,6 +881,7 @@ class TradingRuntime:
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,
                 'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd']} if self.config else None,
+                'entry_preflight': self.entry_preflight.status() if self.entry_preflight else None,
                 'capabilities': {'live_orders': bool(self.config and self.config['execution']['mode'] == 'live'),
                                  'mode': self.config['execution']['mode'] if self.config else 'paper',
                                  'reconciled': self.reconciled,

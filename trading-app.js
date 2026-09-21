@@ -178,6 +178,13 @@
       effectiveEntry.dataset.value=Number.isFinite(runtimeEntry)?String(runtimeEntry):'';
       updateEntryLabel();
     }
+    const pf=result.entry_preflight;
+    if(pf) {
+      const labels={ready:'预检通过',checking:'预检中',failed:'预检失败',expired:'预检已过期',waiting:'等待接近阈值'};
+      text('entry-preflight',`${labels[pf.state]||pf.state}：${pf.message||'—'}${pf.age_ms!=null?' · '+pf.age_ms+' ms前':''}`,pf.state==='failed');
+    } else {
+      text('entry-preflight','实盘连接后，接近阈值时自动预检币安时间、账户和测试订单。');
+    }
     el('trading-mode').textContent=result.connected ? `${mode} 已连接${positionLabel?' · '+positionLabel:''}` : '未连接';
     el('trading-mode').classList.toggle('warning', Boolean(state.alarm||result.last_error||(!reconciled&&result.connected)));
     const connectButton=el('trading-connect');
