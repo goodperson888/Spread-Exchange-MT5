@@ -60,8 +60,13 @@ class Engine:
         if qty<=1e-9: return
         side=q[leg]; sell=(leg=='binance')==(action=='open')
         reference=side['bid' if sell else 'ask']
-        slippage_key='unwind_slippage_usd' if g.get('status')=='unwinding' else 'max_slippage_usd'
-        slip=g['parameters'][slippage_key]/(g['costs']['usdt_usd'] if leg=='binance' else 1)
+        if g.get('status')=='unwinding':
+            # Groups created by an older build do not have the dedicated
+            # unwind field; fall back to their saved normal budget safely.
+            budget=g['parameters'].get('unwind_slippage_usd', g['parameters']['max_slippage_usd'])
+        else:
+            budget=g['parameters']['max_slippage_usd']
+        slip=budget/(g['costs']['usdt_usd'] if leg=='binance' else 1)
         o=dict(id='gp'+uuid.uuid4().hex[:24],group=g['id'],leg=leg,action=action,
                requested=qty,symbol=g['symbol'] if leg=='binance' else g['mt5_symbol'],
                reference=reference,limit=reference+(-slip if sell else slip),slippage=slip,

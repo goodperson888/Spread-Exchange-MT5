@@ -925,6 +925,17 @@ def deep_merge(base, incoming):
 
 def load_config():
     config = deep_merge(DEFAULT, read_json(CONFIG_PATH, {}))
+    # Keep older saved configurations valid after adding the dedicated
+    # protective-close budget.  A user who previously chose a larger normal
+    # slippage must not get a validation error on the new default.
+    strategy = config.get('strategy', {})
+    try:
+        normal_slippage = float(strategy.get('max_slippage_usd', 0))
+        unwind_slippage = float(strategy.get('unwind_slippage_usd', 0))
+        if math.isfinite(normal_slippage) and math.isfinite(unwind_slippage) and unwind_slippage < normal_slippage:
+            strategy['unwind_slippage_usd'] = normal_slippage
+    except (TypeError, ValueError):
+        pass
     legacy_paper = config.get('mt5', {}).get('adapter') == 'paper' and (
         config['mt5'].get('account') == 'PAPER-MT5' or config['mt5'].get('server') == 'local-paper')
     if legacy_paper:
