@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {QuoteBuffer,renderPoints}=require('../quote-stream.js');
+const {QuoteBuffer,renderPoints,markGroups}=require('../quote-stream.js');
 const q=(t,entry=1,key='a')=>({time_ms:t,entry,exit:entry+.2,key});
 test('duplicate timestamps never rewrite history; resync retains received live points',()=>{
  const b=new QuoteBuffer();b.merge([q(100),q(102,2)]);
@@ -23,4 +23,15 @@ test('zoomed viewport retains subsecond historical quotes',()=>{
  const rows=Array.from({length:7000},(_,i)=>q(i*50));
  const visible=renderPoints(rows,86400000,{start:100000,end:101000});
  assert.equal(visible.filter(x=>x.time_ms>=100000&&x.time_ms<=101000).length,21);
+});
+
+test('open group mark-to-market moves with the latest quote while closed group stays fixed',()=>{
+ const basis={key:'a',time_ms:1000,usdt_usd:1,binance:{ask:100},mt5:{bid:99}};
+ const latest={key:'a',time_ms:1250,usdt_usd:1,binance:{ask:101},mt5:{bid:100}};
+ const open={id:'open',key:'a',status:'open',contract:100,qty:1,costs:{usdt_usd:1,binance_taker_percent:0,mt5_commission_per_lot_side:0},valuation:{gross:-1,fees:0,carry:0,estimated_exit_fee:1,net:-2,remaining:{binance:1,mt5:1}}};
+ const closed={id:'closed',key:'a',status:'closed',valuation:{gross:7,net:6}};
+ const rows=markGroups([open,closed],basis,latest);
+ assert.equal(rows[0].valuation.gross,-1);
+ assert.equal(rows[0].valuation.net,-1);
+ assert.deepEqual(rows[1],closed);
 });

@@ -758,10 +758,17 @@ class TradingRuntime:
 
     def snapshot(self):
         with self.lock:
-            st = self.engine.state
+            # A valuation snapshot remains available while management is paused,
+            # without invoking strategy decisions or changing durable state.
+            st = copy.deepcopy(self.engine.state)
+            quote = (self.pump.read()[0] if getattr(self,'pump',None) else None) or self.quote
+            if quote:
+                for group in st['groups']:
+                    if group['status'] != 'closed' and group.get('key') == quote.get('key'):
+                        group['valuation'] = self.engine.valuation(group, quote)
             return {
                 'connected': self.connected, 'last_error': self.last_error,
-                'quote': (self.pump.read()[0] if getattr(self,'pump',None) else None) or self.quote, 'plan': self.plan,
+                'quote': quote, 'plan': self.plan,
                 'state': st, 'events': self.store.events(),
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,

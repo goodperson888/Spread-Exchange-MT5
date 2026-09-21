@@ -13,7 +13,7 @@
   function windowStart(){return Date.now()-Math.max(1,Number(el('chart-window').value)||1440)*60000;}
   function paintSoon(){
     if(paintPending)return;paintPending=true;
-    (window.requestAnimationFrame||((fn)=>setTimeout(fn,16)))(()=>{paintPending=false;drawChart(chartSamples);});
+    (window.requestAnimationFrame||((fn)=>setTimeout(fn,16)))(()=>{paintPending=false;drawChart(chartSamples);renderIncome(latestLive||last?.quote);});
   }
   function streamLabel(){
     const badge=el('chart-live-status');if(!badge)return;
@@ -190,16 +190,27 @@
       text('plan-result',`MT5 ${el('mt5-symbol').value}：${n(p.lots)} 手 ↔ ${el('symbol').value}：${n(p.qty)} XAU\n黄金数量 ${n(p.qty)} 盎司；${notional===null?'等待行情':'当前名义金额约 '+Number(notional).toFixed(2)+' USDT（不是保证金）'}\n已按 MT5 与币安实际数量规则校验。`);
       el('plan-state').textContent='双边规则已校验';el('plan-state').classList.remove('warning');
     }
-    const groups=state.groups||[],orders=state.orders||[];
+    renderIncome(q);
+    el('orders').innerHTML=orderRows(state.orders||[],state.groups||[]);
+    el('trade-events').textContent=(result.events||[]).slice(0,8).map(x=>`${new Date(x.time).toLocaleString()}  ${x.kind}  ${JSON.stringify(x.data)}`).join('\n');
+    renderAdoption(result);
+  }
+  function renderIncome(q) {
+    if(!last)return;
+    const orders=last.state?.orders||[],raw=last.state?.groups||[];
+    const groups=window.GoldPairQuotes?.markGroups?window.GoldPairQuotes.markGroups(raw,last.quote,q):raw;
     const active=groups.filter(g=>g.status!=='closed'),closed=groups.filter(g=>g.status==='closed');
     const sum=(items,key)=>items.reduce((total,g)=>total+Number(g.valuation?.[key]||0),0);
     const allCarry=sum(groups,'carry'),allFees=sum(groups,'fees')+sum(active,'estimated_exit_fee');
     el('pnl-stats').innerHTML=[['实时净收益',usd(sum(active,'net'))],['已平仓净收益',usd(sum(closed,'net'))],['资金费 + Swap',usd(allCarry)],['手续费及预估平仓费',`-${allFees.toFixed(2)} USD`]].map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${value}</strong></div>`).join('');
     el('groups').innerHTML=groupRows(groups,orders);
-    el('orders').innerHTML=orderRows(orders,groups);
     for(const button of el('groups').querySelectorAll('[data-close]')) button.onclick=()=>action(()=>closeOne(button.dataset.close));
-    el('trade-events').textContent=(result.events||[]).slice(0,8).map(x=>`${new Date(x.time).toLocaleString()}  ${x.kind}  ${JSON.stringify(x.data)}`).join('\n');
-    renderAdoption(result);
+    const imported=groups.find(g=>g.imported&&g.status!=='closed');
+    if(imported)showAdoptionSummary(imported);
+  }
+  function showAdoptionSummary(group) {
+    const managing=Boolean(group.management_enabled);
+      el('adoption-managed-status').textContent=`接管篮子 #${group.id} · ${managing?'管理已启动':'管理已暂停'} · ${group.status==='open'?'持仓中':group.status} · 数量 ${n(group.qty)} XAU / ${n(group.lots)} 手 · 开仓参考价差 ${n(group.entry)} USD/盎司 · 净收益 ${usd(group.valuation?.net)}（估算）`;
   }
   function renderAdoption(result) {
     const group=(result.state?.groups||[]).find(g=>g.imported&&g.status!=='closed');
@@ -213,7 +224,7 @@
       const managing=Boolean(group.management_enabled);
       el('adoption-manage').textContent=managing?'暂停已有仓位管理':'启动已有仓位管理';
       el('adoption-managed-take').disabled=managing;el('adoption-managed-profit').disabled=managing;
-      el('adoption-managed-status').textContent=`接管篮子 #${group.id} · ${managing?'管理已启动':'管理已暂停'} · ${group.status==='open'?'持仓中':group.status} · 数量 ${n(group.qty)} XAU / ${n(group.lots)} 手 · 开仓参考价差 ${n(group.entry)} USD/盎司 · 净收益 ${usd(group.valuation?.net)}（估算）`;
+      showAdoptionSummary(group);
     } else adoptionGroupId=null;
     const report=result.position_report;
     const binanceSummary=el('adoption-binance-summary');

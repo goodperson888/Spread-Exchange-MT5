@@ -26,7 +26,22 @@
     const liveStart=(rows.at(-1)?.time_ms||0)-60000;
     return rows.filter(q=>{if(q.time_ms>=liveStart)return true;const localStep=view&&q.time_ms>=view.start&&q.time_ms<=view.end?Math.max(1,Math.ceil((view.end-view.start)/6000)):step;const bucket=Math.floor(q.time_ms/localStep);if(bucket===previous)return false;previous=bucket;return true;});
   }
-  const api={QuoteBuffer,renderPoints};
+  // Display projection only; execution decisions remain in the backend.
+  // Always project from one coherent server snapshot, never accumulate deltas.
+  function markGroups(groups,basis,q) {
+    if(!basis||!q||basis.key!==q.key||q.time_ms<basis.time_ms)return groups;
+    return groups.map(g=>{
+      const v=g.valuation, c=g.costs;
+      if(g.status!=='open'||!v||!c||g.key!==q.key)return g;
+      const b=Number(v.remaining?.binance||0),m=Number(v.remaining?.mt5||0);
+      const fx=q.usdt_usd??c.usdt_usd, oldFx=basis.usdt_usd??c.usdt_usd;
+      const gross=v.gross-b*(q.binance.ask*fx-basis.binance.ask*oldFx)+m*(q.mt5.bid-basis.mt5.bid);
+      const exit=b*q.binance.ask*fx*c.binance_taker_percent/100+m/g.contract*c.mt5_commission_per_lot_side;
+      if(![gross,exit,v.fees,v.carry].every(Number.isFinite))return g;
+      return {...g,valuation:{...v,gross,estimated_exit_fee:exit,net:gross-v.fees-exit+v.carry}};
+    });
+  }
+  const api={QuoteBuffer,renderPoints,markGroups};
   if(typeof module!=='undefined')module.exports=api;
   else root.GoldPairQuotes=api;
 })(typeof window!=='undefined'?window:globalThis);
