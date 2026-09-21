@@ -29,6 +29,13 @@ class ApiError(Exception):
 
 
 class Binance:
+    # recvWindow is Binance's signed-request validity window; it is not a
+    # limit on the round-trip time of the public clock endpoint.  A 1,000 ms
+    # recvWindow therefore must not make a perfectly usable 600 ms network
+    # path fail clock sync.  Keep a separate upper bound below the HTTP
+    # timeout so genuinely stalled routes are still rejected early.
+    MAX_SYNC_RTT_MS = 4500
+
     def __init__(self, production=False, key='', secret='', recv_window_ms=5000, proxy_url=''):
         self.base = 'https://fapi.binance.com' if production else 'https://demo-fapi.binance.com'
         self.key, self.secret, self.offset = key, secret, 0
@@ -80,12 +87,19 @@ class Binance:
 
     def sync(self):
         before=time.monotonic()
-        t=self.request('/fapi/v1/time')['serverTime']
+        payload=self.request('/fapi/v1/time')
+        t=payload.get('serverTime') if isinstance(payload, dict) else None
         after=time.monotonic()
         rtt=(after-before)*1000
-        if not math.isfinite(float(t)) or rtt > min(1500, self.recv_window_ms/2):
-            raise ValueError('币安校时往返耗时过长或时间无效，请检查网络后重试')
-        server_now=float(t)+rtt/2
+        try:
+            server_time=float(t)
+        except (TypeError, ValueError):
+            server_time=float('nan')
+        if not math.isfinite(server_time) or server_time < 1_000_000_000_000:
+            raise ValueError('币安校时返回的服务器时间无效，请检查网络后重试')
+        if rtt > self.MAX_SYNC_RTT_MS:
+            raise ValueError(f'币安校时往返耗时 {round(rtt)} ms，超过安全上限 {self.MAX_SYNC_RTT_MS} ms；请检查网络或代理')
+        server_now=server_time+rtt/2
         self._clock_anchor=(server_now,after)
         self.offset=round(server_now-time.time()*1000)
         self.sync_rtt_ms=round(rtt)

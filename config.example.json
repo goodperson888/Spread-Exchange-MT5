@@ -18,7 +18,7 @@
   "binance": {
     "api_key": "",
     "api_secret": "",
-    "recv_window_ms": 1000,
+    "recv_window_ms": 5000,
     "proxy_url": ""
   },
   "strategy": {

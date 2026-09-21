@@ -64,7 +64,7 @@
 <label>双边报价最大时差（毫秒）<input id="max-clock-skew" type="number" value="2000"></label>
 <label>最大单边敞口时间（毫秒）<input id="max-unhedged" type="number" value="1500"></label>
 <label>最大滑点（USD/盎司）<input id="slippage" type="number" step="0.1" value="0.5"></label>
-<label>签名请求有效窗口（毫秒）<input id="recv-window" type="number" value="1000"></label>
+<label>签名请求有效窗口（毫秒）<input id="recv-window" type="number" value="5000"></label>
 </div><p class="note">签名请求窗口用于币安签名接口，不是行情刷新间隔。币安最优 Bid/Ask 优先使用 WebSocket，断开时回退 REST；MT5 优先采用 EA 推送；EA 未接入或报价过期时使用持续终端会话轮询 tick。报价年龄、双边时钟偏差和单边敞口时间都会在执行前检查。</p></details>
 <div class="actions" id="legacy-paper-actions"><button id="paper-toggle" disabled>启动纸面引擎</button><button id="paper-step" disabled>推进一次纸面撮合</button><button id="paper-reset" disabled>重置纸面持仓</button></div>
 <div id="plan-result" class="result" role="status" aria-live="polite">检查 MT5 成功后会自动计算；连接币安后还会校验币安数量步长和最低名义金额。</div>

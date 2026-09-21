@@ -253,6 +253,14 @@ if __name__ == '__main__':
     unittest.main()
 
 class BinanceTimestampRetryTests(unittest.TestCase):
+    def test_clock_sync_does_not_use_recv_window_as_rtt_limit(self):
+        broker = Binance(production=True, recv_window_ms=1000)
+        broker.request = lambda *args, **kwargs: {'serverTime': 1_700_000_000_000}
+        with unittest.mock.patch('trading_brokers.time.monotonic', side_effect=[10.0, 10.6]), \
+             unittest.mock.patch('trading_brokers.time.time', return_value=1_700_000_000.0):
+            broker.sync()
+        self.assertEqual(broker.sync_rtt_ms, 600)
+
     def test_timestamp_retry_is_bounded_and_preserves_order_and_window(self):
         from urllib.error import HTTPError
         from urllib.parse import parse_qs, urlsplit
@@ -260,7 +268,7 @@ class BinanceTimestampRetryTests(unittest.TestCase):
         broker = Binance(production=True, key='test-key', secret='test-secret', recv_window_ms=5000)
         def rejection():
             return HTTPError('https://fapi.binance.com/fapi/v1/order',400,'bad timestamp',{},io.BytesIO(b'{"code":-1021}'))
-        broker.opener.open = unittest.mock.Mock(side_effect=[rejection(), io.BytesIO(b'{"serverTime":1000000}'), rejection()])
+        broker.opener.open = unittest.mock.Mock(side_effect=[rejection(), io.BytesIO(json.dumps({'serverTime': int(time.time()*1000)}).encode()), rejection()])
         params={'symbol':'XAUUSDT','newClientOrderId':'gp-test'}
         with self.assertRaises(ApiError) as error:
             broker.request('/fapi/v1/order',params,'POST',True)
