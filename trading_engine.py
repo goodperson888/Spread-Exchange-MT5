@@ -72,6 +72,12 @@ class Engine:
                reference=reference,limit=reference+(-slip if sell else slip),slippage=slip,
                fx=q.get('usdt_usd',g['costs']['usdt_usd']),
                created_ms=stamp(),result={'status':'unknown','qty':0,'price':0})
+        if leg=='binance':
+            # bookTicker carries the current top-of-book quantity.  The live
+            # broker uses it as a zero-latency fast path and only requests
+            # REST depth when the top level cannot cover this order.
+            top_key='bid_qty' if sell else 'ask_qty'
+            o['top_qty']=q.get('binance',{}).get(top_key)
         o['signal_spread']=q.get('entry' if action=='open' else 'exit')
         o['signal_time_ms']=q.get('time_ms')
         if leg=='binance':
@@ -212,6 +218,19 @@ class Engine:
         second_leg='mt5' if first_leg=='binance' else 'binance'
         first_label='币安' if first_leg=='binance' else 'MT5'
         first=self.order(g,first_leg,'open',p['qty'],q)
+        result=first['result']
+        # Only a local pre-submit block on the first leg can be skipped.
+        # Exchange rejections, fills and uncertain submissions still pause.
+        if (first_leg=='binance' and result.get('submitted') is False
+            and result.get('status')=='done' and result.get('qty')==0
+            and result.get('error_code') in ('DEPTH_INSUFFICIENT','DEPTH_CHECK_FAILED')
+            and not self.uncertain(g) and max(self.amounts(g).values())<1e-8):
+            g.update(status='closed',closed_ms=stamp(),entry_skipped=True,
+                     reason=result.get('error','盘口预检未通过')+'；本次未下单，冷却后自动重新检查')
+            g['valuation']=self.valuation(g,q)
+            self.save('entry_skipped',{'group':g['id'],'reason':g['reason'],
+                                      'code':result['error_code']})
+            return
         if first['result']['status']!='done':
             self.pause(f'{first_label} 开仓状态未知，等待对账');return
         if abs(first['result']['qty']-p['qty'])>1e-8:

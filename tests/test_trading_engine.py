@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from trading_brokers import Binance, PaperBroker
+from trading_brokers import Binance, PaperBroker, LiveBroker
 from trading_config import pair_key, validate
 from trading_engine import Engine
 from trading_store import Store
@@ -83,6 +83,56 @@ class EngineTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         self.temp.cleanup()
+
+    def depth_broker(self, failed=False):
+        exchange=Binance(production=True)
+        exchange.depth=unittest.mock.Mock(
+            side_effect=TimeoutError('depth timeout') if failed else None,
+            return_value={'bids':[(4306., .1)],'asks':[(4306.1, 10.)]})
+        exchange.request=unittest.mock.Mock(side_effect=AssertionError('must not send Binance order'))
+        terminal=unittest.mock.Mock()
+        terminal.call.side_effect=lambda cmd, order: PaperBroker().submit(order)
+        broker=LiveBroker(self.c,exchange,terminal,{'filters':{'PRICE_FILTER':{'tickSize':'0.1'}}})
+        return broker,exchange,terminal
+
+    def test_depth_skip_keeps_running_and_retries_after_cooldown(self):
+        broker,exchange,terminal=self.depth_broker()
+        engine=Engine(self.store,broker);engine.start(self.c)
+        engine.tick(self.c,self.plan,quote(self.c))
+        self.assertTrue(engine.state['enabled'])
+        self.assertEqual(engine.active(),[])
+        self.assertTrue(engine.state['groups'][0]['entry_skipped'])
+        terminal.call.assert_not_called();exchange.request.assert_not_called()
+        engine.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(exchange.depth.call_count,1)
+        engine.state['last_open_ms']=0
+        # A later opportunity can open without clicking Start again.
+        engine.broker=PaperBroker()
+        engine.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(len(engine.active()),1)
+        self.assertEqual(engine.active()[0]['status'],'open')
+
+    def test_depth_read_failure_before_submission_is_safe_to_skip(self):
+        broker,exchange,terminal=self.depth_broker(failed=True)
+        engine=Engine(self.store,broker);engine.start(self.c)
+        engine.tick(self.c,self.plan,quote(self.c))
+        self.assertTrue(engine.state['enabled'])
+        self.assertEqual(engine.active(),[])
+        self.assertEqual(engine.state['orders'][0]['result']['status'],'done')
+        terminal.call.assert_not_called();exchange.request.assert_not_called()
+
+    def test_depth_block_after_mt5_fill_pauses_and_unwinds(self):
+        self.c['execution']['entry_leg']='mt5'
+        for failed in (False,True):
+            with self.subTest(depth_read_failed=failed):
+                broker,exchange,terminal=self.depth_broker(failed)
+                engine=Engine(self.store,broker);engine.start(self.c)
+                engine.state['last_open_ms']=0
+                engine.tick(self.c,self.plan,quote(self.c))
+                self.assertFalse(engine.state['enabled'])
+                self.assertEqual(engine.active(),[])
+                self.assertEqual([call.kwargs['order']['action'] for call in terminal.call.call_args_list],['open','close'])
+                exchange.request.assert_not_called()
 
     def test_paper_pair_opens_then_closes_on_contraction(self):
         engine = Engine(self.store, PaperBroker())
@@ -176,6 +226,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(group['status'], 'closed')
         self.assertEqual(engine.amounts(group), {'binance': 0, 'mt5': 0})
         self.assertEqual([(o['leg'], o['action']) for o in broker.submitted], [('binance', 'open')])
+        self.assertFalse(engine.state['enabled'])
 
     def test_binance_first_mt5_failure_buys_back_binance(self):
         broker = RejectMt5OpenBroker()
@@ -265,6 +316,17 @@ class BinanceCostTests(unittest.TestCase):
         self.assertEqual(result['status'],'done')
         self.assertEqual(seen['positionSide'],'SHORT')
         self.assertNotIn('reduceOnly',seen)
+
+    def test_binance_depth_guard_blocks_when_slippage_range_is_thin(self):
+        broker=Binance(production=True)
+        broker.position_mode='hedge'
+        broker.depth=lambda symbol, limit=20: {'bids':[(100.0, .4)], 'asks':[(100.2, 10.0)]}
+        broker.request=lambda *args, **kwargs: self.fail('盘口深度不足时不应发送订单')
+        result=broker.submit({'action':'open','symbol':'XAUUSDT','requested':1,'limit':99.5,
+                              'id':'gp-depth123','position_side':'SHORT','depth_guard':True},
+                             {'filters':{'PRICE_FILTER':{'tickSize':'0.1'}}})
+        self.assertEqual(result['error_code'],'DEPTH_INSUFFICIENT')
+        self.assertEqual(result['qty'],0)
 
     def test_public_ip_uses_configured_opener_and_validates_response(self):
         broker = Binance(production=True, proxy_url='http://127.0.0.1:7890')

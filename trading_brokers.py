@@ -1,4 +1,5 @@
 """Exchange/terminal adapters. All writes are invoked only by an armed engine."""
+import copy
 import hashlib
 import hmac
 import ipaddress
@@ -129,6 +130,14 @@ class Binance:
         return dict(bid=float(r['bidPrice']), ask=float(r['askPrice']), time_ms=int(r['time']),
                     bid_qty=float(r['bidQty']), ask_qty=float(r['askQty']))
 
+    def depth(self, symbol, limit=20):
+        """Read a shallow public order book for an execution-side liquidity check."""
+        r=self.request('/fapi/v1/depth', {'symbol':symbol, 'limit':int(limit)})
+        return {
+            'bids': [(float(price), float(qty)) for price, qty in (r.get('bids') or [])],
+            'asks': [(float(price), float(qty)) for price, qty in (r.get('asks') or [])],
+        }
+
     def usdt_usd(self):
         r=self.request('/fapi/v1/assetIndex', {'symbol':'USDTUSD'})
         value=float(r['index'])
@@ -221,6 +230,15 @@ class Binance:
         return dict(status='done' if final else 'pending', qty=qty, price=price,
                     ticket=str(r.get('orderId','')), raw_status=status)
 
+    @staticmethod
+    def executable_depth(order, args, book):
+        """Return quantity available at prices executable by this IOC order."""
+        side=args['side']; limit=float(args['price'])
+        rows=book['bids'] if side=='SELL' else book['asks']
+        if side=='SELL':
+            return sum(qty for price, qty in rows if price >= limit)
+        return sum(qty for price, qty in rows if price <= limit)
+
     def order_args(self, order, spec):
         side='SELL' if order['action']=='open' else 'BUY'
         tick=Decimal(spec['filters']['PRICE_FILTER']['tickSize'])
@@ -242,6 +260,20 @@ class Binance:
     def submit(self, order, spec):
         args=self.order_args(order,spec)
         try:
+            if order.get('depth_guard'):
+                try:
+                    book=self.depth(order['symbol'], limit=20)
+                    available=self.executable_depth(order,args,book)
+                except Exception as exc:
+                    return {'status':'done','qty':0,'price':0,'submitted':False,
+                            'error':'币安下单前盘口深度检查失败，未发送订单：'+str(exc),
+                            'error_code':'DEPTH_CHECK_FAILED'}
+                if available + 1e-12 < float(order['requested']):
+                    return {'status':'done','qty':0,'price':0,'submitted':False,
+                            'raw_status':'DEPTH_INSUFFICIENT',
+                            'error':f'滑点范围内盘口数量不足：可成交约 {available:g}，申请 {float(order["requested"]):g}',
+                            'error_code':'DEPTH_INSUFFICIENT',
+                            'depth_available':available}
             return self.normalize(self.request('/fapi/v1/order', args, 'POST', True))
         except ApiError as exc:
             if exc.uncertain: return {'status':'unknown','qty':0,'price':0,'error':str(exc)}
@@ -531,7 +563,17 @@ class LiveBroker:
 
     def submit(self, order):
         try:
-            result=self.b.submit(order,self.spec) if order['leg']=='binance' else self.m.call('submit',order=order)
+            wire_order=copy.deepcopy(order)
+            if wire_order['leg']=='binance':
+                try:
+                    top_qty=float(wire_order.get('top_qty'))
+                except (TypeError, ValueError):
+                    top_qty=float('nan')
+                # A sufficient top level is the fast path.  If it is absent
+                # or insufficient, Binance.submit performs the deeper REST
+                # check before sending the IOC order.
+                wire_order['depth_guard']=not math.isfinite(top_qty) or top_qty+1e-12 < float(wire_order['requested'])
+            result=self.b.submit(wire_order,self.spec) if order['leg']=='binance' else self.m.call('submit',order=wire_order)
             return self._fees(order,result)
         except Exception as exc:
             return dict(status='unknown',qty=0,price=0,error=str(exc))
