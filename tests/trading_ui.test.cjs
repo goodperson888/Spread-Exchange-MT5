@@ -52,6 +52,23 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   return {el, calls, charts, streams, doc, listeners};
 }
 
+test('event log translates preflight reasons, merges duplicates and keeps more than eight rows', async () => {
+  const events=[{time:30000,kind:'entry_preflight_blocked',data:{threshold:3.7,reason:'校时失败'}},
+    {time:29999,kind:'entry_preflight_blocked',data:{threshold:3.7,reason:'校时失败'}},
+    ...Array.from({length:12},(_,i)=>({time:20000-i*1000,kind:'entry_threshold_applied',data:{value:i}})),
+    {time:1000,kind:'entry_preflight_blocked',data:{threshold:3.7}}];
+  const {el}=pageFixture(false,{'/api/trading/reconcile':()=>({state:{groups:[],orders:[]},events})});
+  el('trade-events').scrollTop=150;
+  await el('trading-reconcile').onclick();
+  const content=el('trade-events').textContent;
+  assert.match(content,/开仓预检暂未通过（合并 2 条）/);
+  assert.match(content,/开仓阈值 3.7 USD\/盎司；校时失败/);
+  assert.match(content,/旧日志未记录具体原因/);
+  assert.match(content,/数值：11/);
+  assert.doesNotMatch(content,/entry_preflight_blocked|"threshold"/);
+  assert.equal(el('trade-events').scrollTop,150);
+});
+
 test('reconcile, start and pause buttons send POST; chart remains GET', async () => {
   const {el, calls} = pageFixture();
   await el('trading-reconcile').onclick();

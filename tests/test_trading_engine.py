@@ -73,6 +73,28 @@ class RejectMt5OpenBroker(PaperBroker):
 
 
 class EngineTests(unittest.TestCase):
+    def test_preflight_log_throttles_without_pausing_or_sending(self):
+        engine=Engine(self.store,PaperBroker());engine.start(self.c)
+        engine.entry_preflight=lambda q,t: False
+        engine.entry_preflight_detail={'state':'checking','reason':'开仓预检中：正在校时'}
+        def logs(): return [e for e in self.store.events() if e['kind']=='entry_preflight_blocked']
+        with unittest.mock.patch('trading_engine.time.monotonic',return_value=100):
+            for _ in range(20): engine.open(self.c,self.plan,quote(self.c))
+        self.assertEqual(len(logs()),1)
+        self.assertEqual(logs()[0]['data']['reason'],'开仓预检中：正在校时')
+        self.assertTrue(engine.state['enabled']);self.assertEqual(engine.state['orders'],[])
+        with unittest.mock.patch('trading_engine.time.monotonic',return_value=116):
+            engine.open(self.c,self.plan,quote(self.c))
+        self.assertEqual(len(logs()),2)
+        engine.entry_preflight_detail={'state':'failed','reason':'账户检查失败'}
+        with unittest.mock.patch('trading_engine.time.monotonic',return_value=117):
+            engine.open(self.c,self.plan,quote(self.c))
+        self.assertEqual(len(logs()),3)
+        engine.entry_preflight=lambda q,t: True
+        engine.open(self.c,self.plan,quote(self.c))
+        self.assertEqual(engine.active()[0]['status'],'open')
+        self.assertIsNone(engine._preflight_log)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.temp.name) / 'state.sqlite3')

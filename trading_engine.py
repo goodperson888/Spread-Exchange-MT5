@@ -203,8 +203,16 @@ class Engine:
         threshold=min_entry_spread if min_entry_spread is not None else c['strategy']['entry_spread_usd']
         guard=getattr(self, 'entry_preflight', None)
         if guard and not guard(q, threshold):
-            self.save('entry_preflight_blocked', {'threshold':threshold})
+            detail=getattr(self, 'entry_preflight_detail', {})
+            data={'threshold':threshold, 'reason':detail.get('reason') or self.state.get('alarm') or '等待开仓预检通过',
+                  'state':detail.get('state','waiting')}
+            previous=getattr(self, '_preflight_log', None)
+            checked=time.monotonic()
+            if previous is None or previous[0]!=data or checked-previous[1]>=15:
+                self.save('entry_preflight_blocked', data)
+                self._preflight_log=(data,checked)
             return
+        self._preflight_log=None
         g=dict(id=uuid.uuid4().hex[:12],status='opening',opened_ms=now,qty=p['qty'],lots=p['lots'],contract=p['contract'],
             symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],mode=c['execution']['mode'],
             parameters=copy.deepcopy(c['strategy']),costs=copy.deepcopy(c['costs']),attempts=0,

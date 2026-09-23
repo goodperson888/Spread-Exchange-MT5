@@ -339,8 +339,14 @@ class TradingRuntime:
                                   price=float(q['binance']['bid']), qty=float(self.plan['qty'])))
         status = preflight.status()
         if near and not status['ready']:
-            self.engine.state['alarm'] = '开仓预检未通过或已过期：' + status['message']
+            labels={'waiting':'等待开仓预检','checking':'开仓预检中','expired':'开仓预检已过期','failed':'开仓预检失败'}
+            reason=labels.get(status['state'],'开仓预检未通过')+'：'+status['message']
+            self.engine.entry_preflight_detail={'state':status['state'],'reason':reason}
+            self.engine.state['alarm'] = reason
+            self._preflight_alarm=reason
             return False
+        if status['ready'] and self.engine.state.get('alarm')==getattr(self,'_preflight_alarm',None):
+            self.engine.state['alarm']=''
         return True
 
     def _poll(self):
