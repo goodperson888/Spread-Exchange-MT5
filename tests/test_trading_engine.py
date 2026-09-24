@@ -41,6 +41,28 @@ class UnknownBroker(PaperBroker):
         return dict(status='unknown', qty=0, price=0, error='not yet queryable')
 
 
+class ReconcileThenFillBroker(PaperBroker):
+    def __init__(self, query_result=None):
+        self.query_result=query_result or dict(status='done',qty=2,price=4306)
+        self.submitted=[];self.queries=0
+
+    def submit(self, order):
+        self.submitted.append(copy.deepcopy(order))
+        if order['leg']=='binance' and order['action']=='open':
+            return dict(status='unknown',qty=0,price=0,error='network timeout')
+        return super().submit(order)
+
+    def query(self, order):
+        self.queries+=1
+        return dict(self.query_result)
+
+
+class ReconcileStillUnknownBroker(ReconcileThenFillBroker):
+    def query(self, order):
+        self.queries+=1
+        return dict(status='unknown',qty=0,price=0,error='not yet queryable')
+
+
 class RejectMt5CloseBroker(PaperBroker):
     def submit(self, order):
         if order['leg'] == 'mt5' and order['action'] == 'close':
@@ -73,6 +95,28 @@ class RejectMt5OpenBroker(PaperBroker):
 
 
 class EngineTests(unittest.TestCase):
+    def test_unknown_first_leg_reconciles_and_continues_within_exposure_window(self):
+        broker=ReconcileThenFillBroker();engine=Engine(self.store,broker);engine.start(self.c)
+        engine.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(engine.active()[0]['status'],'opening')
+        with unittest.mock.patch('trading_engine.stamp',return_value=int(time.time()*1000)+200):
+            engine.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(engine.active()[0]['status'],'open')
+        self.assertEqual([o['leg'] for o in broker.submitted],['binance','mt5'])
+        self.assertEqual(broker.queries,1)
+
+    def test_unknown_reconcile_uses_backoff_instead_of_querying_every_tick(self):
+        broker=ReconcileStillUnknownBroker();engine=Engine(self.store,broker);engine.start(self.c)
+        engine.tick(self.c,self.plan,quote(self.c))
+        with unittest.mock.patch('trading_engine.stamp',return_value=int(time.time()*1000)+200):
+            engine.tick(self.c,self.plan,quote(self.c))
+            engine.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(broker.queries,1)
+        # The next retry is deliberately delayed; the order remains protected
+        # and no second leg is submitted while its state is unknown.
+        self.assertEqual(engine.active()[0]['status'],'opening')
+        self.assertEqual([o['leg'] for o in broker.submitted],['binance'])
+
     def test_preflight_log_throttles_without_pausing_or_sending(self):
         engine=Engine(self.store,PaperBroker());engine.start(self.c)
         engine.entry_preflight=lambda q,t: False

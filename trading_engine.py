@@ -22,8 +22,17 @@ def valid_quote(q, c, now=None):
 
 
 class Engine:
+    # A lost HTTP response does not mean that the exchange rejected the order.
+    # Retry status reads with a short, bounded backoff instead of querying on
+    # every quote tick (which can both waste REST quota and still race the
+    # exchange's order index).
+    RECONCILE_DELAYS_MS = (100, 300, 700, 1200)
+
     def __init__(self, store, broker):
         self.store,self.broker=store,broker
+        # Deliberately not persisted: a restart or manual pause must never
+        # resume an interrupted entry, even if the wall clock moved backwards.
+        self._entry_deadlines={}
         self.state=store.load() or dict(groups=[],orders=[],last_open_ms=0,enabled=False,mode='paper',key=None,alarm='',recovery=False)
         self.state['enabled']=False
         for g in self.state['groups']:
@@ -36,7 +45,8 @@ class Engine:
 
     def active(self): return [g for g in self.state['groups'] if g['status']!='closed']
 
-    def pause(self, reason='已暂停新开仓；已有仓位继续管理'):
+    def pause(self, reason='已暂停新开仓；已有仓位继续管理', keep_entry=False):
+        if not keep_entry: self._entry_deadlines.clear()
         self.state['enabled']=False;self.state['alarm']=reason;self.save('pause',{'reason':reason})
 
     def start(self, c):
@@ -99,12 +109,18 @@ class Engine:
             if not o['position']:
                 raise ValueError('MT5 持仓票据未确定，必须先完成对账')
         self.state['orders'].append(o);self.save('order_intent',{'id':o['id'],'group':g['id'],'leg':leg,'action':action,'qty':qty})
+        request_started=time.monotonic()
         try: result=self.broker.submit(copy.deepcopy(o))
         except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
         # Never let an invalid result look like a completed zero-volume fill.
         if not self.result_valid(result,qty): result=dict(status='unknown',qty=0,price=0,error='成交回报无效，等待对账')
+        result['request_ms']=round((time.monotonic()-request_started)*1000)
         if result.get('status')=='done' and float(result.get('qty',0))>0:
             result['fill_time_ms']=stamp()
+        if result.get('status')!='done':
+            now_ms=stamp()
+            o['reconcile']={'attempts':0,'next_ms':now_ms+100,'started_ms':now_ms,
+                            'cancel_sent':False}
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
         return o
 
@@ -138,18 +154,46 @@ class Engine:
     @staticmethod
     def result_valid(r, requested):
         import math
-        return (r.get('status') in ('done','pending','unknown') and
-                math.isfinite(float(r.get('qty',0))) and 0<=float(r.get('qty',0))<=requested+1e-7 and
-                math.isfinite(float(r.get('price',0))) and (r.get('qty',0)==0 or r.get('price',0)>0))
+        try:
+            qty=float(r.get('qty',0));price=float(r.get('price',0))
+            return (isinstance(r,dict) and r.get('status') in ('done','pending','unknown') and
+                    math.isfinite(qty) and 0<=qty<=requested+1e-7 and
+                    math.isfinite(price) and (qty==0 or price>0))
+        except (ValueError,TypeError): return False
 
-    def resolve(self, g):
+    def resolve(self, g, force=False):
+        now_ms=stamp()
         for o in self.uncertain(g):
+            reconcile=o.setdefault('reconcile',{'attempts':0,'next_ms':now_ms,
+                                                 'started_ms':now_ms,'cancel_sent':False})
+            if force:
+                reconcile['exhausted']=False
+                reconcile['attempts']=0
+                reconcile['next_ms']=now_ms
+            if now_ms < int(reconcile.get('next_ms',0)):
+                continue
             if o['result'].get('status')=='pending':
-                try: self.broker.cancel(o)
-                except Exception: pass
-            try: r=self.broker.query(copy.deepcopy(o))
-            except Exception: continue
-            if self.result_valid(r,o['requested']) and r.get('qty',0)>=o['result'].get('qty',0):
+                if not reconcile.get('cancel_sent'):
+                    try:
+                        self.broker.cancel(o)
+                        reconcile['cancel_sent']=True
+                    except Exception: pass
+            reconcile['attempts']=int(reconcile.get('attempts',0))+1
+            query_order=copy.deepcopy(o)
+            deadline=self._entry_deadlines.get(g['id'])
+            if deadline is not None:
+                remaining=deadline-time.monotonic()
+                if remaining>0:
+                    query_order['query_timeout_ms']=max(1,min(250,int(remaining*1000)))
+            query_started=time.monotonic()
+            try:
+                r=self.broker.query(query_order)
+            except Exception as exc:
+                r={'status':'unknown','qty':0,'price':0,'error':str(exc)}
+            valid=(isinstance(r,dict) and self.result_valid(r,o['requested'])
+                   and r.get('qty',0)>=o['result'].get('qty',0))
+            query_ms=round((time.monotonic()-query_started)*1000)
+            if valid:
                 merged={**o['result'],**r}
                 if r.get('status')=='done': merged.pop('error',None)
                 # A later query confirms the fill but cannot reconstruct the
@@ -157,9 +201,33 @@ class Engine:
                 # from fill_time_ms so the UI never presents it as latency.
                 if r.get('status')=='done' and float(r.get('qty',0))>0 and not merged.get('fill_time_ms'):
                     merged['reconcile_time_ms']=stamp()
-                o['result']=merged;self.save('order_reconciled',{'id':o['id'],'result':merged})
+                o['result']=merged
+                if r.get('status')=='done':
+                    self.save('order_reconciled',{'id':o['id'],'result':merged,
+                              'attempt':reconcile['attempts'],'query_ms':query_ms})
+                    continue
+            # Keep pending/unknown results unresolved.  In particular, a
+            # transient "order not found" immediately after a timed-out POST
+            # is not proof that the order was rejected.
+            data={'id':o['id'],'attempt':reconcile['attempts'],
+                  'query_ms':query_ms,
+                  'status':r.get('status','unknown') if isinstance(r,dict) else 'unknown'}
+            if isinstance(r,dict) and r.get('error'): data['error']=str(r['error'])
+            if reconcile['attempts']>=len(self.RECONCILE_DELAYS_MS):
+                reconcile['exhausted']=True
+                # Only the fast confirmation phase is finite. Continue slow
+                # status reads so a late fill is still flattened automatically.
+                self._entry_deadlines.pop(g['id'],None)
+                reconcile['next_ms']=stamp()+2000
+                self.save('order_reconcile_exhausted',data)
+            else:
+                reconcile['next_ms']=max(stamp()+100,reconcile['started_ms']+
+                    self.RECONCILE_DELAYS_MS[reconcile['attempts']])
+                self.save('order_reconcile_retry',data)
         if self.uncertain(g):
-            self.pause('订单状态未知，禁止重发；正在查询成交和持仓');return False
+            reason='订单状态未知，禁止重发；正在分层查询成交和持仓'
+            if self.state.get('alarm')!=reason: self.pause(reason,keep_entry=True)
+            return False
         return True
 
     def valuation(self, g, q):
@@ -198,8 +266,71 @@ class Engine:
                     net=round(gross-fees-exit_fee+carry,8),remaining=owned,
                     costs_verified=verified,estimated=not flat or (g['mode']!='paper' and not verified))
 
+    def _finish_open(self, c, p, g, q, threshold=None):
+        """Continue the second leg after the first leg is confirmed.
+
+        This is also used when a timed-out first-leg response is reconciled a
+        moment later.  It deliberately keeps the original group timestamp so
+        the configured one-sided exposure window still bounds the recovery.
+        """
+        first_leg=g.get('first_leg') or ('binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5')
+        second_leg=g.get('second_leg') or ('mt5' if first_leg=='binance' else 'binance')
+        first_label='币安' if first_leg=='binance' else 'MT5'
+        first=next((o for o in self.state['orders']
+                    if o['group']==g['id'] and o['leg']==first_leg and o['action']=='open'),None)
+        if first is None: return False
+        result=first['result']
+        if result.get('status')!='done': return False
+        if abs(result.get('qty',0)-g['qty'])>1e-8:
+            g['status']='unwinding';g['reason']=f'{first_label} 开仓拒单或部分成交，正在保护性平仓';self.pause(g['reason'])
+            self.close_group(g,q);return True
+        if stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms']:
+            g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期，正在保护性平仓';self.pause(g['reason'])
+            self.close_group(g,q);return True
+        # A retry can only continue if the second leg has not already been
+        # submitted.  Never create a duplicate order after a late response.
+        existing=next((o for o in self.state['orders']
+                       if o['group']==g['id'] and o['leg']==second_leg and o['action']=='open'),None)
+        if existing is not None: return False
+        second_q=q
+        provider=getattr(self,'quote_provider',None)
+        if provider:
+            try: second_q=provider()
+            except Exception as exc:
+                g['status']='unwinding';g['reason']='第二腿前无法取得新报价，正在保护性平仓：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return True
+        deadline=self._entry_deadlines.get(g['id'])
+        if (stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms'] or
+            (deadline is not None and time.monotonic()>=deadline) or not valid_quote(second_q,c)):
+            g['status']='unwinding';g['reason']='第一腿成交后报价过期或超出敞口期限，正在保护性平仓';self.pause(g['reason']);self.close_group(g,second_q);return True
+        self._entry_deadlines.pop(g['id'],None)
+        second=self.order(g,second_leg,'open',g['qty'],second_q)
+        if second['result']['status']=='done' and abs(second['result']['qty']-g['qty'])<1e-8:
+            actual=self._record_spread(g,'open',g.get('entry_signal',g['entry']))
+            if actual is None:
+                # Both legs reported full fills, but the pair basis could not
+                # be reconstructed. Keep the hedge untouched and require a
+                # reconciliation instead of churning fees with a blind close.
+                g['status']='attention';g['reason']='两边已成交但无法计算实际价差，请对账核验';self.pause(g['reason']);return True
+            g['status']='open';g['open_binance']=(first if first_leg=='binance' else second)['result']['price']
+            g['entry_signal']=g.get('entry_signal',g['entry']);g['entry']=actual
+            if threshold is None: threshold=g.get('entry_threshold',g['parameters']['entry_spread_usd'])
+            if actual < threshold:
+                g['execution_warning']=f'实际成交价差 {actual:.6f} 低于触发阈值 {threshold:.6f}，按实际开仓价差管理；未反向平仓'
+            self.save('group_opened',{'group':g['id'],'entry':g['entry']})
+            if not self.state['enabled']:
+                self.state['alarm']='双边开仓已确认；新开仓仍暂停，核对后可手动启动'
+                self.save('entry_recovered',{'group':g['id'],'reason':self.state['alarm']})
+        else:
+            error=str(second.get('result',{}).get('error') or '')
+            suffix='：'+error if error else ''
+            second_label='币安' if second_leg=='binance' else 'MT5'
+            g['status']='unwinding';g['reason']=f'{second_label} 拒单、部分成交或状态未知，正在保护性平仓'+suffix;self.pause(g['reason'])
+            self.close_group(g,q)
+        return True
+
     def open(self, c, p, q, grid_index=0, min_entry_spread=None):
         now=stamp()
+        entry_started=time.monotonic()
         threshold=min_entry_spread if min_entry_spread is not None else c['strategy']['entry_spread_usd']
         guard=getattr(self, 'entry_preflight', None)
         if guard and not guard(q, threshold):
@@ -213,18 +344,15 @@ class Engine:
                 self._preflight_log=(data,checked)
             return
         self._preflight_log=None
+        first_leg='binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5'
+        second_leg='mt5' if first_leg=='binance' else 'binance'
         g=dict(id=uuid.uuid4().hex[:12],status='opening',opened_ms=now,qty=p['qty'],lots=p['lots'],contract=p['contract'],
             symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],mode=c['execution']['mode'],
             parameters=copy.deepcopy(c['strategy']),costs=copy.deepcopy(c['costs']),attempts=0,
-            retry_limit=c['execution']['close_retry_limit'],entry=q['entry'],reason='',key=pair_key(c),
-            grid_index=int(grid_index))
+            retry_limit=c['execution']['close_retry_limit'],entry=q['entry'],entry_signal=q['entry'],reason='',key=pair_key(c),
+            first_leg=first_leg,second_leg=second_leg,entry_threshold=threshold,grid_index=int(grid_index))
         self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
-        # Choose the first leg explicitly. Binance-first avoids creating an
-        # MT5 position when the exchange rejects a signed order; MT5-first is
-        # retained as a fallback for users whose exchange route is reliable.
-        first_leg='binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5'
-        second_leg='mt5' if first_leg=='binance' else 'binance'
-        first_label='币安' if first_leg=='binance' else 'MT5'
+        self._entry_deadlines[g['id']]=entry_started+c['strategy']['max_unhedged_ms']/1000
         first=self.order(g,first_leg,'open',p['qty'],q)
         result=first['result']
         # Only a local pre-submit block on the first leg can be skipped.
@@ -238,44 +366,14 @@ class Engine:
             g['valuation']=self.valuation(g,q)
             self.save('entry_skipped',{'group':g['id'],'reason':g['reason'],
                                       'code':result['error_code']})
+            self._entry_deadlines.pop(g['id'],None)
             return
-        if first['result']['status']!='done':
-            self.pause(f'{first_label} 开仓状态未知，等待对账');return
-        if abs(first['result']['qty']-p['qty'])>1e-8:
-            g['status']='unwinding';g['reason']=f'{first_label} 开仓拒单或部分成交，正在保护性平仓';self.pause(g['reason'])
-            self.close_group(g,q);return
-        if stamp()-now>c['strategy']['max_unhedged_ms'] or not valid_quote(q,c):
-            g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期，正在保护性平仓';self.pause(g['reason'])
-            self.close_group(g,q);return
-        second_q=q
-        provider=getattr(self,'quote_provider',None)
-        if provider:
-            try: second_q=provider()
-            except Exception as exc:
-                g['status']='unwinding';g['reason']='第二腿前无法取得新报价，正在保护性平仓：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return
-            if stamp()-now>c['strategy']['max_unhedged_ms'] or not valid_quote(second_q,c):
-                g['status']='unwinding';g['reason']='第一腿成交后报价过期或超出敞口期限，正在保护性平仓';self.pause(g['reason']);self.close_group(g,second_q);return
-        second=self.order(g,second_leg,'open',p['qty'],second_q)
-        if second['result']['status']=='done' and abs(second['result']['qty']-p['qty'])<1e-8:
-            actual=self._record_spread(g,'open',q['entry'])
-            if actual is None:
-                # Both legs reported full fills, but the pair basis could not
-                # be reconstructed. Keep the hedge untouched and require a
-                # reconciliation instead of churning fees with a blind close.
-                g['status']='attention';g['reason']='两边已成交但无法计算实际价差，请对账核验';self.pause(g['reason']);return
-            g['status']='open';g['open_binance']=second['result']['price']
-            g['entry_signal']=q['entry'];g['entry']=actual
-            if actual < threshold:
-                g['execution_warning']=f'实际成交价差 {actual:.6f} 低于触发阈值 {threshold:.6f}，按实际开仓价差管理；未反向平仓'
-            self.save('group_opened',{'group':g['id'],'entry':g['entry']})
-        else:
-            error=str(second.get('error') or '')
-            suffix='：'+error if error else ''
-            second_label='币安' if second_leg=='binance' else 'MT5'
-            g['status']='unwinding';g['reason']=f'{second_label} 拒单、部分成交或状态未知，正在保护性平仓'+suffix;self.pause(g['reason'])
-            self.close_group(g,q)
+        if result.get('status')!='done':
+            self.pause(f'{"币安" if first_leg=="binance" else "MT5"} 开仓状态未知，进入分层对账',keep_entry=True);return
+        self._finish_open(c,p,g,q,threshold)
 
     def request_close(self, group_id=None, reason='用户平仓'):
+        self._entry_deadlines.clear()
         self.state['enabled']=False
         found=False
         for g in self.active():
@@ -347,7 +445,18 @@ class Engine:
         for g in self.active():
             if g['key']!=q['key']: raise ValueError('当前行情与持仓账户或品种不一致')
             if g['status']=='opening':
-                if self.resolve(g): g['status']='unwinding';g['reason']='中断后的开仓组撤销'
+                if self.resolve(g):
+                    # If the first leg was only late to acknowledge, continue
+                    # the paired entry while the original exposure window is
+                    # still valid. Otherwise _finish_open performs the normal
+                    # protective unwind.
+                    deadline=self._entry_deadlines.get(g['id'])
+                    if deadline is not None and time.monotonic()<deadline:
+                        self._finish_open(c,p,g,q)
+                    else:
+                        self._entry_deadlines.pop(g['id'],None)
+                        g['status']='unwinding';g['reason']='开仓确认窗口已结束或流程中断，正在保护性平仓'
+                        self.pause(g['reason'])
             g['valuation']=self.valuation(g,q)
         opened=[g for g in self.active() if g['status']=='open' and (not g.get('imported') or g.get('management_enabled'))]
         total=sum(g.get('valuation',{}).get('net',0) for g in self.active() if not g.get('imported'))

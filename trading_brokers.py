@@ -48,7 +48,7 @@ class Binance:
         proxies = {'http': self.proxy_url, 'https': self.proxy_url} if self.proxy_url else {}
         self.opener = build_opener(ProxyHandler(proxies)) if proxies else build_opener()
 
-    def request(self, path, params=None, method='GET', signed=False, base=None, _time_retry=True):
+    def request(self, path, params=None, method='GET', signed=False, base=None, _time_retry=True, timeout=5):
         # Keep the caller's parameters separate from the per-request timestamp
         # so a one-time -1021 retry can rebuild a fresh signature safely.
         original_params = dict(params or {})
@@ -65,7 +65,7 @@ class Binance:
         req = Request((base or self.base)+path+('?' + query if query else ''), method=method,
                       headers={'X-MBX-APIKEY':self.key} if signed else {})
         try:
-            with self.opener.open(req, timeout=5) as res:
+            with self.opener.open(req, timeout=timeout) as res:
                 return json.load(res)
         except HTTPError as exc:
             try:
@@ -281,7 +281,10 @@ class Binance:
 
     def query(self, order):
         try:
-            return self.normalize(self.request('/fapi/v1/order',dict(symbol=order['symbol'],origClientOrderId=order['id']),signed=True))
+            options={}
+            if order.get('query_timeout_ms'):
+                options=dict(timeout=max(.001,min(5,order['query_timeout_ms']/1000)),_time_retry=False)
+            return self.normalize(self.request('/fapi/v1/order',dict(symbol=order['symbol'],origClientOrderId=order['id']),signed=True,**options))
         except ApiError as exc:
             # "Not found" immediately after a timeout is not proof of rejection.
             return {'status':'unknown','qty':0,'price':0,'error':str(exc)}
@@ -580,6 +583,10 @@ class LiveBroker:
 
     def query(self, order):
         result=self.b.query(order) if order['leg']=='binance' else self.m.call('query',order=order)
+        # Fee reads can take another full REST round trip; during the short
+        # confirmation window only execution status is needed. Closed-cost
+        # verification will retrieve the actual commission later.
+        if order.get('query_timeout_ms'): return result
         return self._fees(order,result)
 
     def _fees(self,order,result):

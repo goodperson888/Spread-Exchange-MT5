@@ -778,7 +778,7 @@ class TradingRuntime:
 
             if self.config['execution']['mode'] == 'paper':
                 # Paper state is deterministic and is reconciled from journal.
-                for g in self.engine.active(): self.engine.resolve(g)
+                for g in self.engine.active(): self.engine.resolve(g, force=True)
                 self.engine.state['recovery'] = any(self.engine.uncertain(g) for g in self.engine.active())
                 self.reconciled = not self.engine.state['recovery']
                 self.engine.save('paper_reconciled')
@@ -788,7 +788,7 @@ class TradingRuntime:
             self.reconciled = False
             self.binance.refresh_position_mode()
             for g in self.engine.active():
-                self.engine.resolve(g)
+                self.engine.resolve(g, force=True)
             positions = self.binance.positions(self.config['symbol'])
             open_orders = self.binance.open_orders(self.config['symbol'])
             signed_bqty = sum(float(x.get('positionAmt', 0)) for x in positions)
