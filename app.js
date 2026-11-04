@@ -294,7 +294,7 @@ $('check-binance').onclick = () => action('check-binance', async () => {
     if(r.account.position_mode_label) lines.push(`持仓模式：${r.account.position_mode_label}（程序会按对应 positionSide 下单）`);
     if(r.account.asset_mode==='multi') lines.push('其他保证金资产余额与未实现盈亏已核验为 0；程序不会切换模式或划转资产。');
   }
-  if(r.permissions) lines.push(`API 权限：enableFutures=${r.permissions.enable_futures?'true':'false'} · enableReading=${r.permissions.enable_reading?'true':'false'} · IP 白名单=${r.permissions.ip_restricted?'已限制':'未限制'}`);
+  if(r.permissions) lines.push(`API 权限：合约权限=${r.permissions.enable_futures?'已开启':'未开启'} · 读取权限=${r.permissions.enable_reading?'已开启':'未开启'} · IP 白名单限制=${r.permissions.ip_restricted?'已开启':'未开启'}`);
   if(r.permission_warning) lines.push(`API 权限明细未能读取：${r.permission_warning}`);
   if(r.fees) lines.push(`账户费率：Maker ${Number(r.fees.maker).toFixed(4)}% / Taker ${Number(r.fees.taker).toFixed(4)}%`);
   if(r.transport_warning) lines.push('提示：'+r.transport_warning);

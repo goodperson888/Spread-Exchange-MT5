@@ -440,6 +440,37 @@ class BinanceCostTests(unittest.TestCase):
 if __name__ == '__main__':
     unittest.main()
 
+class BinancePermissionErrorTests(unittest.TestCase):
+    def test_rejected_key_explains_possible_causes_without_retry(self):
+        from urllib.error import HTTPError
+        from trading_brokers import ApiError
+        broker = Binance(production=True, key='test-key', secret='test-secret')
+        rejection = HTTPError('https://fapi.binance.com/fapi/v3/account', 401,
+                              'Unauthorized', {}, io.BytesIO(b'{"code":-2015}'))
+        broker.opener.open = unittest.mock.Mock(side_effect=rejection)
+        with self.assertRaises(ApiError) as error:
+            broker.request('/fapi/v3/account', signed=True)
+        self.assertEqual(error.exception.code, -2015)
+        self.assertFalse(error.exception.uncertain)
+        message = str(error.exception)
+        for hint in ('未指明具体是哪一项', 'API 管理', '允许合约', '获取币安出口 IP', '白名单'):
+            self.assertIn(hint, message)
+        self.assertNotIn('test-key', message)
+        self.assertNotIn('test-secret', message)
+        broker.opener.open.assert_called_once()
+
+    def test_known_missing_futures_permission_precedes_account_rejection(self):
+        broker = Binance(production=True, key='test-key', secret='test-secret')
+        broker.sync = unittest.mock.Mock()
+        broker.request = unittest.mock.Mock(side_effect=AssertionError('Must stop before account request'))
+        with self.assertRaisesRegex(ValueError, 'enableFutures=false') as error:
+            broker.preflight({'enable_futures': False, 'enable_reading': True, 'ip_restricted': True})
+        self.assertIn('允许合约', str(error.exception))
+        self.assertIn('保存', str(error.exception))
+        broker.sync.assert_not_called()
+        broker.request.assert_not_called()
+
+
 class BinanceTimestampRetryTests(unittest.TestCase):
     def test_clock_sync_does_not_use_recv_window_as_rtt_limit(self):
         broker = Binance(production=True, recv_window_ms=1000)

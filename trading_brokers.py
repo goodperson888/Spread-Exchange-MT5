@@ -83,6 +83,12 @@ class Binance:
             timing = f'最近校时 RTT={self.sync_rtt_ms} ms，时钟偏移={self.offset} ms' if self.sync_rtt_ms is not None else '尚未取得校时 RTT'
             message = (f'币安接口错误 -1021：请求时间校验失败（已同步服务器时间并重试一次，recvWindow={self.recv_window_ms} ms，{timing}）；请检查 Windows 时间同步、代理和网络延迟'
                        if code == -1021 else f'币安接口错误 {code}')
+            if code == -2015:
+                message += ('：API Key、出口 IP 或权限校验未通过，币安未指明具体是哪一项。\n'
+                            '1. 在币安「API 管理」确认项目填写的是当前有效的 API Key。\n'
+                            '2. 确认这把 Key 已开启「允许合约」并保存。\n'
+                            '3. 点击「获取币安出口 IP」，确认该 IP 已加入这把 Key 的白名单；更换代理或网络后需重新检测。\n'
+                            '完成后再次点击「检查币安连接」。')
             raise ApiError(code, message, exc.code >= 500 or code in (-1006, -1007)) from None
         except Exception:
             raise ApiError('NETWORK', '币安请求超时或网络不可用，交易结果需要查询确认', True) from None
@@ -161,18 +167,18 @@ class Binance:
         }
 
     def preflight(self, api_permissions=None, sync_clock=True):
+        if api_permissions and api_permissions.get('enable_futures') is False:
+            raise ValueError('当前 API Key 未开启合约权限（enableFutures=false）。\n'
+                             '请到币安「API 管理」，找到项目中填写的这把 Key，开启「允许合约」并保存。\n'
+                             '同时点击「获取币安出口 IP」，确认该 IP 已加入这把 Key 的白名单，再点击「检查币安连接」。')
         if sync_clock: self.sync()
         a=self.request('/fapi/v3/account', signed=True)
         # V3 supplies balances/positions; permission and mode flags live in
         # accountConfig. Missing fields must never be reported as false.
         configuration=self.request('/fapi/v1/accountConfig', signed=True)
-        if api_permissions and api_permissions.get('enable_futures') is False:
-            raise ValueError('当前 API Key 权限返回 enableFutures=false；请确认修改并保存的是页面中这把 Key 的“允许合约”权限')
         if type(configuration.get('canTrade')) is not bool:
             raise ValueError('账户配置接口未返回有效 canTrade，暂不能确认交易权限；这不等同于 canTrade=false')
         if not configuration['canTrade']:
-            if api_permissions and not api_permissions.get('enable_futures'):
-                raise ValueError('当前 API Key 权限返回 enableFutures=false；请确认修改并保存的是页面中这把 Key 的“允许合约”权限')
             if api_permissions and api_permissions.get('enable_futures'):
                 raise ValueError('当前 API Key 已允许合约（enableFutures=true），但 /fapi/v1/accountConfig 明确返回 canTrade=false；具体原因未由接口提供，请向币安核实账户交易状态；本次不是 IP 白名单拒绝响应')
             raise ValueError('USDⓈ-M 合约账户返回 canTrade=false；API Key 权限明细未能读取，请检查主/子账户、组合保证金及账户风控状态')
