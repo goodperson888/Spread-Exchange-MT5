@@ -10,9 +10,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from market_push import PushBridge, QuoteEvents, QuotePump, milliseconds
+import _test_runtime
+from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, milliseconds
 from trading_config import pair_key
-from trading_engine import Engine
+from trading_engine import Engine, valid_quote
 from trading_store import Store
 from trading_brokers import PaperBroker
 from test_trading_engine import config
@@ -105,6 +106,84 @@ class PumpTests(unittest.TestCase):
         # display field. Make the explicit source/receipt distinction visible.
         self.assertTrue(q['valid'])
         self.assertNotEqual(q['mt5']['source_time_ms'],q['mt5']['observed_ms'])
+
+    def test_unchanged_polled_tick_expires_while_binance_keeps_updating(self):
+        c,b,s,t,p,w,pump=self.fixture();b.quote.return_value=None
+        at=milliseconds()
+        tick={'bid':4300,'ask':4300.2,'time_ms':at-15000}
+        t.call.return_value={'quote':tick}
+        with patch('market_push.milliseconds',return_value=at), patch('trading_engine.stamp',return_value=at):
+            pump.collect()
+        self.assertTrue(pump.read()[0]['valid'])
+        s.quote.return_value=dict(s.quote.return_value,time_ms=at+10000)
+        pump.mt5_read_at=0
+        with patch('market_push.milliseconds',return_value=at+10000), patch('trading_engine.stamp',return_value=at+10000):
+            pump.collect()
+            stale=pump.read()[0]
+            self.assertFalse(stale['valid'])
+            self.assertEqual(stale['mt5']['observed_ms'],at)
+            with tempfile.TemporaryDirectory() as directory:
+                store=Store(Path(directory)/'test.sqlite3')
+                try:
+                    broker=Mock(wraps=PaperBroker());engine=Engine(store,broker);engine.start(c)
+                    engine.tick(c,dict(lots=.02,qty=2,contract=100),stale)
+                    broker.submit.assert_not_called()
+                finally:store.close()
+            # A genuinely new source tick restores freshness despite the broker clock offset.
+            t.call.return_value={'quote':dict(tick,time_ms=tick['time_ms']+10000)}
+            pump.mt5_read_at=0;pump.collect()
+            self.assertTrue(pump.read()[0]['valid'])
+
+    def test_push_poll_and_execution_reads_share_the_same_tick_age(self):
+        import server
+        c,b,s,t,p,w,pump=self.fixture();at=milliseconds()
+        tick={'bid':4300,'ask':4300.2,'time_ms':at-15000}
+        b.quote.return_value=dict(tick,observed_ms=at)
+        with patch('market_push.milliseconds',return_value=at):pump.collect()
+        b.quote.return_value=None;t.call.return_value={'quote':tick}
+        s.quote.return_value=dict(s.quote.return_value,time_ms=at+10000)
+        r=server.TradingRuntime.__new__(server.TradingRuntime)
+        r.config=c;r.mt5_freshness=pump.mt5_freshness
+        r.push_bridge=b;r.terminal=t;r.market_stream=s
+        with patch('market_push.milliseconds',return_value=at+10000), patch('server.now_ms',return_value=at+10000):
+            pump.collect()
+            self.assertEqual(pump.read()[0]['mt5']['observed_ms'],at)
+            execution=r._execution_quote()
+        self.assertFalse(valid_quote(execution,c,now=at+10000))
+        self.assertEqual(execution['mt5']['observed_ms'],at)
+
+    def test_quote_tracking_is_scoped_to_account_and_rejects_backwards_ticks(self):
+        tracker=TickFreshness();settings={'account':'1','server':'Demo','symbol':'XAUUSD'}
+        tick={'time_ms':1000,'bid':4300,'ask':4300.2}
+        tracker.observe(tick,settings,10000)
+        self.assertEqual(tracker.observe(tick,settings,20000)['observed_ms'],10000)
+        other=tracker.observe(tick,dict(settings,account='2'),20000)
+        self.assertEqual(other['observed_ms'],20000)
+        with self.assertRaisesRegex(ValueError,'倒退'):
+            tracker.observe(dict(tick,time_ms=999),settings,30000)
+
+    def test_slow_rest_fallback_cannot_refresh_the_mt5_receipt_time(self):
+        import server
+        c,b,s,t,p,w,pump=self.fixture();b.quote.return_value=None;s.quote.return_value=None
+        at=milliseconds();clock=[at]
+        t.call.return_value={'quote':dict(bid=4300,ask=4300.2,time_ms=at-15000)}
+        def delayed_market(symbol):
+            clock[0]+=5000
+            return dict(bid=4306,ask=4306.2,time_ms=clock[0])
+        pump.exchange.quote.side_effect=delayed_market
+        with patch('market_push.milliseconds',side_effect=lambda:clock[0]), patch('trading_engine.stamp',side_effect=lambda:clock[0]):
+            pump.collect()
+        q=pump.read()[0]
+        self.assertEqual(q['mt5']['observed_ms'],at)
+        self.assertFalse(q['valid'])
+        # The between-leg read uses the same receipt-before-REST rule.
+        r=server.TradingRuntime.__new__(server.TradingRuntime)
+        r.config=c;r.mt5_freshness=TickFreshness();r.push_bridge=None
+        r.terminal=t;r.market_stream=s;r.binance=pump.exchange;clock[0]=at
+        with patch('market_push.milliseconds',side_effect=lambda:clock[0]), patch('server.now_ms',side_effect=lambda:clock[0]):
+            q=r._execution_quote()
+        self.assertEqual(q['mt5']['observed_ms'],at)
+        self.assertFalse(valid_quote(q,c,now=clock[0]))
 
     def test_strategy_wakes_without_waiting_poll_interval(self):
         import server

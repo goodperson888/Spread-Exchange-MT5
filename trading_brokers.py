@@ -577,25 +577,14 @@ class LiveBroker:
                 # check before sending the IOC order.
                 wire_order['depth_guard']=not math.isfinite(top_qty) or top_qty+1e-12 < float(wire_order['requested'])
             result=self.b.submit(wire_order,self.spec) if order['leg']=='binance' else self.m.call('submit',order=wire_order)
-            return self._fees(order,result)
+            # Return fills immediately so the other leg can hedge them. Fee
+            # history is verified after closing, outside paired execution.
+            return result
         except Exception as exc:
             return dict(status='unknown',qty=0,price=0,error=str(exc))
 
     def query(self, order):
-        result=self.b.query(order) if order['leg']=='binance' else self.m.call('query',order=order)
-        # Fee reads can take another full REST round trip; during the short
-        # confirmation window only execution status is needed. Closed-cost
-        # verification will retrieve the actual commission later.
-        if order.get('query_timeout_ms'): return result
-        return self._fees(order,result)
-
-    def _fees(self,order,result):
-        if order['leg']=='binance' and result.get('ticket') and result.get('qty',0)>0:
-            try:
-                fills=self.b.trades(order['symbol'],result['ticket'])
-                if fills: result['fee']=self.b.commissions_usdt(fills)
-            except Exception: pass
-        return result
+        return self.b.query(order) if order['leg']=='binance' else self.m.call('query',order=order)
 
     def cancel(self, order):
         if order['leg']=='binance': self.b.cancel(order)

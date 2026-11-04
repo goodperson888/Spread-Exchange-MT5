@@ -217,6 +217,22 @@ class EngineTests(unittest.TestCase):
         self.assertIn('mt5_swap', closed['valuation'])
         self.assertEqual(closed['valuation']['remaining'], {'binance': 0, 'mt5': 0})
 
+    def test_live_execution_never_waits_for_binance_fee_history(self):
+        exchange=unittest.mock.Mock()
+        exchange.submit.side_effect=lambda order,spec:PaperBroker().submit(order)
+        exchange.trades.side_effect=AssertionError('fee history must not block hedging')
+        terminal=unittest.mock.Mock()
+        terminal.call.side_effect=lambda cmd,order:PaperBroker().submit(order)
+        broker=LiveBroker(self.c,exchange,terminal,{})
+        engine=Engine(self.store,broker);engine.start(self.c)
+        engine.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(engine.active()[0]['status'],'open')
+        self.assertEqual([(o['leg'],o['action']) for o in engine.state['orders']],
+                         [('binance','open'),('mt5','open')])
+        exchange.query.return_value=dict(status='done',qty=2,price=4306,ticket='123')
+        self.assertEqual(broker.query(engine.state['orders'][0])['qty'],2)
+        exchange.trades.assert_not_called();exchange.commissions_usdt.assert_not_called()
+
     def test_grid_adds_only_after_each_spread_interval(self):
         self.c['strategy'].update(grid_enabled=True, grid_spacing_usd=2, grid_max_adds=2, max_groups=3)
         validate(self.c)

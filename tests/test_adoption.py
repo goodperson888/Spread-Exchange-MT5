@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _test_runtime
 import position_adoption as adoption
 import server
 from trading_brokers import PaperBroker, owned_close_position
@@ -143,6 +144,79 @@ class AdoptionTests(unittest.TestCase):
         self.assertFalse(r.reconciled);self.assertFalse(g['management_enabled'])
         self.assertTrue(self.engine.state['recovery'])
         self.broker.submit.assert_not_called()
+
+    def interrupted_close(self, unknown_leg):
+        r=self.runtime();g=self.registered();r.reconcile();g['management_enabled']=True
+        self.engine.before_import_close=r._guard_import_close
+        unknown=[]
+        def fill(order):
+            if order['leg']=='mt5':
+                actual=next(p for p in self.positions if p['ticket']==order['position'])
+                actual['lots']-=order['requested']/g['contract']
+                if actual['lots']<1e-8:self.positions.remove(actual)
+            else:
+                self.exchange[0]['positionAmt']=str(float(self.exchange[0]['positionAmt'])+order['requested'])
+            return PaperBroker().submit(order)
+        def submit(order):
+            if order['leg']==unknown_leg and not unknown:
+                unknown.append(copy.deepcopy(order))
+                return dict(status='unknown',qty=0,price=0)
+            return fill(order)
+        self.broker.submit.side_effect=submit
+        q=quote(self.c,bid=4302.9,ask=4303,mt_bid=4300,mt_ask=4300.1)
+        self.engine.tick(self.c,{},q)
+        self.assertEqual(g['status'],'closing')
+        return r,g,q,unknown,fill
+
+    def check_late_close(self, leg):
+        r,g,q,unknown,fill=self.interrupted_close(leg)
+        pending=self.engine.uncertain(g)[0]
+        self.broker.query.return_value=dict(status='unknown',qty=0,price=0)
+        pending['reconcile']['next_ms']=0
+        before=self.broker.submit.call_count
+        self.assertIs(r._guard_import_close(),False)
+        self.assertTrue(r.reconciled);self.assertFalse(self.engine.state['recovery'])
+        self.assertEqual(self.broker.submit.call_count,before)
+        pending['reconcile']['next_ms']=0
+        self.broker.query.side_effect=fill
+        self.engine.tick(self.c,{},q)
+        self.assertEqual(g['status'],'closed')
+        self.assertEqual(self.engine.amounts(g),{'mt5':0,'binance':0})
+        self.assertEqual(self.positions,[])
+        self.assertEqual(float(self.exchange[0]['positionAmt']),0)
+        self.assertFalse(self.engine.state['enabled'])
+        sent=[call.args[0] for call in self.broker.submit.call_args_list]
+        self.assertEqual(sum(o['id']==unknown[0]['id'] for o in sent),1)
+        self.assertTrue(all(o['action']=='close' for o in sent))
+
+    def test_late_mt5_close_continues_protective_binance_reduction(self):
+        self.check_late_close('mt5')
+
+    def test_late_binance_close_is_not_resubmitted_or_disarmed(self):
+        self.check_late_close('binance')
+
+    def test_legacy_recovery_reconciles_residual_exposure_and_finishes_closing(self):
+        r,g,q,unknown,fill=self.interrupted_close('mt5')
+        r.reconciled=False;self.engine.state['recovery']=True;g['management_enabled']=False
+        self.engine.uncertain(g)[0]['reconcile']['next_ms']=0
+        self.broker.query.side_effect=fill
+        r.quote=q;r._last_auto_reconcile_at=-1e9
+        self.assertTrue(r._auto_reconcile_flat())
+        self.assertTrue(r.reconciled);self.assertFalse(self.engine.state['recovery'])
+        self.assertEqual(self.engine.amounts(g),{'mt5':1,'binance':2})
+        self.assertFalse(self.engine.state['enabled']);self.assertFalse(g['management_enabled'])
+        self.engine.tick(self.c,{},q)
+        self.assertEqual(g['status'],'closed')
+
+    def test_late_fill_still_requires_actual_adopted_ticket_quantities_to_match(self):
+        r,g,q,unknown,fill=self.interrupted_close('mt5')
+        self.engine.uncertain(g)[0]['reconcile']['next_ms']=0
+        self.broker.query.side_effect=fill
+        self.positions[1]['lots']=.02  # unrelated external edit, not the delayed fill
+        with self.assertRaisesRegex(ValueError,'票据'):
+            self.engine.tick(self.c,{},q)
+        self.assertFalse(r.reconciled);self.assertTrue(self.engine.state['recovery'])
+        self.assertEqual(self.broker.submit.call_count,1)
 
     def test_native_close_requires_adopted_identity_not_just_ticket(self):
         original=self.positions[0]

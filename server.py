@@ -30,7 +30,7 @@ from trading_config import validate as validate_trading, plan as executable_plan
 from trading_engine import Engine
 from trading_store import Store
 import position_adoption
-from market_push import PushBridge, QuoteEvents, QuotePump, observed_quote
+from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, observed_quote
 from entry_preflight import EntryPreflight
 
 ROOT = Path(__file__).resolve().parent
@@ -96,6 +96,7 @@ class TradingRuntime:
         self.last_error = ''
         self.market_meta = {}
         self.quote_events = QuoteEvents()
+        self.mt5_freshness = TickFreshness()
         self.market_wake = threading.Event()
         self.pump = None
         self.push_bridge = None
@@ -167,18 +168,21 @@ class TradingRuntime:
                     mt5 = inspect_paper_terminal(config['mt5'])
                     if not mt5.get('connected'):
                         raise ValueError(mt5.get('message', '本地 MT5 模拟器不可用'))
-                    snapshot = {'quote': mt5['quote'], 'spec': mt5['symbol'], 'allowed': True, 'positions': []}
+                    snapshot = {'quote': self.mt5_freshness.observe(mt5['quote'],config['mt5']),
+                                'spec': mt5['symbol'], 'allowed': True, 'positions': []}
                 elif config['mt5']['adapter'] == 'mcp':
                     if mode != 'paper':
                         raise ValueError('MT5 MCP 只读适配器只能用于纸面模式')
                     checked_spec(config['mt5'], require_applied=True)
                     new_terminal = McpTerminal(config['mt5'], mt5_mcp_token)
                     snapshot = new_terminal.call('snapshot')
+                    snapshot['quote'] = self.mt5_freshness.observe(snapshot['quote'],config['mt5'])
                     meta['mt5_transport'] = 'MT5 MCP 真实行情（只读轮询）'
                 else:
                     checked_spec(config['mt5'], require_applied=True)
                     new_terminal = Terminal(config['mt5'], config['execution']['magic'])
                     snapshot = new_terminal.call('snapshot')
+                    snapshot['quote'] = self.mt5_freshness.observe(snapshot['quote'],config['mt5'])
                     if not snapshot['allowed']:
                         raise ValueError('MT5 未允许程序交易；请按页面提示完成权限检查')
                     if snapshot['spec']['name'] != config['mt5']['symbol']:
@@ -267,7 +271,7 @@ class TradingRuntime:
                 try: self._start_push_bridge()
                 except OSError as exc: self.market_meta['push_warning']='EA 接收器未启动：'+str(exc)
             self.pump = QuotePump(config, new_binance, new_stream, new_terminal, self.push_bridge,
-                                  inspect_paper_terminal, publish, self.market_wake)
+                                  inspect_paper_terminal, publish, self.market_wake, self.mt5_freshness)
             self.pump.last_stamp = self.quote['time_ms']
             self.pump.start()
             if old_terminal and old_terminal is not new_terminal:
@@ -282,7 +286,7 @@ class TradingRuntime:
         c = config or self.config
         fx = c['costs']['usdt_usd']
         observed_at = now_ms()
-        mt5 = observed_quote(mt5, observed_at)
+        mt5 = self.mt5_freshness.observe(mt5, c['mt5'], observed_at)
         binance = observed_quote(binance, observed_at)
         return {
             'key': pair_key(c), 'time_ms': now_ms(),
@@ -324,6 +328,7 @@ class TradingRuntime:
             if c['mt5']['adapter']=='paper': mt5=inspect_paper_terminal(c['mt5'])['quote']
             elif c['mt5']['adapter']=='mcp': mt5=self.terminal.call('snapshot')['quote']
             else: mt5=self.terminal.call('quote')['quote']
+        mt5=self.mt5_freshness.observe(mt5,c['mt5'])
         market=self.market_stream.quote(max_age_ms=c['strategy']['max_quote_age_ms']) if self.market_stream else None
         if market is None: market=self.binance.quote(c['symbol'])
         return self._quote(mt5,market,c)
@@ -393,12 +398,11 @@ class TradingRuntime:
         self._verify_closed_costs()
 
     def _auto_reconcile_flat(self):
-        """Recover a close that finished while the account was in recovery.
+        """Reconcile confirmed closes while the account is in recovery.
 
         During a two-leg close one platform can briefly be flat while the
-        other is still closing. If that transient mismatch trips recovery,
-        keep checking at a slow cadence and clear it automatically only after
-        both broker accounts and all journal orders are flat.
+        other is still closing. Check at a slow cadence until both are flat,
+        or validate adopted residual positions so closing can continue.
         """
         now = time.monotonic()
         if now-self._last_auto_reconcile_at < 2: return False
@@ -407,8 +411,17 @@ class TradingRuntime:
         if not active or any(g.get('status') not in ('closing','unwinding') for g in active): return False
         try:
             for group in active: self.engine.resolve(group)
-            if any(self.engine.uncertain(group) or max(self.engine.amounts(group).values())>=1e-8 for group in active):
+            if any(self.engine.uncertain(group) for group in active):
                 return False
+            if any(max(self.engine.amounts(group).values())>=1e-8 for group in active):
+                # Older builds put an interrupted adopted close in recovery.
+                # Revalidate the confirmed residual exposure before allowing
+                # its closing workflow to continue; never rearm entries.
+                if not any(group.get('imported') for group in active): return False
+                self.engine.pause('接管平仓回报已确认，正在核验剩余持仓')
+                self.reconcile()
+                self.engine.save('auto_reconciled_close')
+                return True
             positions = self.binance.positions(self.config['symbol'])
             if self.binance.open_orders(self.config['symbol']) or any(abs(float(x.get('positionAmt',0)))>1e-8 for x in positions):
                 return False
@@ -481,7 +494,13 @@ class TradingRuntime:
         """
         if self.config['execution']['mode'] != 'live':
             return
+        if any(g['status']!='open' or self.engine.uncertain(g) for g in self.engine.active()):
+            # Even a different group's fee history must not delay a pending
+            # hedge confirmation or protective close.
+            return
         for group in self.engine.state['groups']:
+            if group.get('mode') != 'live' or group.get('key') != pair_key(self.config):
+                continue
             if group.get('imported'):
                 if (group['status']=='closed' and not group.get('import_closing_costs_checked')
                         and now_ms()-group.get('import_cost_check_ms',0)>=60000):
@@ -493,20 +512,29 @@ class TradingRuntime:
                 continue
             if group['status'] != 'closed' or group.get('costs_verified'):
                 continue
+            if now_ms()-group.get('cost_check_ms',0)<60000:
+                continue
+            group['cost_check_ms']=now_ms()
             try:
                 by_id = {o['id']: o for o in self.engine.state['orders'] if o['group'] == group['id']}
+                fees = {}
                 for order in by_id.values():
-                    if order['leg'] != 'binance' or not order.get('result', {}).get('ticket'):
+                    if order['leg'] != 'binance' or order['result'].get('qty',0)<=0:
                         continue
+                    if not order['result'].get('ticket'):
+                        raise ValueError('币安成交订单号尚未确认')
                     fills = self.binance.trades(order['symbol'], order['result']['ticket'])
-                    order['result']['fee'] = self.binance.commissions_usdt(fills)
-                deals = self.terminal.call('history', start_ms=group['opened_ms'] - 60000)
+                    if not fills or abs(sum(float(x.get('qty',0)) for x in fills)-order['result']['qty'])>1e-7:
+                        raise ValueError('币安成交费用记录尚未完整返回')
+                    fees[order['id']] = self.binance.commissions_usdt(fills)
+                mt5_orders = [o for o in by_id.values() if o['leg']=='mt5' and o['result'].get('qty',0)>0]
+                deals = self.terminal.call('history', start_ms=group['opened_ms'] - 60000) if mt5_orders else []
                 mt_swap = 0
-                for order in by_id.values():
-                    if order['leg'] != 'mt5':
-                        continue
+                for order in mt5_orders:
                     rows = [x for x in deals if x.get('comment') == order['id']]
-                    order['result']['fee'] = -sum(float(x.get('commission', 0)) + float(x.get('fee', 0)) for x in rows)
+                    if not rows or abs(sum(float(x.get('volume',0))*group['contract'] for x in rows)-order['result']['qty'])>1e-7:
+                        raise ValueError('MT5 成交费用记录尚未完整返回')
+                    fees[order['id']] = -sum(float(x.get('commission', 0)) + float(x.get('fee', 0)) for x in rows)
                     mt_swap += sum(float(x.get('swap', 0)) for x in rows)
                 
                 # Funding is reported for the whole symbol position. Allocate
@@ -528,10 +556,17 @@ class TradingRuntime:
                             share = float(group['qty']) / total_qty if total_qty else 1
                             funding += float(item.get('income', 0)) * share
                 
+                if not all(math.isfinite(x) for x in (*fees.values(),mt_swap,funding)):
+                    raise ValueError('成交费用记录包含无效数字')
+                # Publish only a complete set. A delayed MT5/funding record
+                # must not partially overwrite already known commissions.
+                for order_id, fee in fees.items():
+                    by_id[order_id]['result']['fee'] = fee
                 group['mt5_swap_usd'] = mt_swap
                 group['binance_funding_usd'] = funding * group['costs']['usdt_usd']
                 group['carry_usd'] = group['mt5_swap_usd'] + group['binance_funding_usd']
                 group['costs_verified'] = True
+                group.pop('cost_verification_error',None)
                 group['valuation'] = self.engine.valuation(group, self.quote)
                 self.engine.save('costs_verified', {'group': group['id'], 'net': group['valuation']['net']})
             except Exception as exc:
@@ -696,8 +731,12 @@ class TradingRuntime:
     def _guard_import_close(self):
         try:
             if not self.reconciled: raise ValueError('请先完成持仓对账')
+            for g in self.engine.active():
+                if self.engine.uncertain(g): self.engine.resolve(g)
             if any(self.engine.uncertain(g) for g in self.engine.active()):
-                raise ValueError('尚有成交状态未确定，请先对账，禁止再次发送平仓')
+                # A pending status is not an ownership mismatch. Keep polling
+                # without sending another order or disabling close recovery.
+                return False
             mt5=self.terminal.call('snapshot')
             self._validate_import_exposure(mt5,self.binance.positions(self.config['symbol']),
                                            self.binance.open_orders(self.config['symbol']))
@@ -761,13 +800,41 @@ class TradingRuntime:
             enabled=body.get('enabled')
             if type(enabled) is not bool: raise ValueError('启停参数无效')
             if enabled:
-                self._guard_import_close()
+                if self._guard_import_close() is False:
+                    raise ValueError('尚有成交状态未确定，请等待查询确认后再启动管理')
                 if self.engine.state['recovery']: raise ValueError('请先完成持仓对账')
                 g['parameters']['take_contraction_usd']=position_adoption.number(body,'take_contraction_usd',.000001,1e5)
                 g['parameters']['min_net_profit_usd']=position_adoption.number(body,'min_net_profit_usd',0,1e9)
             g['management_enabled']=enabled
             self.engine.save('adoption_management',{'group':g['id'],'enabled':enabled})
             return self.snapshot()
+
+    def _strategy_tickets_match(self, positions):
+        """Validate each ordinary group's remaining MT5 ticket, not just totals."""
+        current = {str(p['ticket']): p for p in positions}
+        claimed = set()
+        for group in self.engine.active():
+            if group.get('imported'): continue
+            remaining = self.engine.mt5_tickets(group)
+            for order in self.engine.state['orders']:
+                if (order['group']!=group['id'] or order['leg']!='mt5' or order['action']!='open'
+                        or order['result'].get('qty',0)<=0):
+                    continue
+                ticket = str(order['result'].get('position') or '')
+                if not ticket or ticket in claimed: return False
+                claimed.add(ticket)
+                qty = remaining.get(ticket,0)
+                actual = current.get(ticket)
+                if qty < -1e-8: return False
+                if qty<=1e-8:
+                    if actual: return False
+                    continue
+                if (not actual or actual.get('side')!=0
+                        or actual.get('magic')!=self.config['execution']['magic']
+                        or actual.get('comment')!=order['id']
+                        or abs(float(actual['lots'])*group['contract']-qty)>1e-7):
+                    return False
+        return True
 
     def reconcile(self):
         with self.lock:
@@ -850,6 +917,7 @@ class TradingRuntime:
                 signed_bqty=sum(float(x.get('positionAmt', 0)) for x in positions)
             bad_mt5 = any(int(x.get('side', -1)) != 0 or (x.get('comment') not in expected_comments and str(x['ticket']) not in imported_tickets)
                           for x in managed_mt5)
+            bad_mt5 = bad_mt5 or not self._strategy_tickets_match(mt5['positions'])
             binance_mismatch=(long_qty>0.000001 or other_qty>0.000001 or abs(short_qty-expected_b)>0.000001) if position_mode=='hedge' else abs(signed_bqty + expected_b)>0.000001
             if open_orders or binance_mismatch or abs(lots - expected_m) > .0000001 or bad_mt5:
                 self.engine.pause('账户持仓与本策略日志不一致，禁止自动处理；请人工核对')

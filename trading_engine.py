@@ -394,13 +394,15 @@ class Engine:
         return True
 
     def close_group(self, g, q):
+        # Status reads must precede account ownership checks: a delayed fill
+        # changes the expected exposure that those checks compare against.
+        if not self.resolve(g): return
         if g.get('imported') and hasattr(self,'before_import_close'):
-            self.before_import_close()
+            if self.before_import_close() is False: return
             # Account reads can take longer than the quote budget. Wait for another tick.
             if any(stamp()-int(q[leg].get('observed_ms',q[leg].get('time_ms',0)))>g['parameters']['max_quote_age_ms'] for leg in ('binance','mt5')):
                 self.state['alarm']='接管平仓核验完成时行情已过期，等待新报价'
                 return
-        if not self.resolve(g): return
         amounts=self.amounts(g)
         if max(amounts.values())<1e-8:
             self.finalize_flat(g,q);return

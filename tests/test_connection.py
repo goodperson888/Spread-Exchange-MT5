@@ -12,6 +12,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _test_runtime
 import mt5_connector as connector
 import mt5_mcp
 import server

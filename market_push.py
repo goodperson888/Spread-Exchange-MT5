@@ -22,6 +22,28 @@ def observed_quote(value, observed_ms=None):
     return result
 
 
+class TickFreshness:
+    """Keep the first local observation of an MT5 tick across transports."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.ticks = {}
+
+    def observe(self, value, settings, observed_ms=None):
+        quote = observed_quote(value, observed_ms)
+        identity = tuple(str(settings.get(k, '')) for k in ('account', 'server', 'symbol'))
+        signature = (quote['source_time_ms'], quote['bid'], quote['ask'])
+        with self.lock:
+            previous = self.ticks.get(identity)
+            if previous:
+                old_signature, first_seen = previous
+                if signature[0] < old_signature[0]:
+                    raise ValueError('MT5 报价时间倒退，等待新 tick')
+                if signature == old_signature:
+                    quote['observed_ms'] = min(first_seen, quote['observed_ms'])
+            self.ticks[identity] = (signature, quote['observed_ms'])
+        return quote
+
+
 class QuoteEvents:
     """Bounded replay buffer shared by SSE clients; slow clients never block producers."""
     def __init__(self, capacity=10000):
@@ -130,7 +152,8 @@ class PushBridge:
 
 class QuotePump:
     """Quote intake and persistence independent of the serialized trading worker."""
-    def __init__(self, config, exchange, stream, terminal, bridge, paper_quote, publish, wake_strategy):
+    def __init__(self, config, exchange, stream, terminal, bridge, paper_quote, publish, wake_strategy,
+                 mt5_freshness=None):
         self.config, self.exchange, self.stream, self.terminal = config, exchange, stream, terminal
         self.bridge, self.paper_quote, self.publish, self.wake_strategy = bridge, paper_quote, publish, wake_strategy
         self.changed, self.stopped = threading.Event(), threading.Event()
@@ -144,6 +167,7 @@ class QuotePump:
         self.last_stamp = 0
         self.mt5_cache = self.rest_cache = None
         self.mt5_read_at = self.rest_read_at = 0
+        self.mt5_freshness = mt5_freshness or TickFreshness()
 
     def start(self):
         self.stream.on_quote = self.changed.set
@@ -170,17 +194,20 @@ class QuotePump:
                 self.mt5_read_at = time.monotonic()
             mt5 = self.mt5_cache
             self.mt5_transport = ('MCP' if c['mt5']['adapter']=='mcp' else '原生') + '轮询兼容（EA 未接入或报价过期）'
+        # Record receipt before a potentially slow REST fallback on the other
+        # platform. Pair construction must not hide that elapsed time.
+        mt5 = self.mt5_freshness.observe(mt5, c['mt5'])
         # Read exchange AFTER any blocking terminal read, never pair a fresh MT5 tick with an old cached exchange tick.
         market = self.stream.quote(max_age_ms=age)
         if market is None:
             if self.rest_cache is None or time.monotonic() - self.rest_read_at >= 1:
-                self.rest_cache = self.exchange.quote(c['symbol']); self.rest_read_at = time.monotonic()
+                self.rest_cache = observed_quote(self.exchange.quote(c['symbol']))
+                self.rest_read_at = time.monotonic()
             market = self.rest_cache
             self.binance_transport = 'REST 回退'
         else: self.binance_transport = 'WebSocket bookTicker'
         fx = c['costs']['usdt_usd']
         observed_at = milliseconds()
-        mt5 = observed_quote(mt5, observed_at)
         market = observed_quote(market, observed_at)
         # Transport changes are observable state too.  A pushed tick can have
         # the same broker timestamp and prices as the compatibility poll; keep
