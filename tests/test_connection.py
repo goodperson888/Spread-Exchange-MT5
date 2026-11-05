@@ -177,6 +177,23 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual(body['message'], action)
                 method.assert_called_once()
 
+    def test_execution_export_is_download_without_accessing_trading_runtime(self):
+        report={'schema_version':1,'orders':[]}
+        with patch.object(server,'export_report',return_value=report) as export, patch.object(server,'TRADING') as runtime:
+            with urllib.request.urlopen(self.url+'/api/trading/diagnostics') as response:
+                self.assertEqual(response.status,200)
+                self.assertIn('attachment; filename="execution-diagnostics-',response.headers['Content-Disposition'])
+                self.assertEqual(response.headers['Cache-Control'],'no-store')
+                self.assertEqual(json.load(response),report)
+            export.assert_called_once_with(server.TRADING_DB_PATH)
+            self.assertFalse(runtime.mock_calls)
+        with server.DIAGNOSTIC_EXPORT_LOCK:
+            self.assertEqual(self.request('/api/trading/diagnostics')[0],429)
+        with patch.object(server,'export_report',side_effect=OSError('private path')):
+            code,body=self.request('/api/trading/diagnostics')
+            self.assertEqual(code,503)
+            self.assertNotIn('private path',json.dumps(body))
+
     def test_adoption_routes_dispatch_post_body_without_orders(self):
         with patch.object(server,'TRADING') as runtime:
             for path, name in [('preview','adoption_plan'),('confirm','adoption_confirm'),('manage','adoption_manage')]:

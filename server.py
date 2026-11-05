@@ -29,6 +29,7 @@ from trading_brokers import Binance, BinanceBookTicker, Terminal, LiveBroker, Pa
 from trading_config import validate as validate_trading, plan as executable_plan, pair_key
 from trading_engine import Engine
 from trading_store import Store
+from execution_diagnostics import export_report
 import position_adoption
 from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, observed_quote
 from entry_preflight import EntryPreflight
@@ -47,6 +48,7 @@ PORT = int(os.environ.get("GOLD_PAIR_PORT", "8766"))
 LOCK = threading.RLock()
 PROBE_LOCK = threading.Lock()
 LAST_PROBE = None
+DIAGNOSTIC_EXPORT_LOCK = threading.Lock()
 
 
 def atomic_write_json(path, value):
@@ -1359,6 +1361,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/trading/status":
             self.send_json({"ok": True, **TRADING.snapshot()})
+            return
+        if path == '/api/trading/diagnostics':
+            if not DIAGNOSTIC_EXPORT_LOCK.acquire(blocking=False):
+                self.send_json({'ok':False,'error':'已有诊断导出正在生成，请稍后重试'},429);return
+            try:
+                try:
+                    data=json.dumps(export_report(TRADING_DB_PATH),ensure_ascii=False,allow_nan=False).encode('utf-8')
+                except Exception:
+                    self.send_json({'ok':False,'error':'执行诊断暂时无法读取，请稍后重试'},503);return
+                self.send_response(200)
+                self.send_header('Content-Type','application/json; charset=utf-8')
+                self.send_header('Content-Disposition','attachment; filename="execution-diagnostics-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.json"')
+                self.send_header('Cache-Control','no-store')
+                self.send_header('Content-Length',str(len(data)))
+                self.end_headers();self.wfile.write(data)
+            finally:
+                DIAGNOSTIC_EXPORT_LOCK.release()
             return
         if path == "/api/trading/chart":
             query = urlparse(self.path).query

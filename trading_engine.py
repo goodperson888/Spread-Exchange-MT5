@@ -33,6 +33,7 @@ class Engine:
         # Deliberately not persisted: a restart or manual pause must never
         # resume an interrupted entry, even if the wall clock moved backwards.
         self._entry_deadlines={}
+        self._execution_timers={}
         self.state=store.load() or dict(groups=[],orders=[],last_open_ms=0,enabled=False,mode='paper',key=None,alarm='',recovery=False)
         self.state['enabled']=False
         for g in self.state['groups']:
@@ -90,6 +91,10 @@ class Engine:
             o['top_qty']=q.get('binance',{}).get(top_key)
         o['signal_spread']=q.get('entry' if action=='open' else 'exit')
         o['signal_time_ms']=q.get('time_ms')
+        # Preserve each leg's quote even when the paired signal is filled in later.
+        o['quote_spread']=o['signal_spread']
+        o['quote_context']={name:{key:q.get(name,{}).get(key) for key in
+            ('bid','ask','bid_qty','ask_qty','time_ms','observed_ms','source_time_ms')} for name in ('binance','mt5')}
         if leg=='binance':
             # The strategy always opens and closes the Binance SHORT leg.
             # The broker adds this only when the account is in Hedge Mode.
@@ -108,13 +113,17 @@ class Engine:
             o['position']=opened['result'].get('position') or opened['result'].get('ticket')
             if not o['position']:
                 raise ValueError('MT5 持仓票据未确定，必须先完成对账')
+        journal_started=time.monotonic()
         self.state['orders'].append(o);self.save('order_intent',{'id':o['id'],'group':g['id'],'leg':leg,'action':action,'qty':qty})
         request_started=time.monotonic()
+        o['intent_journal_ms']=round((request_started-journal_started)*1000,3)
+        o['dispatch_ms']=stamp()
         try: result=self.broker.submit(copy.deepcopy(o))
         except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
         # Never let an invalid result look like a completed zero-volume fill.
         if not self.result_valid(result,qty): result=dict(status='unknown',qty=0,price=0,error='成交回报无效，等待对账')
         result['request_ms']=round((time.monotonic()-request_started)*1000)
+        result['response_received_ms']=stamp()
         if result.get('status')=='done' and float(result.get('qty',0))>0:
             result['fill_time_ms']=stamp()
         if result.get('status')!='done':
@@ -123,6 +132,22 @@ class Engine:
                             'cancel_sent':False}
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
         return o
+
+    def _begin_execution(self, g, action, q=None, started=None, started_ms=None):
+        key='execution_'+action
+        if key in g: return
+        g[key]={'started_ms':stamp() if started_ms is None else started_ms}
+        if q:
+            g[key].update(signal_time_ms=q.get('time_ms'),signal_spread=q.get('entry' if action=='open' else 'exit'))
+        self._execution_timers[(g['id'],action)]=time.monotonic() if started is None else started
+
+    def _complete_execution(self, g, action):
+        timing=g.get('execution_'+action)
+        started=self._execution_timers.pop((g['id'],action),None)
+        if timing is not None:
+            timing['confirmed_ms']=stamp()
+            # A restart cannot reconstruct a monotonic timer. Never invent latency.
+            timing['elapsed_ms']=round((time.monotonic()-started)*1000,3) if started is not None else None
 
     def _record_spread(self, g, action, signal=None):
         rows=[o for o in self.state['orders'] if o['group']==g['id'] and o['action']==action
@@ -313,6 +338,7 @@ class Engine:
                 g['status']='attention';g['reason']='两边已成交但无法计算实际价差，请对账核验';self.pause(g['reason']);return True
             g['status']='open';g['open_binance']=(first if first_leg=='binance' else second)['result']['price']
             g['entry_signal']=g.get('entry_signal',g['entry']);g['entry']=actual
+            self._complete_execution(g,'open')
             if threshold is None: threshold=g.get('entry_threshold',g['parameters']['entry_spread_usd'])
             if actual < threshold:
                 g['execution_warning']=f'实际成交价差 {actual:.6f} 低于触发阈值 {threshold:.6f}，按实际开仓价差管理；未反向平仓'
@@ -351,6 +377,7 @@ class Engine:
             parameters=copy.deepcopy(c['strategy']),costs=copy.deepcopy(c['costs']),attempts=0,
             retry_limit=c['execution']['close_retry_limit'],entry=q['entry'],entry_signal=q['entry'],reason='',key=pair_key(c),
             first_leg=first_leg,second_leg=second_leg,entry_threshold=threshold,grid_index=int(grid_index))
+        self._begin_execution(g,'open',q,entry_started,now)
         self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
         self._entry_deadlines[g['id']]=entry_started+c['strategy']['max_unhedged_ms']/1000
         first=self.order(g,first_leg,'open',p['qty'],q)
@@ -367,6 +394,7 @@ class Engine:
             self.save('entry_skipped',{'group':g['id'],'reason':g['reason'],
                                       'code':result['error_code']})
             self._entry_deadlines.pop(g['id'],None)
+            self._execution_timers.pop((g['id'],'open'),None)
             return
         if result.get('status')!='done':
             self.pause(f'{"币安" if first_leg=="binance" else "MT5"} 开仓状态未知，进入分层对账',keep_entry=True);return
@@ -378,6 +406,7 @@ class Engine:
         found=False
         for g in self.active():
             if group_id is None or g['id']==group_id:
+                self._begin_execution(g,'close')
                 if g['status']=='attention': g['attempts']=0
                 g['status']='closing';g['reason']=reason;found=True
         if group_id and not found: raise ValueError('未找到活动交易组')
@@ -389,11 +418,18 @@ class Engine:
         if max(self.amounts(g).values())>=1e-8: return False
         actual=self._record_spread(g,'close',g.get('exit_signal',q.get('exit')))
         g.update(status='closed',closed_ms=stamp(),exit=actual if actual is not None else q.get('exit'))
+        self._complete_execution(g,'close')
+        self._execution_timers.pop((g['id'],'open'),None)
         g['valuation']=self.valuation(g,q)
         self.save('group_closed',{'group':g['id'],'net_estimate':g['valuation']['net']})
         return True
 
     def close_group(self, g, q):
+        self._begin_execution(g,'close',q)
+        if q and 'exit_signal' not in g: g['exit_signal']=q.get('exit')
+        timing=g['execution_close']
+        if 'signal_spread' not in timing and q:
+            timing.update(signal_time_ms=q.get('time_ms'),signal_spread=q.get('exit'))
         # Status reads must precede account ownership checks: a delayed fill
         # changes the expected exposure that those checks compare against.
         if not self.resolve(g): return
@@ -481,6 +517,7 @@ class Engine:
             elif g['id'] in basket_exit: reason='整篮子止盈'
             elif s['exit_mode']=='group' and self.target(g,g['entry'],q['exit']) and (not s['require_net_profit'] or v['net']>=s['min_net_profit_usd']): reason='逐组止盈'
             if reason:
+                self._begin_execution(g,'close',q)
                 g.update(status='closing',reason=reason,exit_signal=q['exit']);exit_event=True;self.save('exit_signal',{'group':g['id'],'reason':reason,'signal_spread':q['exit']})
                 if reason in ('本策略总浮动亏损上限','单组亏损上限'): self.pause(reason)
         for g in self.active():

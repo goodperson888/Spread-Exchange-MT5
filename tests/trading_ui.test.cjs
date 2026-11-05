@@ -235,3 +235,18 @@ test('unwound group and cumulative carry are explicit; rejected order never clai
   assert.match(f.el('pnl-stats').innerHTML,/累计资金费 \+ Swap（含已平仓）/);
   assert.doesNotMatch(f.el('orders').innerHTML,/已通过对账确认|查询确认|发送→回报/);
 });
+
+test('execution timing names local stages and missing paired spread stays unknown',async()=>{
+  const order={id:'one',group:'g',leg:'binance',action:'close',created_ms:1000,dispatch_ms:1010,
+    signal_time_ms:990,intent_journal_ms:7,actual_spread:null,signal_spread:null,spread_slippage:null,
+    result:{status:'done',qty:1,price:4300,request_ms:40,response_received_ms:1050,reconcile_time_ms:2000}};
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({state:{groups:[],orders:[order]}})});
+  await f.el('trading-reconcile').onclick();
+  const html=f.el('orders').innerHTML;
+  assert.match(html,/采样→调用 20 ms/);
+  assert.match(html,/意图落盘 7 ms/);
+  assert.match(html,/适配器调用 40 ms/);
+  assert.match(html,/非实际成交延迟/);
+  assert.match(html,/等待双边成交/);
+  assert.doesNotMatch(html,/偏移 \+0/);
+});
