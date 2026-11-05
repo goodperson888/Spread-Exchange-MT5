@@ -6,9 +6,11 @@ the web service. A future execution engine must keep its own persistent session.
 import importlib
 import json
 import math
+import re
 import subprocess
 import sys
 import time
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 
 
@@ -56,6 +58,58 @@ def symbol_scan_diagnostics(symbols, gold):
                 symbol_diagnostic_candidates=[symbol_diagnostics(info) for info in hints[:5]])
 
 
+def usd_gold_cfd(info):
+    """Narrow broker-metadata exception; still requires a separate profit check."""
+    name = str(getattr(info, 'name', '')).upper()
+    description = str(getattr(info, 'description', '')).upper()
+    return (re.fullmatch(r'XAUUSD[A-Z0-9._#-]*', name) is not None
+            and (re.search(r'\bGOLD\b', description) is not None or '黄金' in description)
+            and (re.search(r'\bUSD\b|\bUS\s+DOLLAR\b', description) is not None or '美元' in description)
+            and str(getattr(info, 'currency_base', '')).upper() == 'USD'
+            and str(getattr(info, 'currency_profit', '')).upper() == 'USD'
+            and getattr(info, 'custom', None) is False
+            and getattr(info, 'trade_calc_mode', None) in (3, 4))  # CFD / CFDLEVERAGE
+
+
+def verify_cfd_profit(api, info, account, tick, spec):
+    """Connection-time read-only check; never used by the execution worker."""
+    result = dict(method='gold_cfd_profit', passed=False,
+                  account_currency=str(getattr(account, 'currency', '')), checks=[])
+    def reject(reason):
+        result['reason'] = reason
+        return result
+    if result['account_currency'].upper() != 'USD':
+        return reject('黄金 CFD 兼容校验目前要求美元账户，避免把账户币种换算误当成黄金数量。')
+    try:
+        bid, ask = float(tick.bid), float(tick.ask)
+        age = int(time.time() * 1000) - int(tick.time_msc)
+        if not all(math.isfinite(x) for x in (bid, ask)) or not 1 < bid <= ask or not -1000 <= age <= 5000:
+            return reject('黄金 CFD 兼容校验需要有效的新鲜 Bid/Ask；请等待报价后重新检查。')
+        step = Decimal(str(spec['volume_step']))
+        lots = float((Decimal(str(spec['volume_min'])) / step).to_integral_value(rounding=ROUND_CEILING) * step)
+        if lots > spec['volume_max']:
+            return reject('合约手数规则无法用于盈亏预估校验。')
+        result.update(lots=lots, contract_size_oz=spec['contract_size_oz'], price_change=1.0)
+        for side, action, opening, sign in (('buy', api.ORDER_TYPE_BUY, ask, 1),
+                                            ('sell', api.ORDER_TYPE_SELL, bid, -1)):
+            for move in (1.0, -1.0):
+                closing = opening + move
+                expected = sign * lots * spec['contract_size_oz'] * (closing - opening)
+                if not math.isfinite(expected) or expected == 0:
+                    return reject('合约量或报价超出盈亏预估校验的有效数值范围。')
+                actual = api.order_calc_profit(action, info.name, lots, opening, closing)
+                if isinstance(actual, bool) or not isinstance(actual, (int, float)) or not math.isfinite(actual):
+                    return reject('MT5 未返回有效的盈亏预估；请检查终端连接后重试。')
+                result['checks'].append(dict(side=side, price_open=opening, price_close=closing,
+                                             expected_usd=expected, actual_usd=actual))
+                if not math.isclose(actual, expected, rel_tol=1e-4, abs_tol=min(.005, abs(expected) * .005)):
+                    return reject('MT5 盈亏预估与每手合约量的黄金换算不一致，不能自动配平。')
+    except Exception:
+        return reject('无法完成 MT5 盈亏预估校验；请检查终端连接及组件版本后重试。')
+    result['passed'] = True
+    return result
+
+
 def inspect_terminal(settings, api=None, platform=None):
     platform = platform or sys.platform
     if api is None:
@@ -99,36 +153,51 @@ def inspect_terminal(settings, api=None, platform=None):
                 and str(getattr(x, 'currency_profit', '')).upper() == 'USD'
                 and not getattr(x, 'custom', False)]
         result['candidates'] = [str(x.name) for x in gold][:100]
+        possible = gold + [x for x in symbols if usd_gold_cfd(x)]
         selected = str(settings.get('symbol', '')).strip()
-        if not selected and len(gold) == 1:
-            selected = gold[0].name
+        if not selected and len(possible) == 1:
+            selected = possible[0].name
         info = api.symbol_info(selected) if selected else None
         if info is None:
             result.update(symbol_scan_diagnostics(symbols, gold))
             if selected:
                 message = '已连接 MT5，但无法读取所填品种的详细信息；请核对终端中的完整品种名后重新检查。'
-            elif gold:
-                message = '已连接 MT5，发现多个通过货币字段校验的黄金品种；请选择具体品种，再检查连接。'
+            elif possible:
+                message = '已连接 MT5，发现多个黄金候选品种；请选择具体品种，再检查连接；兼容候选还需完成盈亏预估校验。'
             else:
                 message = '已连接 MT5，但自动识别未找到通过校验的黄金品种；请查看下方候选诊断，并手动填写终端中的完整品种名后重新检查。'
             result.update(code='SELECT_SYMBOL', message=message)
             return result
         result['symbol_diagnostics'] = symbol_diagnostics(info)
-        if result['symbol_diagnostics']['reasons']:
+        compatibility = usd_gold_cfd(info)
+        if result['symbol_diagnostics']['reasons'] and not compatibility:
             result.update(code='UNSUPPORTED_SYMBOL', message='已连接 MT5，但所选品种未通过黄金规格校验；具体原因见下方品种诊断。')
             return result
         spec = dict(name=str(info.name), contract_size_oz=float(info.trade_contract_size),
                     volume_min=float(info.volume_min), volume_step=float(info.volume_step),
                     volume_max=float(info.volume_max), digits=int(info.digits),
-                    trade_mode=int(info.trade_mode), currency_base='XAU', currency_profit='USD')
+                    trade_mode=int(info.trade_mode), currency_base=str(info.currency_base), currency_profit='USD')
         numbers = [spec[k] for k in ('contract_size_oz', 'volume_min', 'volume_step', 'volume_max')]
         if not all(math.isfinite(x) and x > 0 for x in numbers) or spec['volume_min'] > spec['volume_max']:
             result.update(code='INVALID_SPEC', message='终端返回了无效合约规格，不能计算配平数量。')
             return result
-        result['symbol'] = spec
-        if not api.symbol_select(info.name, True):
+        selected_ok = api.symbol_select(info.name, True)
+        if not selected_ok:
             result['blockers'].append('无法把黄金品种加入市场报价，请在 MT5 中手动显示该品种。')
         tick = api.symbol_info_tick(info.name)
+        if compatibility:
+            verification = (verify_cfd_profit(api, info, account, tick, spec) if selected_ok else
+                            dict(method='gold_cfd_profit', passed=False, reason='请先在 MT5 市场报价中显示该品种，再重新检查。'))
+            result['symbol_verification'] = verification
+            if not verification['passed']:
+                result['symbol_diagnostics']['reasons'].append(verification['reason'])
+                result.update(code='UNSUPPORTED_SYMBOL', message='已连接 MT5，但黄金 CFD 兼容校验未通过；具体原因见下方品种诊断。')
+                return result
+            spec.update(quantity_unit='troy_ounce', verification='gold_cfd_profit')
+            result['symbol_diagnostics']['reasons'] = []
+            if spec['name'] not in result['candidates']:
+                result['candidates'].append(spec['name'])
+        result['symbol'] = spec
         stamp = int(getattr(tick, 'time_msc', 0) or 0)
         bid, ask = float(getattr(tick, 'bid', 0)), float(getattr(tick, 'ask', 0))
         if stamp > 0 and math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask:

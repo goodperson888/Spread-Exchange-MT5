@@ -281,6 +281,10 @@ function showResult(r) {
     lines.push('请把这段品种诊断复制或截图用于核对；品种名称和合约量本身不能确认配平单位。');
   }
   if (r.symbol && r.symbol.name) lines.push('黄金品种：' + r.symbol.name + '；每手 ' + r.symbol.contract_size_oz + ' 盎司；最小 ' + r.symbol.volume_min + ' / 步长 ' + r.symbol.volume_step + ' / 最大 ' + r.symbol.volume_max + ' 手');
+  if (r.symbol && r.symbol_verification?.passed) {
+    lines.push('黄金 CFD 兼容校验通过：基础货币实际返回 '+JSON.stringify(r.symbol_diagnostics?.currency_base)+'；已用 MT5 多空、涨跌四项盈亏预估核对黄金换算。');
+    lines.push('校验未发送订单，仅在连接检查时执行。');
+  }
   if (r.quote) lines.push('检查时 Bid ' + r.quote.bid + ' / Ask ' + r.quote.ask + '；报价年龄 ' + r.quote.age_ms + ' 毫秒');
   if (r.quote) { 
     $('mt5-bid').value = r.quote.bid; 

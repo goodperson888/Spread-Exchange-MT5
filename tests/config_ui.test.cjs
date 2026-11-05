@@ -102,6 +102,27 @@ test('empty symbol auto detection renders candidate diagnosis without applying h
   assert.match(list.options[0].label,/待校验，仅供诊断/);
 });
 
+test('verified USD-base CFD shows compatibility confirmation and applies its real contract',async()=>{
+  const result={connected:true,identity_matches:true,message:'已连接 MT5',
+    identity:{account:'123',server:'Demo',currency:'USD'},candidates:['XAUUSD'],
+    symbol:{name:'XAUUSD',contract_size_oz:100,volume_min:.01,volume_step:.01,volume_max:80,currency_base:'USD'},
+    symbol_diagnostics:{currency_base:'USD'},symbol_verification:{method:'gold_cfd_profit',passed:true}};
+  const f=await fixture({'/api/mt5/check':()=>({result}),
+    '/api/paper/plan':()=>({plan:{mt5_lots:.01,binance_qty_xau:1,gold_qty_oz:1}})});
+  f.edit('lots','0.01');await f.el('check-mt5').onclick();
+  const text=f.el('mt5-result').textContent;
+  assert.match(text,/黄金 CFD 兼容校验通过/);
+  assert.match(text,/基础货币实际返回 "USD"/);
+  assert.match(text,/多空、涨跌四项盈亏预估/);
+  assert.match(text,/未发送订单，仅在连接检查时执行/);
+  assert.doesNotMatch(text,/未通过|尚未确认计量单位/);
+  assert.equal(f.run('hasResult'),true);
+  assert.equal(f.calls.filter(c=>c.url==='/api/mt5/apply').length,1);
+  assert.equal(f.el('contract').value,'100');
+  assert.match(f.el('plan-result').textContent,/0\.01 手 ↔ XAUUSDT：1 XAU/);
+  assert.ok(!f.calls.some(c=>['/api/trading/start','/api/trading/connect','/api/trading/close'].includes(c.url)));
+});
+
 test('risk thresholds save numerically and never ask to reconnect the trading engine',async()=>{
   const live={connected:true,config_pending:false,state:{enabled:false,groups:[],orders:[]},capabilities:{mode:'live',reconciled:true}};
   const f=await fixture({'/api/trading/reconcile':()=>live,'/api/trading/status':()=>live});

@@ -246,6 +246,30 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual(body['message'], action)
                 method.assert_called_once()
 
+    def test_usd_base_gold_cfd_check_apply_and_quantity_plan(self):
+        self.request('/api/config', {'mt5':{'adapter':'native', 'symbol':'XAUUSDm'},
+                                    'strategy':{'mt5_lots':.01}})
+        fake = FakeMT5()
+        fake.symbol.currency_base = 'USD'
+        fake.symbol.description = 'Gold vs US Dollar / Spot'
+        fake.symbol.trade_calc_mode = 4
+        fake.ORDER_TYPE_BUY, fake.ORDER_TYPE_SELL = 0, 1
+        calls = []
+        def calculate(action, name, lots, opening, closing):
+            calls.append((action, name, lots, opening, closing))
+            return (1 if action == 0 else -1) * lots * 100 * (closing - opening)
+        fake.order_calc_profit = calculate
+        with patch.object(server, 'run_probe', side_effect=lambda settings:connector.inspect_terminal(settings, fake)):
+            code, body = self.request('/api/mt5/check', {})
+        self.assertEqual(code, 200)
+        self.assertTrue(body['result']['symbol_verification']['passed'])
+        self.assertEqual(self.request('/api/mt5/apply', {})[0], 200)
+        code, body = self.request('/api/paper/plan', {'binance_bid':4300})
+        self.assertEqual(code, 200)
+        self.assertEqual(body['plan']['gold_qty_oz'], 1)
+        self.assertEqual(body['plan']['binance_qty_xau'], 1)
+        self.assertEqual(len(calls), 4)  # apply and planning never repeat terminal verification
+
     def test_execution_export_is_download_without_accessing_trading_runtime(self):
         report={'schema_version':1,'orders':[]}
         with patch.object(server,'export_report',return_value=report) as export, patch.object(server,'TRADING') as runtime:
