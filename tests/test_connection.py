@@ -153,7 +153,8 @@ class ConnectorTests(unittest.TestCase):
         fake.tick.time_msc -= 60000
         r = connector.inspect_terminal({}, fake)
         self.assertTrue(r['connected'])
-        self.assertEqual(len(r['blockers']), 4)
+        self.assertEqual(len(r['blockers']), 3)
+        self.assertEqual(len(r['warnings']), 1)
 
     def test_disconnected(self):
         fake = FakeMT5(); fake.terminal.connected = False

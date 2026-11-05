@@ -171,6 +171,25 @@ test('risk thresholds save numerically and never ask to reconnect the trading en
   assert.ok(!f.calls.some(x=>['/api/trading/start','/api/trading/connect','/api/trading/close'].includes(x.url)));
 });
 
+test('server clock difference is labelled as unconfirmed time basis rather than negative quote age',async()=>{
+  const f=await fixture();
+  f.run(`showResult({connected:true,identity_matches:true,message:'黄金规格已确认',
+    symbol:{name:'XAUUSD',contract_size_oz:100},
+    quote:{bid:4127.13,ask:4127.23,age_ms:-7191593,time_ms:1793887333856},
+    quote_diagnostics:{bid:4127.13,ask:4127.23,time_ms:1793887333856,age_ms:-7191593,
+      raw_time_delta_ms:-7191593,possible_offset_hours:2},
+    warnings:['单次读取无法区分时间基准差异与报价未更新；仍需通过 tick 持续更新检查。']})`);
+  const text=f.el('mt5-result').textContent;
+  assert.match(text,/比本机快 1 小时 59 分 51\.593 秒/);
+  assert.match(text,/接近 2 小时，原因待确认/);
+  assert.match(text,/不是已测得的网络延迟/);
+  assert.match(text,/时间提示：.*持续更新检查/);
+  assert.doesNotMatch(text,/报价年龄|自动校正/);
+  assert.equal(f.el('mt5-bid').value,'4127.13');
+  assert.equal(f.el('mt5-ask').value,'4127.23');
+  assert.ok(!f.calls.some(c=>['/api/mt5/check','/api/trading/start','/api/trading/connect'].includes(c.url)));
+});
+
 test('old runtime plan never replaces the current quantity preview',async()=>{
   const f=await fixture({'/api/trading/reconcile':()=>({connected:true,plan:{lots:.02,qty:2},
     state:{groups:[],orders:[]},config_pending:true,capabilities:{mode:'paper',reconciled:true}})});

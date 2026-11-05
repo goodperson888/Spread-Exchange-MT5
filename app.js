@@ -287,16 +287,25 @@ function showResult(r) {
     lines.push('校验未发送订单，仅在连接检查时执行。');
     if (r.symbol_verification.price_source==='hypothetical_prices') lines.push('换算核验使用假设价格；这不代表已获取可交易行情，请在 MT5 显示该品种并等待有效报价。');
   }
-  if (r.quote_diagnostics && (!r.symbol || !r.quote || r.quote.age_ms > 5000 || r.quote.age_ms < -1000)) {
+  const detailedQuote=r.quote_diagnostics && (!r.symbol || !r.quote || r.quote.age_ms > 5000 || r.quote.age_ms < -1000);
+  if (detailedQuote) {
     const d=r.quote_diagnostics, raw=value=>value===null||value===undefined?'无效或未返回':String(value);
     lines.push('报价诊断：Bid '+raw(d.bid)+' / Ask '+raw(d.ask)+'；MT5 原始时间戳 '+raw(d.time_ms)+'；与本机时间差 '+raw(d.age_ms)+' 毫秒。');
+    const delta=d.raw_time_delta_ms??d.age_ms;
+    if (typeof delta==='number' && Number.isFinite(delta)) {
+      const total=Math.abs(delta), hours=Math.floor(total/3600000), minutes=Math.floor(total%3600000/60000);
+      const duration=(hours?hours+' 小时 ':'')+(minutes?minutes+' 分 ':'')+(total%60000/1000).toFixed(3)+' 秒';
+      const hint=d.possible_offset_hours?`（接近 ${Math.abs(d.possible_offset_hours)} 小时，原因待确认）`:'';
+      lines.push('时间基准：MT5 原始时间比本机'+(delta<0?'快 ':'慢 ')+duration+hint+'；该差值不是已测得的网络延迟。');
+    }
   }
-  if (r.quote) lines.push('检查时 Bid ' + r.quote.bid + ' / Ask ' + r.quote.ask + '；报价年龄 ' + r.quote.age_ms + ' 毫秒');
+  if (r.quote && !detailedQuote) lines.push('检查时 Bid ' + r.quote.bid + ' / Ask ' + r.quote.ask + '；原始时间与本机差 ' + r.quote.age_ms + ' 毫秒；持续更新需由实时行情检查确认。');
   if (r.quote) { 
     $('mt5-bid').value = r.quote.bid; 
     $('mt5-ask').value = r.quote.ask;
   }
   for (const reason of r.blockers || []) lines.push('待处理：' + reason);
+  for (const warning of r.warnings || []) lines.push('时间提示：' + warning);
   message('mt5-result', lines.join('\n'), !r.connected || !r.identity_matches || !r.symbol);
   const verified=new Set(r.candidates||[]);
   const names=[...new Set([...verified,...diagnostics.map(d=>d.name).filter(name=>typeof name==='string'&&name)])];

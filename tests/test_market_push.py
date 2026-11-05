@@ -123,6 +123,37 @@ class PumpTests(unittest.TestCase):
         self.assertTrue(q['valid'])
         self.assertNotEqual(q['mt5']['source_time_ms'],q['mt5']['observed_ms'])
 
+    def test_two_hour_server_offset_never_refreshes_an_unchanged_tick(self):
+        c,b,s,t,p,w,pump=self.fixture();b.quote.return_value=None
+        at=milliseconds()
+        tick={'bid':4300,'ask':4300.2,'time_ms':at+7191593}
+        t.call.return_value={'quote':tick}
+        s.quote.return_value={'bid':4306,'ask':4306.2,'time_ms':at}
+        with patch('market_push.milliseconds',return_value=at), patch('trading_engine.stamp',return_value=at):
+            pump.collect()
+        first=pump.read()[0]
+        self.assertTrue(first['valid'])
+        self.assertEqual(first['mt5']['source_time_ms'],tick['time_ms'])
+        self.assertEqual(first['mt5']['observed_ms'],at)
+        elapsed=c['strategy']['max_quote_age_ms']+100
+        s.quote.return_value=dict(s.quote.return_value,time_ms=at+elapsed)
+        pump.mt5_read_at=0
+        with patch('market_push.milliseconds',return_value=at+elapsed), patch('trading_engine.stamp',return_value=at+elapsed):
+            pump.collect()
+            stale=pump.read()[0]
+            self.assertFalse(stale['valid'])
+            self.assertEqual(stale['mt5']['observed_ms'],at)
+            with tempfile.TemporaryDirectory() as directory:
+                store=Store(Path(directory)/'test.sqlite3')
+                try:
+                    broker=Mock(wraps=PaperBroker());engine=Engine(store,broker);engine.start(c)
+                    engine.tick(c,dict(lots=.02,qty=2,contract=100),stale)
+                    broker.submit.assert_not_called()
+                finally:store.close()
+            t.call.return_value={'quote':dict(tick,time_ms=tick['time_ms']+elapsed)}
+            pump.mt5_read_at=0;pump.collect()
+            self.assertTrue(pump.read()[0]['valid'])
+
     def test_unchanged_polled_tick_expires_while_binance_keeps_updating(self):
         c,b,s,t,p,w,pump=self.fixture();b.quote.return_value=None
         at=milliseconds()

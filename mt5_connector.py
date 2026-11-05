@@ -79,8 +79,12 @@ def quote_diagnostics(tick):
     bid, ask, source = finite('bid'), finite('ask'), finite('time_msc')
     local = int(time.time() * 1000)
     valid_time = source is not None and source > 0
+    delta = local-int(source) if valid_time else None
+    hours = round(-delta/3600000) if delta is not None else 0
+    possible_offset = hours if hours and abs(-delta-hours*3600000) <= 30000 else None
     return dict(bid=bid, ask=ask, time_ms=source, local_time_ms=local,
-                age_ms=local-int(source) if valid_time else None,
+                age_ms=delta, raw_time_delta_ms=delta, possible_offset_hours=possible_offset,
+                freshness_status='needs_live_updates',
                 valid_time=valid_time, valid_price=bid is not None and ask is not None and 0 < bid <= ask)
 
 
@@ -154,7 +158,7 @@ def inspect_terminal(settings, api=None, platform=None):
         result = dict(connected=True, real_order_enabled=False,
                       checked_at_ms=int(time.time() * 1000), identity=identity,
                       terminal_path=str(getattr(terminal, 'path', '')), candidates=[],
-                      symbol=None, quote=None, blockers=[])
+                      symbol=None, quote=None, blockers=[], warnings=[])
         expected_account = str(settings.get('account', '')).strip()
         expected_server = str(settings.get('server', '')).strip()
         if ((expected_account and expected_account != identity['account']) or
@@ -232,7 +236,7 @@ def inspect_terminal(settings, api=None, platform=None):
             stamp, bid, ask, age = (diagnostic[key] for key in ('time_ms', 'bid', 'ask', 'age_ms'))
             result['quote'] = dict(bid=bid, ask=ask, time_ms=stamp, age_ms=age)
             if age > 5000 or age < -1000:
-                result['blockers'].append(f'报价原始时间与本机相差 {age} 毫秒；可能报价未更新或时钟偏差，不能视为可立即成交。交易仍须通过实时行情检查。')
+                result['warnings'].append('原始时间与本机有偏差，单次读取无法区分时间基准差异与报价未更新；此差值不作为行情延迟。连接实时行情后，仍需通过 tick 持续更新检查，不能据此认定可立即成交。')
         elif not diagnostic['valid_price']:
             result['blockers'].append('尚无有效 Bid/Ask，请在 MT5 市场报价中显示该品种，等待报价或检查休市时间。')
         else:

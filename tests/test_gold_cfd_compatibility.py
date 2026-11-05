@@ -239,8 +239,35 @@ class GoldCFDTests(unittest.TestCase):
                 self.assertEqual(result['quote']['time_ms'], original)
                 self.assertEqual(result['quote_diagnostics']['time_ms'], original)
                 self.assertGreater(abs(result['quote']['age_ms']), 59000)
-                self.assertIn('不能视为可立即成交', ' '.join(result['blockers']))
+                self.assertEqual(result['blockers'], [])
+                self.assertIn('不能据此认定可立即成交', ' '.join(result['warnings']))
                 self.assertFalse(result['real_order_enabled'])
+
+    def test_screenshot_offset_is_only_a_hint_and_never_applied_to_quote_time(self):
+        fake = FakeGoldCFD()
+        local = 1793880142263
+        fake.tick.time_msc = local + 7191593
+        with patch.object(connector.time, 'time', return_value=local/1000):
+            result = self.inspect(fake)
+        diagnostic = result['quote_diagnostics']
+        self.assertEqual(diagnostic['raw_time_delta_ms'], -7191593)
+        self.assertEqual(diagnostic['possible_offset_hours'], 2)
+        self.assertEqual(diagnostic['freshness_status'], 'needs_live_updates')
+        self.assertEqual(result['quote']['time_ms'], fake.tick.time_msc)
+        self.assertTrue(result['symbol_verification']['passed'])
+        self.assertEqual(result['blockers'], [])
+        self.assertIn('不作为行情延迟', result['warnings'][0])
+        self.assertFalse(result['real_order_enabled'])
+
+    def test_clock_hints_distinguish_past_and_future_without_rounding_arbitrary_delays(self):
+        local = 1793880142263
+        for delta, expected in ((-7191593, 2), (7191593, -2), (-230000, None), (60000, None)):
+            with self.subTest(delta=delta), patch.object(connector.time, 'time', return_value=local/1000):
+                fake = FakeGoldCFD()
+                fake.tick.time_msc = local-delta
+                diagnostic = connector.quote_diagnostics(fake.tick)
+                self.assertEqual(diagnostic['raw_time_delta_ms'], delta)
+                self.assertEqual(diagnostic['possible_offset_hours'], expected)
 
     def test_missing_timestamp_allows_only_contract_calibration_with_market_warning(self):
         fake = FakeGoldCFD()
