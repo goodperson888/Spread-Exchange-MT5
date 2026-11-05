@@ -98,6 +98,22 @@ class PumpTests(unittest.TestCase):
     def test_stopped_old_connection_cannot_publish(self):
         c,b,s,t,p,w,pump=self.fixture();pump.close();pump.collect();p.assert_not_called()
 
+    def test_strategy_sees_latest_before_slow_history_publication(self):
+        c,b,s,t,p,w,pump=self.fixture()
+        publication_started=threading.Event();release=threading.Event()
+        def blocked_publication(q):
+            publication_started.set();release.wait(2)
+        p.side_effect=blocked_publication
+        worker=threading.Thread(target=pump.collect);worker.start()
+        try:
+            self.assertTrue(publication_started.wait(1))
+            self.assertTrue(w.is_set())
+            self.assertEqual(pump.read()[1],1)
+            self.assertEqual(pump.read()[0]['binance']['bid'],s.quote.return_value['bid'])
+            self.assertTrue(worker.is_alive())
+        finally:
+            release.set();worker.join(1)
+
     def test_server_clock_offset_does_not_make_fresh_native_quote_invalid(self):
         c,b,s,t,p,w,pump=self.fixture();b.quote.return_value=None
         t.call.return_value={'quote':{'bid':4300,'ask':4300.2,'time_ms':milliseconds()-15000}}

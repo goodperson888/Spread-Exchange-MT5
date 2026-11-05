@@ -42,6 +42,10 @@
   const quoteBuffer=window.GoldPairQuotes?new window.GoldPairQuotes.QuoteBuffer(30000):null;
   function windowStart(){return Date.now()-Math.max(1,Number(el('chart-window').value)||1440)*60000;}
   function paintSoon(){
+    if(el('view-trading')?.hidden) {
+      if(el('view-records')?.hidden===false)renderIncome(latestLive||last?.quote);
+      return;
+    }
     if(document.hidden||paintPending)return;paintPending=true;
     const run=()=>{
       paintPending=false;paintTimer=null;paintFrame=null;
@@ -116,7 +120,10 @@
     }
   }
   async function action(work, activeId, label) {
-    if(busy)return; actionError=''; lock(true,activeId,label);
+    const urgent=activeId==='trading-close'||activeId==='trading-toggle'&&last?.state?.enabled;
+    if(busy||window.goldPairUiBusy&&!urgent)return; actionError='';
+    lock(true,activeId,label);
+    if(typeof setUiBusy==='function')setUiBusy(1);else window.goldPairUiBusy=true;
     text('trading-result', label||'正在处理，请稍候…');
     const adoptionAction=activeId?.startsWith('adoption-');
     if(adoptionAction)text('adoption-feedback',label||'正在处理…');
@@ -127,7 +134,10 @@
       actionError='本次操作未完成：'+error.message; text('trading-result',actionError,true);
       if(adoptionAction)text('adoption-feedback',actionError,true);
     }
-    finally { lock(false,activeId); }
+    finally {
+      if(typeof setUiBusy==='function')setUiBusy(-1);else window.goldPairUiBusy=false;
+      lock(false,activeId);updateWorkflow();
+    }
   }
   function groupRows(groups, orders) {
     if(!groups?.length) return '<p class="note">暂无本策略持仓或交易记录。</p>';
@@ -173,6 +183,11 @@
       el('quote-summary').textContent=`币安 Bid/Ask ${n(q.binance.bid)} / ${n(q.binance.ask)}（原始 ${date(q.binance.source_time_ms||q.binance.time_ms)}） · MT5 Bid/Ask ${n(q.mt5.bid)} / ${n(q.mt5.ask)}（原始 ${date(q.mt5.source_time_ms||q.mt5.time_ms)}） · 入场（卖币安 Bid − 买 MT5 Ask） ${n(q.entry)} · 退出（买回币安 Ask − 卖 MT5 Bid） ${n(q.exit)} USD/盎司`;
       el('bid').value=q.binance.bid;el('binance-ask').value=q.binance.ask;
       el('mt5-bid').value=q.mt5.bid;el('mt5-ask').value=q.mt5.ask;
+      text('live-entry',n(q.entry));text('live-exit',n(q.exit));
+      const threshold=last?.strategy_runtime?.entry_spread_usd;
+      const valid=q.valid!==false&&Date.now()-Math.min(q.mt5.observed_ms||q.mt5.time_ms,q.binance.observed_ms||q.binance.time_ms)<=Number(el('max-age').value||3000);
+      text('live-distance',Number.isFinite(threshold)?n(Math.max(0,threshold-q.entry))+' USD':'—');
+      text('live-opportunity',!valid?'报价过期或不同步，禁止开仓':!Number.isFinite(threshold)?'连接后显示有效阈值':q.entry>=threshold?'达到基础阈值，仍须通过执行保护':'等待价差达到基础阈值');
     }
   }
   function updateEntryLabel() {
@@ -181,6 +196,25 @@
     effective.textContent=value!==undefined&&value!==''
       ? `当前生效：${n(Number(value))}`+(pending!==''&&Number(pending)===Number(value)?'（已有交易组不变）':` · 待应用：${pending||'未填写'}`)
       : '当前生效：未连接';
+  }
+  function updateWorkflow() {
+    const state=last?.state||{}, connected=Boolean(last?.connected), reconciled=last?.capabilities?.reconciled===true;
+    const pending=connected&&(last?.config_pending===true || typeof dirtyFields!=='undefined'&&dirtyFields.size>0);
+    if(!connected)el('trading-mode').textContent=(el('exec-mode').value==='live'?'实盘配置':'纸面配置')+' · 未连接';
+    const status=el('workflow-status');
+    if(status)status.textContent=!connected?'下一步：连接双边行情（首次使用先完成连接设置）':pending?'参数有变更：当前引擎继续使用连接时配置；暂停新开仓后重新连接生效。':!reconciled?'下一步：持仓对账，通过后可启动自动开仓。':state.enabled?'自动开仓运行中 · 暂停只停止新开仓，已有仓位继续管理。':'准备就绪 · 可启动自动开仓';
+    if(!busy) {
+      el('trading-connect').disabled=Boolean(state.enabled||window.goldPairUiBusy);
+      el('trading-toggle').disabled=!state.enabled&&(!connected||!reconciled||Boolean(state.recovery)||pending||window.goldPairUiBusy);
+      el('trading-reconcile').disabled=!connected||window.goldPairUiBusy;
+      el('trading-close').disabled=!connected||!(state.groups||[]).some(g=>g.status!=='closed');
+      el('apply-entry').disabled=!connected;
+    }
+    const pendingNode=el('config-pending');
+    if(pendingNode){pendingNode.hidden=!pending;pendingNode.textContent='已保存 ≠ 已生效。手数、止盈和其他参数须重新连接；仅开仓阈值可单独点击「应用」。已有组保留原规则。';}
+    const groups=(state.groups||[]).filter(g=>g.status!=='closed');
+    text('live-groups',groups.length+' 组');
+    text('live-exposure',groups.length?'MT5 '+n(groups.reduce((sum,g)=>sum+Number(g.lots||0),0))+' 手（各组开仓量）':connected?'当前无本策略持仓':'等待连接与对账');
   }
   function render(result) {
     last=result;
@@ -210,12 +244,13 @@
       const labels={ready:'预检通过',checking:'预检中',failed:'预检失败',expired:'预检已过期',waiting:'等待接近阈值'};
       text('entry-preflight',`${labels[pf.state]||pf.state}：${pf.message||'—'}${pf.age_ms!=null?' · '+pf.age_ms+' ms前':''}`,pf.state==='failed');
     } else {
-      text('entry-preflight','实盘连接后，接近阈值时自动预检币安时间、账户和测试订单。');
+      text('entry-preflight','接近阈值时自动预检；通过预检不代表保证成交。');
     }
     el('trading-mode').textContent=result.connected ? `${mode} 已连接${positionLabel?' · '+positionLabel:''}` : '未连接';
     el('trading-mode').classList.toggle('warning', Boolean(state.alarm||result.last_error||(!reconciled&&result.connected)));
+    el('trading-mode').classList.toggle('neutral', !result.connected);
     const connectButton=el('trading-connect');
-    connectButton.textContent=result.connected?'已连接双边行情（重新连接）':'连接双边行情';
+    connectButton.textContent=result.connected?'保存并重新连接':'保存并连接双边行情';
     connectButton.classList.toggle('primary',!result.connected);
     streamLabel();
     const oldManaging=(state.groups||[]).some(g=>g.imported&&g.status!=='closed'&&g.management_enabled);
@@ -241,7 +276,7 @@
       : protectionPending ? '保护性处理完成前不能启动自动开仓，程序会继续处理已有敞口。'
       : result.capabilities?.live_orders ? '实盘通道已连接、持仓已对账；启动时仍会检查配置和策略状态。'
       : '纸面模式不会发送真实订单。'));
-    text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${message}\n${next}\n${result.plan?`每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: '请保存参数后连接。'}`,Boolean(alarm||actionError));
+    text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${message}\n${next}${result.plan?`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError));
     const auto=result.auto_values||{}, details=[];
     if(auto.fx?.value) {
       if(loaded && el('auto-fx').checked && !dirtyFields.has('usdt-fx')) el('usdt-fx').value=Number(auto.fx.value).toFixed(6);
@@ -274,9 +309,19 @@
     showQuote(q);
     if(result.plan) {
       const p=result.plan, notional=q ? p.qty*q.binance.bid : null;
-      text('plan-result',`MT5 ${el('mt5-symbol').value}：${n(p.lots)} 手 ↔ ${el('symbol').value}：${n(p.qty)} XAU\n黄金数量 ${n(p.qty)} 盎司；${notional===null?'等待行情':'当前名义金额约 '+Number(notional).toFixed(2)+' USDT（不是保证金）'}\n已按 MT5 与币安实际数量规则校验。`);
-      el('plan-state').textContent='双边规则已校验';el('plan-state').classList.remove('warning');
+      text('runtime-plan',`引擎当前每组：MT5 ${n(p.lots)} 手 ↔ 币安 ${n(p.qty)} XAU（${result.capabilities?.mode==='live'?'实盘':'纸面'}）`);
+      if(typeof previewPlan==='function') {
+        const same=Number(el('lots').value)===Number(p.lots)&&!result.config_pending&&
+          (!result.strategy_runtime?.mt5_symbol||el('mt5-symbol').value===result.strategy_runtime.mt5_symbol)&&
+          (!result.strategy_runtime?.symbol||el('symbol').value.toUpperCase()===result.strategy_runtime.symbol)&&
+          ![...dirtyFields].some(id=>id==='lots'||sectionFields.mt5.has(id)||id==='symbol');
+        if(same)showPlan({...p,mt5_lots:p.lots,binance_qty_xau:p.qty,gold_qty_oz:p.qty,binance_notional_usdt:notional},true);
+        else previewPlan();
+      }
+    } else {
+      text('runtime-plan','引擎尚未连接；上方为当前输入预览。');
     }
+    updateWorkflow();
     renderIncome(q);
     el('orders').innerHTML=orderRows(state.orders||[],state.groups||[]);
     renderEvents(result.events||[]);
@@ -371,7 +416,7 @@
       take_contraction_usd:el('adoption-managed-take').value,min_net_profit_usd:el('adoption-managed-profit').value}));
   },'adoption-manage','正在切换旧仓管理…');
   async function plot() {
-    if(document.hidden)return;
+    if(document.hidden||el('view-trading')?.hidden)return;
     const generation=++plotGeneration;
     plotController?.abort();
     const controller=new AbortController();plotController=controller;
@@ -429,15 +474,20 @@
     statusBusy=true;
     try {
       const r=await request('/api/trading/status');
-      if(document.hidden||window.goldPairUiBusy) return;
+      if(document.hidden||(window.goldPairUiBusy&&!busy)) return;
       render(r);
       // Keep the last chart visible when disconnected, but do not keep
       // re-fetching it as if live monitoring were still running.
       if(withChart && (!chart || (!streamReady && r.connected))) await plot();
     } finally { statusBusy=false; }
   }
-  async function connect() {
+  async function saveBeforeTrading() {
+    const before=typeof revision==='number'?revision:null;
     await saveConfig();
+    if(before!==null&&before!==revision)throw Error('保存期间参数又有修改，请核对当前输入后再次操作。');
+  }
+  async function connect() {
+    await saveBeforeTrading();
     const r=await request('/api/trading/connect',{api_key:el('trading-api-key').value.trim(),api_secret:el('trading-api-secret').value.trim(),mt5_mcp_token:el('mt5-mcp-token').value.trim()});
     render(r);await plot();
   }
@@ -449,13 +499,14 @@
     if(state?.enabled) {
       render(await request('/api/trading/pause',{}));
     } else {
-      await saveConfig();
+      await saveBeforeTrading();
       render(await request('/api/trading/start',{}));
       await plot();
     }
   },'trading-toggle','正在切换自动开仓状态…');
   el('entry').addEventListener('input',updateEntryLabel);
   el('apply-entry').onclick=()=>action(async()=>{
+    if(typeof saveQueue!=='undefined')await saveQueue.catch(()=>{});
     render(await request('/api/trading/apply-entry',{entry_spread_usd:el('entry').value}));
     paintSoon();
   },'apply-entry','正在应用开仓阈值…');
@@ -493,6 +544,14 @@
   window.addEventListener('pageshow',()=>{if(!document.hidden)startStream();});
   window.addEventListener('beforeunload',suspendPage);
   window.addEventListener('resize',()=>chart?.resize());
+  window.addEventListener('gold-workspace-changed',()=>{
+    chart?.resize();paintSoon();
+    if(!chart&&!el('view-trading')?.hidden)plot().catch(error=>text('trading-result',error.message,true));
+  });
+  window.addEventListener('gold-form-changed',updateWorkflow);
+  window.addEventListener('gold-config-saved',()=>status(false).catch(()=>{}));
+  window.addEventListener('gold-config-ready',updateWorkflow);
+  window.addEventListener('gold-busy-changed',updateWorkflow);
   setTimeout(()=>status().then(startStream).catch(error=>text('trading-result',error.message,true)),400);
   timer=setInterval(()=>{if(!document.hidden&&!busy&&!window.goldPairUiBusy)status().catch(error=>text('trading-result',error.message,true));},3000);
 })();

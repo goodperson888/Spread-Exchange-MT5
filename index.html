@@ -3,9 +3,86 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>黄金双边自动交易 · 本机</title><link rel="stylesheet" href="style.css"></head>
 <body><main>
-<header><div><p class="eyebrow">XAUUSDT × MT5 · LOCAL</p><h1>黄金双边自动交易</h1><p class="muted">本机连接与配置 · 可选 EA 实时行情推送 · 不开放局域网</p></div><span id="connection" class="badge">连接本机应用…</span></header>
-<section class="notice"><strong>先纸面、再实盘</strong><span>Mac 可通过本机 MT5 MCP 读取真实行情，但只做纸面成交；实盘须在 Windows 的已登录 MT5 终端运行。进入实盘前，必须连接、对账并由用户点击启动自动开仓。</span></section>
-<section class="panel" aria-labelledby="setup-heading">
+<header><div><p class="eyebrow">XAUUSDT × MT5 · LOCAL</p><h1>黄金双边自动交易</h1><p class="muted">卖币安永续 · 买 MT5 黄金 · 本机执行</p></div><span id="connection" class="badge">连接本机应用…</span></header>
+<nav class="workspace-tabs" role="tablist" aria-label="交易工作区">
+<button id="tab-trading" type="button" role="tab" data-view="trading" aria-controls="view-trading" aria-selected="true">交易台</button>
+<button id="tab-settings" type="button" role="tab" data-view="settings" aria-controls="view-settings" aria-selected="false" tabindex="-1">连接设置</button>
+<button id="tab-records" type="button" role="tab" data-view="records" aria-controls="view-records" aria-selected="false" tabindex="-1">记录与持仓</button>
+</nav>
+<div class="workspace-status"><div><p id="workflow-status" role="status">首次使用：到「连接设置」检查两边账户，再连接行情与对账。</p><p id="config-status" class="note" role="status" aria-live="polite">正在读取配置…</p></div><button type="button" data-open-view="settings">检查连接配置</button></div>
+<div id="view-trading" class="workspace-view" role="tabpanel" aria-labelledby="tab-trading"><div id="market-overview" class="market-overview" aria-label="实时交易摘要">
+<div><span>入场价差</span><strong id="live-entry">—</strong><small>卖币安 Bid − 买 MT5 Ask</small></div>
+<div><span>退出价差</span><strong id="live-exit">—</strong><small>买回币安 Ask − 卖 MT5 Bid</small></div>
+<div><span>距基础开仓阈值</span><strong id="live-distance">—</strong><small id="live-opportunity">等待双边行情</small></div>
+<div><span>当前持仓</span><strong id="live-groups">0 组</strong><small id="live-exposure">等待连接与对账</small></div>
+</div><div class="workspace-columns"><section class="panel" aria-labelledby="plan-heading">
+<div class="heading"><div><p class="eyebrow">每组配置</p><h2 id="plan-heading">每组数量与配平</h2></div><span id="plan-state" class="badge neutral">等待 MT5 规格</span></div>
+<div class="grid">
+<label>每组 MT5 手数<input id="lots" type="number" step="any" value="0.02"></label>
+</div><details class="quote-details"><summary>查看双边盘口报价</summary><div class="grid"><label>参考币安 Bid（USDT）<input id="bid" type="number" step="any" placeholder="仅用于估算名义金额" readonly></label>
+<label>币安 Ask（USDT）<input id="binance-ask" type="number" step="any" placeholder="纸面撮合用" readonly></label>
+<label>MT5 Bid（USD）<input id="mt5-bid" type="number" step="any" placeholder="纸面撮合用" readonly></label>
+<label>MT5 Ask（USD）<input id="mt5-ask" type="number" step="any" placeholder="纸面撮合用" readonly></label>
+</div></details>
+<details><summary>高级执行保护参数</summary><div class="grid">
+<label>最多持仓组数（含网格补仓）<input id="max-groups" type="number" value="1" min="1" max="50"></label>
+<label>报价最大年龄（毫秒）<input id="max-age" type="number" value="3000"></label>
+<label>双边报价最大时差（毫秒）<input id="max-clock-skew" type="number" value="2000"></label>
+<label>最大单边敞口时间（毫秒）<input id="max-unhedged" type="number" value="1500"></label>
+<label>最大滑点（USD/盎司）<input id="slippage" type="number" step="0.1" value="0.5"></label>
+<label>保护性平仓最大滑点（USD/盎司）<input id="unwind-slippage" type="number" step="0.1" value="2" min="0.01"></label>
+<label>签名请求有效窗口（毫秒）<input id="recv-window" type="number" value="5000"></label>
+</div><p class="note">普通最大滑点用于正常开平仓；保护性平仓只在一边成交、另一边拒单或超时时启用，目标是尽快消除单边敞口，仍会记录实际成交价和偏移。签名请求窗口用于币安签名接口，不是行情刷新间隔。币安最优 Bid/Ask 优先使用 WebSocket，断开时回退 REST；MT5 优先采用 EA 推送；EA 未接入或报价过期时使用持续终端会话轮询 tick。报价年龄、双边时钟偏差和单边敞口时间都会在执行前检查。</p></details>
+<p class="note compact-help">修改立即预览；重新连接后用于新开仓。</p><div id="plan-result" class="result" role="status" aria-live="polite">检查 MT5 成功后会自动计算；连接币安后还会校验币安数量步长和最低名义金额。</div>
+<div id="runtime-plan" class="runtime-plan" role="status">引擎尚未连接。</div></section>
+<section class="panel" aria-labelledby="execution-heading">
+<div class="heading"><div><p class="eyebrow">自动执行</p><h2 id="execution-heading">策略与自动执行</h2></div><span id="trading-mode" class="badge neutral">未连接</span></div>
+<div class="actions trade-actions"><button id="trading-connect" class="primary">连接双边行情</button><button id="trading-reconcile">持仓对账</button><button id="trading-toggle" class="primary">启动自动开仓</button><button id="trading-close" class="danger">平掉本策略全部仓位</button></div><div id="trading-result" class="result" role="status">未连接。实盘凭据从本机配置读取；启动前请确认 API Key 没有提币权限。</div><p id="config-pending" class="inline-warning" role="status" hidden></p><details class="help-details"><summary>执行与参数说明</summary><p class="note">固定方向：卖币安永续、买 MT5 黄金。入场价差 = 卖币安 Bid − 买 MT5 Ask；退出价差 = 买回币安 Ask − 卖出 MT5 Bid。先连通和对账，才能启动自动开仓。暂停只停止新开仓；已有交易组会继续按已锁定的规则管理。网格补仓会按“开仓阈值 + 间距 × 次数”逐级增加配对交易组，并受总手数和持仓组数上限共同限制。整篮子模式会等价差条件和整篮子净收益条件同时满足后一次性平仓。</p></details>
+<div class="grid">
+<div class="threshold-field"><label>自动开仓阈值（USD/盎司）<input id="entry" type="number" step="0.1" value="5" min="0"><span id="entry-effective" class="muted">当前生效：未连接</span></label><button id="apply-entry" type="button">应用开仓阈值</button></div>
+<label>重复开仓间隔（秒）<input id="cooldown" type="number" value="60" min="1"></label>
+<label>策略总手数上限<input id="max-total" type="number" value="0.1" min="0.01" step="0.01"></label>
+<label class="check"><input id="grid-enabled" type="checkbox"> 启用网格补仓</label>
+<label id="grid-spacing-field">网格补仓间距（USD/盎司）<input id="grid-spacing" type="number" value="2" min="0.1" step="0.1"></label>
+<label id="grid-adds-field">最多网格补仓次数<input id="grid-adds" type="number" value="0" min="0" max="49" step="1"></label>
+<label>平仓方式<select id="exit-mode"><option value="group">逐组平仓</option><option value="basket">整篮子平仓</option></select></label>
+<label>止盈规则<select id="target-mode"><option value="contraction">价差收窄幅度</option><option value="absolute">目标退出价差</option></select></label>
+<label id="contraction-field">收窄幅度（USD/盎司）<input id="take" type="number" step="0.1" value="2"></label>
+<label id="absolute-field">目标退出价差（USD/盎司）<input id="absolute-exit" type="number" value="0" step="0.1"></label>
+<label class="check"><input id="require-net" type="checkbox" checked> 平仓要求达到最低净收益</label>
+<label id="min-net-field"><span id="min-net-label">最低净收益（USD）</span><input id="min-net" type="number" value="0" min="0" step="0.01"></label>
+</div>
+<p id="entry-preflight" class="note">接近阈值时自动预检；开仓阈值可单独应用，其他参数重新连接生效。</p><details><summary>高级连接与执行参数</summary><div class="grid">
+<label>兼容轮询间隔（毫秒）<input id="poll-ms" type="number" value="250" min="250" max="5000"></label>
+<label>平仓重试次数<input id="close-retries" type="number" value="3" min="1" max="5"></label>
+<label>MT5 策略识别码（Magic）<input id="magic" type="number" value="9121701" min="1" max="2147483647"></label>
+</div><details class="help-details"><summary>执行与参数说明</summary><p class="note">新报价会唤醒策略；此间隔只控制兼容轮询和无新报价时的定期检查，不限制 EA 推送或图表更新。订单仍串行执行，实际成交受平台撮合、网络和滑点影响。图表仅限制到秒级缩放，不会改变监控、开平仓或成交判断频率。Magic 仅用于识别本策略下的 MT5 订单与持仓，防止程序误处理其他手工单或 EA 订单。正常使用保持默认值即可。</p></details></details>
+<details><summary>净收益、止损与费用设置</summary><div class="grid">
+<label class="check"><input id="group-loss-on" type="checkbox"> 启用单组亏损退出</label>
+<label id="group-loss-field">单组最大亏损（USD）<input id="group-loss" type="number" value="50" min="0.01" step="0.01"></label>
+<label class="check"><input id="total-loss-on" type="checkbox"> 启用策略总亏损退出</label>
+<label id="total-loss-field">策略总最大亏损（USD）<input id="total-loss" type="number" value="150" min="0.01" step="0.01"></label>
+<label>最长持仓（分钟，0=关闭）<input id="max-hold" type="number" value="0" min="0"></label>
+<label class="check"><input id="auto-fx" type="checkbox" checked> 自动读取 USDT/USD 资产指数</label>
+<label>USDT/USD 换算<input id="usdt-fx" type="number" value="1" min="0.5" max="1.5" step="0.000001"></label>
+<label class="check" id="auto-binance-fee-field"><input id="auto-binance-fee" type="checkbox" checked> 实盘连接后自动读取币安费率</label>
+<label>币安吃单费率（%/单边）<input id="binance-fee" type="number" value="0.05" min="0" step="0.0001"></label>
+<label>MT5 佣金预估（USD/手/单边）<input id="mt5-fee" type="number" value="0" min="0" step="0.01"></label>
+<label id="mt5-swap-field">MT5 纸面 Swap/持仓费估算（USD/手/日，可为负）<input id="mt5-swap" type="number" value="0" step="0.01"></label>
+<label id="paper-funding-field">币安纸面资金费估算（%/日）<input id="paper-funding" type="number" value="0" step="0.001"></label>
+</div><p id="cost-source" class="note">纸面 Swap/资金费只是回测估算，不是下单手续费；MT5 佣金另行填写。实盘模式会隐藏纸面估算，使用 MT5 实际 Swap、成交佣金和币安实际资金费。</p></details>
+
+
+<details class="risk-details"><summary>风控与异常处理</summary><p class="note">系统会在开仓前检查报价年龄、双边时差、最大滑点、单边敞口时间、账户权限、保证金、数量步长、持仓模式和持仓对账。交易组数、总手数、网格次数、冷却时间、最低净收益、单组/总亏损和最长持仓也会限制策略。</p><p class="note">任一边部分成交、拒单、超时或回报不确定时，系统暂停新开仓，查询平台状态并按已成交数量处理，不盲目重发；行情或交易通道异常会自动停开仓。页面的“自动执行”状态、交易结果、订单流水和事件日志会显示告警与处理结果。浏览器关闭后不会发送外部通知。</p></details>
+</section>
+</div><section class="panel" aria-labelledby="chart-heading">
+<div class="heading"><div><p class="eyebrow">行情监控</p><h2 id="chart-heading">实时价差</h2><details class="help-details"><summary>价差计算与历史记录说明</summary><p class="muted">入场线：卖币安 Bid、买 MT5 Ask；退出线：买回币安 Ask、卖出 MT5 Bid。已完成分钟归档点不会被后续采样改写，最右侧当前分钟和实时点会继续增长；缩放最低到 1 秒；EA 接入后由新报价唤醒策略，订单串行执行，图表长连接推送，按浏览器绘制帧更新。历史稀疏展示，最近一分钟保留逐报价曲线。</p></details></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
+<p id="quote-latency" class="note">等待行情 · 连接后显示报价年龄与传输方式。</p>
+<p id="quote-summary" class="state">等待双边行情。</p><span id="chart-live-status" class="badge neutral">未连接 · 图表保留历史</span>
+<div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>
+<div class="chart-wrap"><div id="spread-chart" class="chart" role="img" aria-label="入场与退出可成交价差历史折线图"></div><p id="chart-empty" class="chart-empty">连接后开始积累可成交价差历史。</p></div>
+<p id="chart-coverage" class="note">本机高频记录保留 24 小时，更早数据按分钟归档并保留 30 天；历史保存在本机数据目录，清理浏览器缓存不会删除。</p>
+</section></div><div id="view-settings" class="workspace-view" role="tabpanel" aria-labelledby="tab-settings" hidden><p class="notice">检查连接不会下单。Mac 仅支持 MCP 纸面验证；实盘须在 Windows 原生 MT5 运行。</p><section class="panel" aria-labelledby="setup-heading">
 <div class="heading"><div><p class="eyebrow">01 · MT5 适配器</p><h2 id="setup-heading">选择验证方式，然后检查</h2></div><button id="check-mt5" class="primary" disabled>检查 MT5 连接</button></div>
 <p class="note">Mac 使用本机 MT5 MCP 真实行情（只读）；Windows 实盘使用原生终端。原生模式使用已登录的 MT5，不接收 MT5 密码。</p>
 <div class="grid">
@@ -45,81 +122,14 @@
 <label>API Key（本机保存）<span class="secret-input"><input id="trading-api-key" type="password" autocomplete="off" placeholder="输入后自动保存"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-key" aria-controls="trading-api-key" aria-label="显示 API Key" aria-pressed="false" title="显示 API Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 <label>Secret Key（本机保存）<span class="secret-input"><input id="trading-api-secret" type="password" autocomplete="new-password" placeholder="输入后自动保存"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-secret" aria-controls="trading-api-secret" aria-label="显示 Secret Key" aria-pressed="false" title="显示 Secret Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 </div>
-<p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。网络受限时可填写 HTTP/Mixed 代理，REST、WebSocket 与实盘请求会统一使用；地址会自动保存，请勿在其中填写账号密码。出口 IP 只代表检测当时结果；代理节点、家庭公网 IP 或代理分流规则变化后需重新检测，并以“检查币安连接”的白名单结果为准。实盘会自动识别单向或双向持仓；本策略永续侧始终使用 SHORT 持仓方向，并检查账户交易权限和费率。检查不会下单。API Key 和 Secret 会保存到本机配置，刷新页面后自动恢复。</p>
+<details class="help-details"><summary>行情、代理与 API 权限说明</summary><p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。网络受限时可填写 HTTP/Mixed 代理，REST、WebSocket 与实盘请求会统一使用；地址会自动保存，请勿在其中填写账号密码。出口 IP 只代表检测当时结果；代理节点、家庭公网 IP 或代理分流规则变化后需重新检测，并以“检查币安连接”的白名单结果为准。实盘会自动识别单向或双向持仓；本策略永续侧始终使用 SHORT 持仓方向，并检查账户交易权限和费率。检查不会下单。API Key 和 Secret 会保存到本机配置，刷新页面后自动恢复。</p></details>
 <div id="binance-result" class="result" role="status" aria-live="polite">尚未检查币安连接。</div>
 <div class="actions"><button id="save-config" type="button" disabled>保存连接与策略配置</button><button id="clear-credentials" type="button" disabled>清除已保存凭据</button></div>
-<p id="config-status" class="note" role="status" aria-live="polite">正在读取配置…</p>
+
 </section>
-<section class="panel" aria-labelledby="plan-heading">
-<div class="heading"><div><p class="eyebrow">03 · 数量与配平</p><h2 id="plan-heading">按 MT5 实际规格自动计算</h2></div><span id="plan-state" class="badge neutral">等待 MT5 规格</span></div>
-<div class="grid">
-<label>每组 MT5 手数<input id="lots" type="number" step="any" value="0.02"></label>
-<label>参考币安 Bid（USDT）<input id="bid" type="number" step="any" placeholder="仅用于估算名义金额" readonly></label>
-<label>币安 Ask（USDT）<input id="binance-ask" type="number" step="any" placeholder="纸面撮合用" readonly></label>
-<label>MT5 Bid（USDT）<input id="mt5-bid" type="number" step="any" placeholder="纸面撮合用" readonly></label>
-<label>MT5 Ask（USDT）<input id="mt5-ask" type="number" step="any" placeholder="纸面撮合用" readonly></label>
-</div>
-<details><summary>高级执行保护参数</summary><div class="grid">
-<label>最多持仓组数（含网格补仓）<input id="max-groups" type="number" value="1" min="1" max="50"></label>
-<label>报价最大年龄（毫秒）<input id="max-age" type="number" value="3000"></label>
-<label>双边报价最大时差（毫秒）<input id="max-clock-skew" type="number" value="2000"></label>
-<label>最大单边敞口时间（毫秒）<input id="max-unhedged" type="number" value="1500"></label>
-<label>最大滑点（USD/盎司）<input id="slippage" type="number" step="0.1" value="0.5"></label>
-<label>保护性平仓最大滑点（USD/盎司）<input id="unwind-slippage" type="number" step="0.1" value="2" min="0.01"></label>
-<label>签名请求有效窗口（毫秒）<input id="recv-window" type="number" value="5000"></label>
-</div><p class="note">普通最大滑点用于正常开平仓；保护性平仓只在一边成交、另一边拒单或超时时启用，目标是尽快消除单边敞口，仍会记录实际成交价和偏移。签名请求窗口用于币安签名接口，不是行情刷新间隔。币安最优 Bid/Ask 优先使用 WebSocket，断开时回退 REST；MT5 优先采用 EA 推送；EA 未接入或报价过期时使用持续终端会话轮询 tick。报价年龄、双边时钟偏差和单边敞口时间都会在执行前检查。</p></details>
-<div class="actions" id="legacy-paper-actions"><button id="paper-toggle" disabled>启动纸面引擎</button><button id="paper-step" disabled>推进一次纸面撮合</button><button id="paper-reset" disabled>重置纸面持仓</button></div>
-<div id="plan-result" class="result" role="status" aria-live="polite">检查 MT5 成功后会自动计算；连接币安后还会校验币安数量步长和最低名义金额。</div>
-</section>
+<details class="panel" id="legacy-tools"><summary>旧版手动纸面工具（仅用于复核）</summary><div class="actions" id="legacy-paper-actions"><button id="paper-toggle" disabled>启动纸面引擎</button><button id="paper-step" disabled>推进一次纸面撮合</button><button id="paper-reset" disabled>重置纸面持仓</button></div>
 <section class="panel" id="legacy-paper-panel"><div class="heading"><h2>旧版纸面验证状态</h2></div><p id="state" class="state">正在读取本机服务状态…</p><p class="note">保留旧流程用于手动复核。自动执行请使用下方的持续行情与配对执行区；程序重启后必须重新连接并对账。</p></section>
-<section class="panel" aria-labelledby="execution-heading">
-<div class="heading"><div><p class="eyebrow">04 · 自动执行</p><h2 id="execution-heading">持续行情、策略与配对执行</h2></div><span id="trading-mode" class="badge">未连接</span></div>
-<p class="note">固定方向：卖币安永续、买 MT5 黄金。入场价差 = 卖币安 Bid − 买 MT5 Ask；退出价差 = 买回币安 Ask − 卖出 MT5 Bid。先连通和对账，才能启动自动开仓。暂停只停止新开仓；已有交易组会继续按已锁定的规则管理。网格补仓会按“开仓阈值 + 间距 × 次数”逐级增加配对交易组，并受总手数和持仓组数上限共同限制。整篮子模式会等价差条件和整篮子净收益条件同时满足后一次性平仓。</p>
-<div class="grid">
-<div><label>自动开仓阈值（USD/盎司）<input id="entry" type="number" step="0.1" value="5" min="0"><span id="entry-effective" class="muted">当前生效：未连接</span></label><button id="apply-entry" type="button">应用开仓阈值</button><p id="entry-preflight" class="note">实盘连接后，接近阈值时自动预检币安时间、账户和测试订单。</p><p class="note">修改后点击应用，无需重连；仅影响后续开仓判断，已有组的退出规则不变。</p></div>
-<label>重复开仓间隔（秒）<input id="cooldown" type="number" value="60" min="1"></label>
-<label>策略总手数上限<input id="max-total" type="number" value="0.1" min="0.01" step="0.01"></label>
-<label class="check"><input id="grid-enabled" type="checkbox"> 启用网格补仓</label>
-<label id="grid-spacing-field">网格补仓间距（USD/盎司）<input id="grid-spacing" type="number" value="2" min="0.1" step="0.1"></label>
-<label id="grid-adds-field">最多网格补仓次数<input id="grid-adds" type="number" value="0" min="0" max="49" step="1"></label>
-<label>平仓方式<select id="exit-mode"><option value="group">逐组平仓</option><option value="basket">整篮子平仓</option></select></label>
-<label>止盈规则<select id="target-mode"><option value="contraction">价差收窄幅度</option><option value="absolute">目标退出价差</option></select></label>
-<label id="contraction-field">收窄幅度（USD/盎司）<input id="take" type="number" step="0.1" value="2"></label>
-<label id="absolute-field">目标退出价差（USD/盎司）<input id="absolute-exit" type="number" value="0" step="0.1"></label>
-<label class="check"><input id="require-net" type="checkbox" checked> 平仓要求达到最低净收益</label>
-<label id="min-net-field"><span id="min-net-label">最低净收益（USD）</span><input id="min-net" type="number" value="0" min="0" step="0.01"></label>
-</div>
-<details><summary>高级连接与执行参数</summary><div class="grid">
-<label>兼容轮询间隔（毫秒）<input id="poll-ms" type="number" value="250" min="250" max="5000"></label>
-<label>平仓重试次数<input id="close-retries" type="number" value="3" min="1" max="5"></label>
-<label>MT5 策略识别码（Magic）<input id="magic" type="number" value="9121701" min="1" max="2147483647"></label>
-</div><p class="note">新报价会唤醒策略；此间隔只控制兼容轮询和无新报价时的定期检查，不限制 EA 推送或图表更新。订单仍串行执行，实际成交受平台撮合、网络和滑点影响。图表仅限制到秒级缩放，不会改变监控、开平仓或成交判断频率。Magic 仅用于识别本策略下的 MT5 订单与持仓，防止程序误处理其他手工单或 EA 订单。正常使用保持默认值即可。</p></details>
-<details><summary>净收益、止损与费用设置</summary><div class="grid">
-<label class="check"><input id="group-loss-on" type="checkbox"> 启用单组亏损退出</label>
-<label id="group-loss-field">单组最大亏损（USD）<input id="group-loss" type="number" value="50" min="0.01" step="0.01"></label>
-<label class="check"><input id="total-loss-on" type="checkbox"> 启用策略总亏损退出</label>
-<label id="total-loss-field">策略总最大亏损（USD）<input id="total-loss" type="number" value="150" min="0.01" step="0.01"></label>
-<label>最长持仓（分钟，0=关闭）<input id="max-hold" type="number" value="0" min="0"></label>
-<label class="check"><input id="auto-fx" type="checkbox" checked> 自动读取 USDT/USD 资产指数</label>
-<label>USDT/USD 换算<input id="usdt-fx" type="number" value="1" min="0.5" max="1.5" step="0.000001"></label>
-<label class="check" id="auto-binance-fee-field"><input id="auto-binance-fee" type="checkbox" checked> 实盘连接后自动读取币安费率</label>
-<label>币安吃单费率（%/单边）<input id="binance-fee" type="number" value="0.05" min="0" step="0.0001"></label>
-<label>MT5 佣金预估（USD/手/单边）<input id="mt5-fee" type="number" value="0" min="0" step="0.01"></label>
-<label id="mt5-swap-field">MT5 纸面 Swap/持仓费估算（USD/手/日，可为负）<input id="mt5-swap" type="number" value="0" step="0.01"></label>
-<label id="paper-funding-field">币安纸面资金费估算（%/日）<input id="paper-funding" type="number" value="0" step="0.001"></label>
-</div><p id="cost-source" class="note">纸面 Swap/资金费只是回测估算，不是下单手续费；MT5 佣金另行填写。实盘模式会隐藏纸面估算，使用 MT5 实际 Swap、成交佣金和币安实际资金费。</p></details>
-<div class="actions"><button id="trading-connect" class="primary">连接双边行情</button><button id="trading-reconcile">持仓对账</button><button id="trading-toggle" class="primary">启动自动开仓</button><button id="trading-close">全部平仓</button></div>
-<div id="trading-result" class="result" role="status">未连接。实盘凭据从本机配置读取；启动前请确认 API Key 没有提币权限。</div>
-<details class="risk-details"><summary>风控与异常处理</summary><p class="note">系统会在开仓前检查报价年龄、双边时差、最大滑点、单边敞口时间、账户权限、保证金、数量步长、持仓模式和持仓对账。交易组数、总手数、网格次数、冷却时间、最低净收益、单组/总亏损和最长持仓也会限制策略。</p><p class="note">任一边部分成交、拒单、超时或回报不确定时，系统暂停新开仓，查询平台状态并按已成交数量处理，不盲目重发；行情或交易通道异常会自动停开仓。页面的“自动执行”状态、交易结果、订单流水和事件日志会显示告警与处理结果。浏览器关闭后不会发送外部通知。</p></details>
-</section>
-<section class="panel" aria-labelledby="chart-heading">
-<div class="heading"><div><p class="eyebrow">05 · 实时与历史价差</p><h2 id="chart-heading">真实可成交方向监控</h2><p class="muted">入场线：卖币安 Bid、买 MT5 Ask；退出线：买回币安 Ask、卖出 MT5 Bid。已完成分钟归档点不会被后续采样改写，最右侧当前分钟和实时点会继续增长；缩放最低到 1 秒；EA 接入后由新报价唤醒策略，订单串行执行，图表长连接推送，按浏览器绘制帧更新。历史稀疏展示，最近一分钟保留逐报价曲线。</p></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
-<p id="quote-latency" class="note">行情到达即推送图表；绘制随浏览器帧率合并，不限制策略计算速度。实时性看“报价年龄”和“本机收到时间差”；原始时间差可能来自 MT5 经纪商服务器时区，不单独代表延迟。</p>
-<p id="quote-summary" class="state">等待双边行情。</p><span id="chart-live-status" class="badge neutral">未连接 · 图表保留历史</span>
-<div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>
-<div class="chart-wrap"><div id="spread-chart" class="chart" role="img" aria-label="入场与退出可成交价差历史折线图"></div><p id="chart-empty" class="chart-empty">连接后开始积累可成交价差历史。</p></div>
-<p id="chart-coverage" class="note">本机高频记录保留 24 小时，更早数据按分钟归档并保留 30 天；历史保存在本机数据目录，清理浏览器缓存不会删除。</p>
-<details><summary>平台当前持仓与币安挂单（只读）</summary><p class="note">点击“持仓对账”后更新，仅显示当前连接品种。纸面模式只核对本机模拟记录。外部仓位不自动加入策略，未接管仓位不由“全部平仓”处理。币安开仓均价可能合并多次成交，更新时间不是首次开仓时间；MT5 列出各持仓票据。历史开仓价差需双方成交配对及当时汇率，不能用当前报价倒推。接管预览还会检查 MT5 挂单。</p><div id="platform-positions" class="table-wrap">尚未读取实盘平台持仓。</div></details>
+</details></div><div id="view-records" class="workspace-view" role="tabpanel" aria-labelledby="tab-records" hidden><div class="panel"><h2>记录与持仓</h2><p class="note">收益、订单回报和平台对账集中查看；旧仓须单独接管后才由本策略管理。</p></div><div class="panel"><section class="records" aria-labelledby="group-records-heading"><div class="subheading"><div><p class="eyebrow">交易记录</p><h3 id="group-records-heading">交易组收益记录</h3></div><span class="note">实盘平仓后会用平台成交与费用记录复核</span></div><div id="pnl-stats" class="stats" aria-label="交易收益摘要"></div><p class="note">持仓中的净收益随实时行情推送更新；平仓后以币安成交手续费、资金费和 MT5 成交记录复核并固定。资金费按账户接口定时同步，可能比行情晚几十秒。</p><div id="groups" class="table-wrap"></div><h3>双边订单流水</h3><div id="orders" class="table-wrap"></div><details><summary>技术事件日志</summary><p class="note">显示最近 100 条，最新在上；可在下方滚动查看，短时间内连续重复的提示会合并。</p><div id="trade-events" class="events" tabindex="0" role="region" aria-label="技术事件日志，可滚动查看"></div></details></section><details open><summary>平台当前持仓与币安挂单（只读）</summary><p class="note">点击“持仓对账”后更新，仅显示当前连接品种。纸面模式只核对本机模拟记录。外部仓位不自动加入策略，未接管仓位不由“全部平仓”处理。币安开仓均价可能合并多次成交，更新时间不是首次开仓时间；MT5 列出各持仓票据。历史开仓价差需双方成交配对及当时汇率，不能用当前报价倒推。接管预览还会检查 MT5 挂单。</p><div id="platform-positions" class="table-wrap">尚未读取实盘平台持仓。</div></details>
 <details id="adoption-panel"><summary>已有持仓管理 · 配对接管</summary>
 <p id="adoption-feedback" class="result" role="status">先读取持仓，再选择票据并预览。</p>
 <p class="note">首次接管须没有未平策略组。仅支持币安空头＋MT5 多头：选择 MT5 完整票据，配平当前品种的全部币安空头。预览、确认只登记，不下单；确认后还需单独启动旧仓管理。接管篮子不补仓、不与新仓合并止盈，但占用策略总手数上限。</p>
@@ -146,6 +156,5 @@
 <p class="note">启动后可能立即触发真实平仓；此按钮不启动新开仓。修改退出条件需先暂停旧仓管理。暂停不会撤销已经发出的平仓指令。重启或重连后必须重新对账并手动恢复管理。</p>
 </div>
 </details>
-<section class="records" aria-labelledby="group-records-heading"><div class="subheading"><div><p class="eyebrow">06 · 收益与订单</p><h3 id="group-records-heading">交易组收益记录</h3></div><span class="note">实盘平仓后会用平台成交与费用记录复核</span></div><div id="pnl-stats" class="stats" aria-label="交易收益摘要"></div><p class="note">持仓中的净收益随实时行情推送更新；平仓后以币安成交手续费、资金费和 MT5 成交记录复核并固定。资金费按账户接口定时同步，可能比行情晚几十秒。</p><div id="groups" class="table-wrap"></div><h3>双边订单流水</h3><div id="orders" class="table-wrap"></div><details><summary>技术事件日志</summary><p class="note">显示最近 100 条，最新在上；可在下方滚动查看，短时间内连续重复的提示会合并。</p><div id="trade-events" class="events" tabindex="0" role="region" aria-label="技术事件日志，可滚动查看"></div></details></section>
-</section>
-</main><script src="echarts.min.js"></script><script src="app.js"></script><script src="quote-stream.js"></script><script src="trading-app.js"></script></body></html>
+</div></div>
+</main><script src="echarts.min.js"></script><script src="app.js"></script><script src="workspace.js"></script><script src="quote-stream.js"></script><script src="trading-app.js"></script></body></html>

@@ -15,9 +15,14 @@ const sectionFields = {
 };
 let credentialsDirty = false;
 let saveQueue = Promise.resolve();
-let revision = 0, busy = false, loaded = false, hasResult = false, planTimer, saveTimer, autoSaving=false, publicIpValue='';
+let revision = 0, busy = false, loaded = false, hasResult = false, planTimer, planGeneration=0, saveTimer, autoSaving=false, publicIpValue='';
 let pollBusy = false;
 window.goldPairUiBusy = false;
+let uiBusyCount=0;
+function setUiBusy(delta) {
+  uiBusyCount=Math.max(0,uiBusyCount+delta);window.goldPairUiBusy=uiBusyCount>0;
+  window.dispatchEvent(new Event('gold-busy-changed'));
+}
 const value = id => $(id).value.trim();
 const message = (id, text, error=false) => {
   $(id).textContent = text;
@@ -141,6 +146,7 @@ function populate(c) {
   $('auto-binance-fee').checked=costs.binance_fee_auto ?? true;
   for(const [key,id] of [['contract_size_oz','contract'],['volume_min','volume-min'],['volume_step','volume-step']])
     $(id).value=c.mt5?.[key]??'';
+  $('lots').min=c.mt5?.volume_min??'';$('lots').max=c.mt5?.volume_max??'';$('lots').step=c.mt5?.volume_step??'any';
   message('mt5-result','已恢复保存的目标账户与规格；连接检查状态需重新验证。');
   credentialsDirty=false; dirtySecrets.clear();
   syncConditionalFields();
@@ -165,6 +171,7 @@ function syncConditionalFields(source='') {
   }
   $('api-keys-section').style.display=live?'grid':'none';
   visible('legacy-paper-actions',!live);visible('legacy-paper-panel',!live);
+  visible('legacy-tools',!live);
   visible('paper-funding-field',!live);visible('mt5-swap-field',!live);
   visible('auto-binance-fee-field',live);visible('mcp-fields',mcpAdapter);visible('native-path-fields',!mcpAdapter);
   visible('contraction-field',value('target-mode')==='contraction');
@@ -183,15 +190,15 @@ function controls() {
   $('copy-public-ip').disabled = busy || !loaded || !publicIpValue;
 }
 async function action(button, job) {
-  if (busy || !loaded) return;
-  busy = true; window.goldPairUiBusy = true; controls();
+  if (busy || window.goldPairUiBusy || !loaded) return;
+  busy = true; setUiBusy(1); controls();
   const buttonElement = $(button);
   const label = buttonElement.textContent;
   buttonElement.textContent = button === 'check-mt5' ? '检查中，最多等待约 18 秒…' : button === 'check-binance' ? '正在检查行情与权限…' : button === 'check-public-ip' ? '正在检测出口…' : '处理中…';
   buttonElement.classList.add('processing');
   try { await job(); }
   catch (error) { message(button === 'check-mt5' ? 'mt5-result' : button === 'check-binance' ? 'binance-result' : button === 'check-public-ip' ? 'public-ip-result' : ['paper-step','paper-toggle','paper-reset'].includes(button) ? 'plan-result' : 'config-status', error.message, true); }
-  finally { busy = false; window.goldPairUiBusy = false; buttonElement.textContent = label; buttonElement.classList.remove('processing'); controls(); }
+  finally { busy = false; setUiBusy(-1); buttonElement.textContent = label; buttonElement.classList.remove('processing'); controls(); }
 }
 function saveConfigPayload(payload, sections=null) {
   clearTimeout(saveTimer);
@@ -199,8 +206,9 @@ function saveConfigPayload(payload, sections=null) {
   saveDraft();
   // All full-form saves share one queue so an older response cannot replace
   // a newer edit or clear its draft.
+  const submittedRevision=revision;
   saveQueue=saveQueue.catch(()=>{}).then(async()=>{
-    const at=revision;
+    const at=submittedRevision;
     message('config-status','正在保存到本机…');
     await api('/api/config',payload);
     if(at===revision) {
@@ -216,6 +224,7 @@ function saveConfigPayload(payload, sections=null) {
       }
       message('config-status',sections===null?'已保存到本机，刷新后会恢复配置。':'已保存本次检查所需配置到本机。');
     } else { saveDraft(); queueAutoSave(); }
+    window.dispatchEvent(new Event('gold-config-saved'));
     return at;
   });
   return saveQueue;
@@ -270,13 +279,37 @@ function showPlan(p, executable=false) {
   $('plan-state').textContent=executable?'双边规则已校验':'配平已自动计算';
   $('plan-state').classList.remove('warning');
 }
+function previewPlan() {
+  ++planGeneration;
+  const lots=Number(value('lots')), contract=Number(value('contract'));
+  const minimum=Number(value('volume-min')), step=Number(value('volume-step'));
+  const badge=$('plan-state');
+  if(!value('lots') || !Number.isFinite(lots) || lots<=0) {
+    badge.textContent='请填写有效手数'; badge.classList.add('warning');
+    message('plan-result','每组 MT5 手数必须大于 0。',true); return;
+  }
+  if(!Number.isFinite(contract) || contract<=0) {
+    badge.textContent='等待 MT5 规格';
+    message('plan-result',`当前输入 ${lots} 手；请到连接设置检查 MT5，读取每手盎司和数量步长。`);return;
+  }
+  const aligned=step>0 && Math.abs(lots/step-Math.round(lots/step))<1e-7;
+  if(lots<minimum-1e-9 || !aligned || Number($('lots').max)>0 && lots>Number($('lots').max)+1e-9) {
+    badge.textContent='手数需调整';badge.classList.add('warning');
+    message('plan-result',`当前输入 ${lots} 手不符合 MT5 规格：最小 ${minimum} 手，步长 ${step} 手${$('lots').max?'，最大 '+$('lots').max+' 手':''}。`,true);return;
+  }
+  const qty=Number((lots*contract).toPrecision(12)), bid=Number(value('bid'));
+  badge.textContent='当前输入预览';badge.classList.remove('warning');
+  message('plan-result',`MT5 ${value('mt5-symbol')}：${lots} 手 ↔ ${value('symbol').toUpperCase()}：${qty} XAU\n黄金数量 ${qty} 盎司${bid>0?' · 名义金额约 '+(qty*bid).toFixed(2)+' USDT':''}\n按已保存的 MT5 规格预览；交易所规则以重新连接后的校验为准。`);
+}
 async function calculatePlan(save=true) {
   if (!hasResult) return;
+  const generation=planGeneration, at=revision;
   try {
     if (save) await saveConfig();
     const {plan:p} = await api('/api/paper/plan', {binance_bid:Number(value('bid') || 0)});
-    showPlan(p, false);
+    if(generation===planGeneration && at===revision) showPlan(p, false);
   } catch (error) {
+    if(generation!==planGeneration || at!==revision)return;
     $('plan-state').textContent='配平需调整';
     $('plan-state').classList.add('warning');
     message('plan-result', error.message, true);
@@ -405,9 +438,12 @@ for(const input of document.querySelectorAll('input:not([readonly]), select')) {
       hasResult=false; controls();
       message('mt5-result','连接配置已修改，请重新检查 MT5；显示的规格为上次保存值。');
     }
-    if(input.id==='lots' && hasResult) {
-      clearTimeout(planTimer); planTimer=setTimeout(()=>calculatePlan(true),500);
+    if(['lots','symbol','mt5-symbol','mt5-adapter','account','mt5-server'].includes(input.id)) {
+      previewPlan();
+      clearTimeout(planTimer);
+      if(hasResult) planTimer=setTimeout(()=>calculatePlan(true),500);
     }
+    window.dispatchEvent(new Event('gold-form-changed'));
   };
   input.addEventListener('input',changed);
   input.addEventListener('change',changed);
@@ -427,7 +463,7 @@ async function loadInitialConfig() {
     // Always load untouched saved fields, even if the user typed while GET
     // was in flight. Current edits win over the draft and the saved config.
     restoreFields(draft?.fields); restoreFields(pending);
-    syncConditionalFields(); loaded=true; controls();
+    syncConditionalFields(); loaded=true; controls(); previewPlan();
     if(dirtyFields.size) {
       revision++; saveDraft(); queueAutoSave();
       message('config-status','已恢复未保存的输入，正在继续保存；其余字段已读取本机配置。');

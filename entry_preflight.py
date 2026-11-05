@@ -37,11 +37,13 @@ class EntryPreflight:
 
     def update(self, context):
         with self.lock:
-            old_key = self.context.get('key') if self.context else None
-            new_key = context.get('key') if context else None
+            identity=lambda value: tuple(value.get(k) for k in ('key','symbol','position_mode','qty')) if value else None
+            old_key = identity(self.context)
+            new_key = identity(context)
             if old_key != new_key:
                 self.revision += 1
                 self.result = None
+                self.last_attempt = -float('inf')
             self.context = copy.deepcopy(context)
         self.wake.set()
 
@@ -79,15 +81,16 @@ class EntryPreflight:
             now = self.clock()
             context, revision = copy.deepcopy(self.context), self.revision
             check = bool(context and now-self.last_attempt >= self.REFRESH)
-            calibrate = now-self.last_sync >= self.SYNC_INTERVAL
+            calibrate = now-self.last_sync >= self.SYNC_INTERVAL or bool(self.sync_error)
             if not check and not calibrate: return
             if check:
                 self.last_attempt = now
                 self.running = True
-            self.last_sync = now
+            if calibrate: self.last_sync = now
         try:
-            self._sync()
-            self.sync_error = ''
+            if calibrate:
+                self._sync()
+                self.sync_error = ''
             if check:
                 report = self.client.preflight(sync_clock=False)
                 if report['position_mode'] != context['position_mode']:

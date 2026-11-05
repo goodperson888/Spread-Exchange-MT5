@@ -142,6 +142,8 @@ class TradingRuntime:
             raise ValueError('实盘连接需要币安 API Key 和 Secret Key；请先保存本机连接配置')
         
         with self.lock:
+            if self.engine.state.get('enabled'):
+                raise ValueError('自动开仓运行中，请先暂停新开仓，再保存并重新连接；已有仓位继续按原规则管理')
             new_key = pair_key(config)
             key_fingerprint=hashlib.sha256(api_key.encode()).hexdigest()
             if any(g.get('imported') and g.get('binance_key_fingerprint')!=key_fingerprint for g in self.engine.active()):
@@ -630,17 +632,21 @@ class TradingRuntime:
                     if self.engine.state.get('enabled'):
                         self.engine.pause('行情或交易通道异常：' + self.last_error)
 
+    def config_changed(self, current_config):
+        incoming=copy.deepcopy(current_config);effective=copy.deepcopy(self.config)
+        if not effective: return False
+        if effective['costs']['usdt_usd_auto']:
+            incoming['costs']['usdt_usd']=effective['costs']['usdt_usd']
+        if effective['costs']['binance_fee_auto'] and effective['execution']['mode']=='live':
+            incoming['costs']['binance_taker_percent']=effective['costs']['binance_taker_percent']
+        return incoming != effective
+
     def start(self, current_config=None):
         with self.lock:
             if not self.connected:
                 raise ValueError('请先连接并完成双边规格校验')
             if current_config is not None:
-                incoming=copy.deepcopy(current_config);effective=copy.deepcopy(self.config)
-                if effective['costs']['usdt_usd_auto']:
-                    incoming['costs']['usdt_usd']=effective['costs']['usdt_usd']
-                if effective['costs']['binance_fee_auto'] and effective['execution']['mode']=='live':
-                    incoming['costs']['binance_taker_percent']=effective['costs']['binance_taker_percent']
-                if incoming != effective:
+                if self.config_changed(current_config):
                     raise ValueError('配置已修改，请重新点击“保存并连接”')
             if self.config['execution']['mode'] == 'live' and not self.reconciled:
                 raise ValueError('实盘启动前必须先完成持仓对账')
@@ -954,7 +960,9 @@ class TradingRuntime:
                 'state': st, 'events': self.store.events(),
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,
-                'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd']} if self.config else None,
+                'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd'],
+                                     'mt5_symbol': self.config['mt5']['symbol'], 'symbol': self.config['symbol']} if self.config else None,
+                'config_pending': bool(self.connected and self.config_changed(load_config())),
                 'entry_preflight': self.entry_preflight.status() if self.entry_preflight else None,
                 'capabilities': {'live_orders': bool(self.config and self.config['execution']['mode'] == 'live'),
                                  'mode': self.config['execution']['mode'] if self.config else 'paper',
@@ -1279,7 +1287,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if path in ("/app.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
+        if path in ("/app.js", "/workspace.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
             suffix = path[1:]
             data = (ROOT / suffix).read_bytes()
             content_type = "text/javascript; charset=utf-8" if suffix.endswith("js") else "text/css; charset=utf-8"

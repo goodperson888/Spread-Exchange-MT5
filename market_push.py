@@ -225,10 +225,12 @@ class QuotePump:
         q['time_ms'] = max(q['time_ms'], self.last_stamp + 1)
         self.last_stamp = q['time_ms']; self.last_signature = signature
         if self.stopped.is_set(): return
-        self.publish(q)
         with self.lock:
             self.latest, self.version, self.error = q, self.version + 1, ''
         self.wake_strategy.set()
+        # History/chart publication can include disk I/O. Let the strategy
+        # see this sample before that work, while keeping broker writes durable.
+        self.publish(q)
 
     def run(self):
         while not self.stopped.is_set():
