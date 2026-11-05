@@ -106,21 +106,54 @@ test('verified USD-base CFD shows compatibility confirmation and applies its rea
   const result={connected:true,identity_matches:true,message:'已连接 MT5',
     identity:{account:'123',server:'Demo',currency:'USD'},candidates:['XAUUSD'],
     symbol:{name:'XAUUSD',contract_size_oz:100,volume_min:.01,volume_step:.01,volume_max:80,currency_base:'USD'},
-    symbol_diagnostics:{currency_base:'USD'},symbol_verification:{method:'gold_cfd_profit',passed:true}};
+    symbol_diagnostics:{currency_base:'USD'},symbol_verification:{method:'gold_cfd_profit',passed:true},
+    symbol_resolution:{requested:'xauusd',resolved:'XAUUSD'}};
   const f=await fixture({'/api/mt5/check':()=>({result}),
     '/api/paper/plan':()=>({plan:{mt5_lots:.01,binance_qty_xau:1,gold_qty_oz:1}})});
-  f.edit('lots','0.01');await f.el('check-mt5').onclick();
+  f.edit('lots','0.01');f.edit('mt5-symbol','xauusd');await f.el('check-mt5').onclick();
   const text=f.el('mt5-result').textContent;
   assert.match(text,/黄金 CFD 兼容校验通过/);
   assert.match(text,/基础货币实际返回 "USD"/);
   assert.match(text,/多空、涨跌四项盈亏预估/);
   assert.match(text,/未发送订单，仅在连接检查时执行/);
+  assert.match(text,/xauusd → XAUUSD/);
+  assert.equal(f.el('mt5-symbol').value,'XAUUSD');
   assert.doesNotMatch(text,/未通过|尚未确认计量单位/);
   assert.equal(f.run('hasResult'),true);
   assert.equal(f.calls.filter(c=>c.url==='/api/mt5/apply').length,1);
   assert.equal(f.el('contract').value,'100');
   assert.match(f.el('plan-result').textContent,/0\.01 手 ↔ XAUUSDT：1 XAU/);
   assert.ok(!f.calls.some(c=>['/api/trading/start','/api/trading/connect','/api/trading/close'].includes(c.url)));
+});
+
+test('quote failure shows actual prices and time separately from raw symbol metadata',async()=>{
+  const f=await fixture();
+  f.run(`showResult({connected:true,identity_matches:true,symbol:null,message:'黄金 CFD 兼容校验未通过',
+    quote_diagnostics:{bid:0,ask:0,time_ms:123000,age_ms:60000}})`);
+  assert.match(f.el('mt5-result').textContent,/报价诊断：Bid 0 \/ Ask 0/);
+  assert.match(f.el('mt5-result').textContent,/MT5 原始时间戳 123000/);
+  assert.match(f.el('mt5-result').textContent,/与本机时间差 60000 毫秒/);
+  assert.equal(f.run('hasResult'),false);
+  f.run(`showResult({connected:true,identity_matches:true,
+    symbol:{name:'XAUUSD',contract_size_oz:100},message:'规格核验通过',
+    symbol_verification:{passed:true},symbol_diagnostics:{currency_base:'USD'},
+    quote:{bid:4300,ask:4300.2,age_ms:60000},
+    quote_diagnostics:{bid:4300,ask:4300.2,time_ms:123000,age_ms:60000},
+    blockers:['报价未更新，不能视为可立即成交']})`);
+  const text=f.el('mt5-result').textContent;
+  assert.match(text,/兼容校验通过/);
+  assert.match(text,/报价诊断：Bid 4300 \/ Ask 4300.2/);
+  assert.match(text,/待处理：报价未更新/);
+  const previousBid=f.el('mt5-bid').value,previousAsk=f.el('mt5-ask').value;
+  f.run(`showResult({connected:true,identity_matches:true,
+    symbol:{name:'XAUUSD',contract_size_oz:100},message:'规格核验通过',
+    symbol_verification:{passed:true,price_source:'hypothetical_prices'},
+    symbol_diagnostics:{currency_base:'USD'},quote:null,
+    quote_diagnostics:{bid:0,ask:0,time_ms:0,age_ms:null},blockers:['尚无有效 Bid/Ask']})`);
+  assert.match(f.el('mt5-result').textContent,/换算核验使用假设价格/);
+  assert.match(f.el('mt5-result').textContent,/不代表已获取可交易行情/);
+  assert.equal(f.el('mt5-bid').value,previousBid);
+  assert.equal(f.el('mt5-ask').value,previousAsk);
 });
 
 test('risk thresholds save numerically and never ask to reconnect the trading engine',async()=>{

@@ -71,6 +71,19 @@ def usd_gold_cfd(info):
             and getattr(info, 'trade_calc_mode', None) in (3, 4))  # CFD / CFDLEVERAGE
 
 
+def quote_diagnostics(tick):
+    """Keep invalid quote fields JSON-safe, including on an early probe failure."""
+    def finite(key):
+        value = getattr(tick, key, None)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+    bid, ask, source = finite('bid'), finite('ask'), finite('time_msc')
+    local = int(time.time() * 1000)
+    valid_time = source is not None and source > 0
+    return dict(bid=bid, ask=ask, time_ms=source, local_time_ms=local,
+                age_ms=local-int(source) if valid_time else None,
+                valid_time=valid_time, valid_price=bid is not None and ask is not None and 0 < bid <= ask)
+
+
 def verify_cfd_profit(api, info, account, tick, spec):
     """Connection-time read-only check; never used by the execution worker."""
     result = dict(method='gold_cfd_profit', passed=False,
@@ -81,10 +94,15 @@ def verify_cfd_profit(api, info, account, tick, spec):
     if result['account_currency'].upper() != 'USD':
         return reject('黄金 CFD 兼容校验目前要求美元账户，避免把账户币种换算误当成黄金数量。')
     try:
-        bid, ask = float(tick.bid), float(tick.ask)
-        age = int(time.time() * 1000) - int(tick.time_msc)
-        if not all(math.isfinite(x) for x in (bid, ask)) or not 1 < bid <= ask or not -1000 <= age <= 5000:
-            return reject('黄金 CFD 兼容校验需要有效的新鲜 Bid/Ask；请等待报价后重新检查。')
+        reference = quote_diagnostics(tick)
+        bid, ask = reference['bid'], reference['ask']
+        if reference['valid_price'] and bid > 1:
+            result['price_source'] = 'reference_quote'
+        else:
+            # CFD profit is linear in the explicitly supplied price difference.
+            # These hypothetical prices validate units, never form a market quote.
+            bid = ask = 1000.0
+            result['price_source'] = 'hypothetical_prices'
         step = Decimal(str(spec['volume_step']))
         lots = float((Decimal(str(spec['volume_min'])) / step).to_integral_value(rounding=ROUND_CEILING) * step)
         if lots > spec['volume_max']:
@@ -155,12 +173,20 @@ def inspect_terminal(settings, api=None, platform=None):
         result['candidates'] = [str(x.name) for x in gold][:100]
         possible = gold + [x for x in symbols if usd_gold_cfd(x)]
         selected = str(settings.get('symbol', '')).strip()
+        exact_names = {str(x.name) for x in symbols}
+        matches = [name for name in exact_names if selected and name.casefold() == selected.casefold()]
+        ambiguous_case = selected not in exact_names and len(matches) > 1
+        if selected and selected not in exact_names and len(matches) == 1:
+            result['symbol_resolution'] = dict(requested=selected, resolved=matches[0])
+            selected = matches[0]
         if not selected and len(possible) == 1:
             selected = possible[0].name
-        info = api.symbol_info(selected) if selected else None
+        info = api.symbol_info(selected) if selected and not ambiguous_case else None
         if info is None:
             result.update(symbol_scan_diagnostics(symbols, gold))
-            if selected:
+            if ambiguous_case:
+                message = '已连接 MT5，但有多个品种仅大小写不同；请按终端中的完整名称及大小写选定，再重新检查。'
+            elif selected:
                 message = '已连接 MT5，但无法读取所填品种的详细信息；请核对终端中的完整品种名后重新检查。'
             elif possible:
                 message = '已连接 MT5，发现多个黄金候选品种；请选择具体品种，再检查连接；兼容候选还需完成盈亏预估校验。'
@@ -185,7 +211,10 @@ def inspect_terminal(settings, api=None, platform=None):
         if not selected_ok:
             result['blockers'].append('无法把黄金品种加入市场报价，请在 MT5 中手动显示该品种。')
         tick = api.symbol_info_tick(info.name)
+        result['quote_diagnostics'] = quote_diagnostics(tick)
         if compatibility:
+            # USD base currency is the known metadata variant, not the failure reason.
+            result['symbol_diagnostics']['reasons'] = []
             verification = (verify_cfd_profit(api, info, account, tick, spec) if selected_ok else
                             dict(method='gold_cfd_profit', passed=False, reason='请先在 MT5 市场报价中显示该品种，再重新检查。'))
             result['symbol_verification'] = verification
@@ -198,15 +227,16 @@ def inspect_terminal(settings, api=None, platform=None):
             if spec['name'] not in result['candidates']:
                 result['candidates'].append(spec['name'])
         result['symbol'] = spec
-        stamp = int(getattr(tick, 'time_msc', 0) or 0)
-        bid, ask = float(getattr(tick, 'bid', 0)), float(getattr(tick, 'ask', 0))
-        if stamp > 0 and math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask:
-            age = int(time.time() * 1000) - stamp
+        diagnostic = result['quote_diagnostics']
+        if diagnostic['valid_time'] and diagnostic['valid_price']:
+            stamp, bid, ask, age = (diagnostic[key] for key in ('time_ms', 'bid', 'ask', 'age_ms'))
             result['quote'] = dict(bid=bid, ask=ask, time_ms=stamp, age_ms=age)
             if age > 5000 or age < -1000:
-                result['blockers'].append('报价时间过旧或时钟异常；可能休市，不能视为可立即成交。')
+                result['blockers'].append(f'报价原始时间与本机相差 {age} 毫秒；可能报价未更新或时钟偏差，不能视为可立即成交。交易仍须通过实时行情检查。')
+        elif not diagnostic['valid_price']:
+            result['blockers'].append('尚无有效 Bid/Ask，请在 MT5 市场报价中显示该品种，等待报价或检查休市时间。')
         else:
-            result['blockers'].append('尚无有效 Bid/Ask，请等待报价或检查休市时间。')
+            result['blockers'].append('已读取 Bid/Ask，但报价时间戳缺失或无效；请等待终端更新报价，当前不能视为可立即成交。')
         if not getattr(terminal, 'trade_allowed', False):
             result['blockers'].append('MT5 工具栏的 Algo Trading / 自动交易未启用。')
         if getattr(terminal, 'tradeapi_disabled', True):

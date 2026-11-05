@@ -247,7 +247,7 @@ class HttpTests(unittest.TestCase):
                 method.assert_called_once()
 
     def test_usd_base_gold_cfd_check_apply_and_quantity_plan(self):
-        self.request('/api/config', {'mt5':{'adapter':'native', 'symbol':'XAUUSDm'},
+        self.request('/api/config', {'mt5':{'adapter':'native', 'symbol':'xauusdm'},
                                     'strategy':{'mt5_lots':.01}})
         fake = FakeMT5()
         fake.symbol.currency_base = 'USD'
@@ -263,7 +263,9 @@ class HttpTests(unittest.TestCase):
             code, body = self.request('/api/mt5/check', {})
         self.assertEqual(code, 200)
         self.assertTrue(body['result']['symbol_verification']['passed'])
-        self.assertEqual(self.request('/api/mt5/apply', {})[0], 200)
+        code, applied = self.request('/api/mt5/apply', {})
+        self.assertEqual(code, 200)
+        self.assertEqual(applied['mt5']['symbol'], 'XAUUSDm')
         code, body = self.request('/api/paper/plan', {'binance_bid':4300})
         self.assertEqual(code, 200)
         self.assertEqual(body['plan']['gold_qty_oz'], 1)

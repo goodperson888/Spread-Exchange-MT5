@@ -60,6 +60,44 @@ class GoldCFDTests(unittest.TestCase):
         self.assertEqual(result['candidates'], ['XAUUSD.m'])
         self.assertEqual(len(fake.profit_calls), 4)
 
+    def test_unique_case_insensitive_name_uses_actual_terminal_name_without_more_requests(self):
+        fake = FakeGoldCFD()
+        fake.symbol.name = 'XAUUSD.m'
+        with patch.object(fake, 'symbol_info', wraps=fake.symbol_info) as info, \
+             patch.object(fake, 'symbols_get', wraps=fake.symbols_get) as scan, \
+             patch.object(fake, 'symbol_info_tick', wraps=fake.symbol_info_tick) as tick:
+            result = connector.inspect_terminal({'symbol':'  xauusd.M  '}, fake)
+        info.assert_called_once_with('XAUUSD.m')
+        scan.assert_called_once_with()
+        tick.assert_called_once_with('XAUUSD.m')
+        self.assertEqual(result['symbol']['name'], 'XAUUSD.m')
+        self.assertEqual(result['symbol_resolution'], {'requested':'xauusd.M', 'resolved':'XAUUSD.m'})
+        self.assertEqual(len(fake.profit_calls), 4)
+
+    def test_exact_case_wins_but_ambiguous_case_is_never_guessed(self):
+        for requested, expected in (('XAUUSD', 'XAUUSD'), ('xauusd', 'xauusd'), ('xAuUsD', None)):
+            with self.subTest(requested=requested):
+                fake = FakeGoldCFD()
+                other = copy.copy(fake.symbol)
+                other.name = 'xauusd'
+                fake.symbols.append(other)
+                result = connector.inspect_terminal({'symbol':requested}, fake)
+                if expected:
+                    self.assertEqual(result['symbol']['name'], expected)
+                    self.assertNotIn('symbol_resolution', result)
+                else:
+                    self.assertEqual(result['code'], 'SELECT_SYMBOL')
+                    self.assertIsNone(result['symbol'])
+                    self.assertIn('大小写', result['message'])
+                    self.assertEqual(fake.profit_calls, [])
+
+    def test_partial_name_does_not_expand_to_another_contract(self):
+        fake = FakeGoldCFD()
+        result = connector.inspect_terminal({'symbol':'xau'}, fake)
+        self.assertIsNone(result['symbol'])
+        self.assertNotIn('symbol_resolution', result)
+        self.assertEqual(fake.profit_calls, [])
+
     def test_uses_actual_contract_size_and_valid_volume_grid(self):
         for contract, minimum, step in ((1, .01, .01), (10, .1, .1), (100, .015, .01)):
             with self.subTest(contract=contract, minimum=minimum):
@@ -149,18 +187,70 @@ class GoldCFDTests(unittest.TestCase):
         self.assertIn('盈亏预估', result['symbol_verification']['reason'])
         self.assertNotIn('private-account-detail', json.dumps(result))
 
-    def test_quote_volume_and_visibility_failures_do_not_accept_contract(self):
-        for failure in ('stale', 'missing', 'nan', 'volume', 'visibility'):
+    def test_volume_and_visibility_failures_do_not_accept_contract(self):
+        for failure in ('volume', 'visibility'):
             with self.subTest(failure=failure):
                 fake = FakeGoldCFD()
-                if failure == 'stale': fake.tick.time_msc -= 60000
-                if failure == 'missing': fake.tick = None
-                if failure == 'nan': fake.tick.bid = float('nan')
                 if failure == 'volume': fake.symbol.volume_step = 0
                 with patch.object(fake, 'symbol_select', return_value=failure != 'visibility'):
                     result = self.inspect(fake)
                 self.assertIsNone(result['symbol'])
                 self.assertEqual(fake.profit_calls, [])
+
+    def test_missing_market_quote_can_calibrate_units_without_manufacturing_a_quote(self):
+        for failure in ('missing', 'nan', 'zero', 'crossed'):
+            with self.subTest(failure=failure):
+                fake = FakeGoldCFD()
+                if failure == 'missing': fake.tick = None
+                if failure == 'nan': fake.tick.bid = float('nan')
+                if failure == 'zero': fake.tick.bid = fake.tick.ask = 0
+                if failure == 'crossed': fake.tick.bid = fake.tick.ask + 1
+                result = self.inspect(fake)
+                self.assertTrue(result['symbol_verification']['passed'])
+                self.assertEqual(result['symbol_verification']['price_source'], 'hypothetical_prices')
+                self.assertEqual(len(fake.profit_calls), 4)
+                self.assertIsNone(result['quote'])
+                self.assertFalse(result['quote_diagnostics']['valid_price'])
+                self.assertIn('尚无有效 Bid/Ask', ' '.join(result['blockers']))
+                self.assertFalse(result['real_order_enabled'])
+                self.assertEqual(result['symbol_diagnostics']['reasons'], [])
+                json.dumps(result, allow_nan=False)
+
+    def test_unavailable_quote_does_not_bypass_failed_profit_check(self):
+        fake = FakeGoldCFD()
+        fake.tick = None
+        with patch.object(fake, 'order_calc_profit', return_value=None):
+            result = self.inspect(fake)
+        self.assertIsNone(result['symbol'])
+        self.assertFalse(result['symbol_verification']['passed'])
+        self.assertIn('未返回有效的盈亏预估', result['symbol_verification']['reason'])
+        self.assertNotIn('currency_base 不是 XAU', ' '.join(result['symbol_diagnostics']['reasons']))
+
+    def test_reference_quote_clock_does_not_block_contract_calibration_or_hide_market_warning(self):
+        for offset in (-60000, 60000):
+            with self.subTest(offset=offset):
+                fake = FakeGoldCFD()
+                fake.tick.time_msc += offset
+                original = fake.tick.time_msc
+                result = self.inspect(fake)
+                self.assertEqual(result['code'], 'CONNECTED')
+                self.assertTrue(result['symbol_verification']['passed'])
+                self.assertEqual(len(fake.profit_calls), 4)
+                self.assertEqual(result['quote']['time_ms'], original)
+                self.assertEqual(result['quote_diagnostics']['time_ms'], original)
+                self.assertGreater(abs(result['quote']['age_ms']), 59000)
+                self.assertIn('不能视为可立即成交', ' '.join(result['blockers']))
+                self.assertFalse(result['real_order_enabled'])
+
+    def test_missing_timestamp_allows_only_contract_calibration_with_market_warning(self):
+        fake = FakeGoldCFD()
+        fake.tick.time_msc = 0
+        result = self.inspect(fake)
+        self.assertTrue(result['symbol_verification']['passed'])
+        self.assertIsNone(result['quote'])
+        self.assertFalse(result['quote_diagnostics']['valid_time'])
+        self.assertIn('报价时间戳缺失或无效', ' '.join(result['blockers']))
+        self.assertFalse(result['real_order_enabled'])
 
     def test_numeric_overflow_or_unrepresentable_price_change_is_rejected(self):
         for huge_quote in (False, True):

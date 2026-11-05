@@ -261,6 +261,7 @@ $('clear-credentials').onclick=()=>action('clear-credentials',async()=>{
 function showResult(r) {
   const lines = [r.message];
   if (r.identity) lines.push('实际账户：' + r.identity.account + ' · ' + r.identity.server + ' · ' + r.identity.currency);
+  if (r.symbol_resolution) lines.push('品种名称已按终端匹配：'+r.symbol_resolution.requested+' → '+r.symbol_resolution.resolved);
   if (!r.symbol && r.symbol_scan) {
     const scan=r.symbol_scan;
     lines.push(`自动识别诊断：已扫描 ${scan.total_symbols} 个品种，通过货币字段校验 ${scan.validated_candidates} 个；名称或描述相关 ${scan.diagnostic_matches} 个，展示 ${scan.shown} 个。`);
@@ -284,6 +285,11 @@ function showResult(r) {
   if (r.symbol && r.symbol_verification?.passed) {
     lines.push('黄金 CFD 兼容校验通过：基础货币实际返回 '+JSON.stringify(r.symbol_diagnostics?.currency_base)+'；已用 MT5 多空、涨跌四项盈亏预估核对黄金换算。');
     lines.push('校验未发送订单，仅在连接检查时执行。');
+    if (r.symbol_verification.price_source==='hypothetical_prices') lines.push('换算核验使用假设价格；这不代表已获取可交易行情，请在 MT5 显示该品种并等待有效报价。');
+  }
+  if (r.quote_diagnostics && (!r.symbol || !r.quote || r.quote.age_ms > 5000 || r.quote.age_ms < -1000)) {
+    const d=r.quote_diagnostics, raw=value=>value===null||value===undefined?'无效或未返回':String(value);
+    lines.push('报价诊断：Bid '+raw(d.bid)+' / Ask '+raw(d.ask)+'；MT5 原始时间戳 '+raw(d.time_ms)+'；与本机时间差 '+raw(d.age_ms)+' 毫秒。');
   }
   if (r.quote) lines.push('检查时 Bid ' + r.quote.bid + ' / Ask ' + r.quote.ask + '；报价年龄 ' + r.quote.age_ms + ' 毫秒');
   if (r.quote) { 
@@ -404,7 +410,7 @@ $('check-mt5').onclick = () => action('check-mt5', async () => {
       if (!existingServer) $('mt5-server').value = result.identity.server;
     }
     // 应用品种名称
-    if (mt5.name && !existingSymbol) {
+    if (mt5.name && mt5.name !== existingSymbol) {
       $('mt5-symbol').value = mt5.name;
     }
     // 应用规格信息
