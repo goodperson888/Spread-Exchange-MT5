@@ -89,6 +89,12 @@ class Binance:
                             '2. 确认这把 Key 已开启「允许合约」并保存。\n'
                             '3. 点击「获取币安出口 IP」，确认该 IP 已加入这把 Key 的白名单；更换代理或网络后需重新检测。\n'
                             '完成后再次点击「检查币安连接」。')
+            if code == -4411:
+                message += ('：币安要求先签署相关交易协议（黄金等 TradFi 永续合约）。\n'
+                            '1. 用 API Key 所属账户登录币安 App 或网页版，打开对应合约（如 XAUUSDT）。\n'
+                            '2. 阅读并确认页面提示的 TradFi 永续合约协议；无需为此实际下单。\n'
+                            '3. 返回本程序等待下一次预检；仍失败时重新连接并对账。\n'
+                            '若没有协议入口或签署后仍报错，请联系币安客服确认该账户的合约资格。')
             raise ApiError(code, message, exc.code >= 500 or code in (-1006, -1007)) from None
         except Exception:
             raise ApiError('NETWORK', '币安请求超时或网络不可用，交易结果需要查询确认', True) from None

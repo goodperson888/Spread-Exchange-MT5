@@ -441,6 +441,27 @@ if __name__ == '__main__':
     unittest.main()
 
 class BinancePermissionErrorTests(unittest.TestCase):
+    def test_agreement_required_explains_next_steps_without_retry_or_order(self):
+        from urllib.error import HTTPError
+        from trading_brokers import ApiError
+        broker = Binance(production=True, key='test-key', secret='test-secret')
+        rejection = HTTPError('https://fapi.binance.com/fapi/v1/order/test', 400,
+                              'Bad Request', {}, io.BytesIO(b'{"code":-4411,"msg":"Please sign TradFi-Perps agreement contract fapi."}'))
+        broker.opener.open = unittest.mock.Mock(side_effect=rejection)
+        with self.assertRaises(ApiError) as error:
+            broker.request('/fapi/v1/order/test', {'symbol': 'XAUUSDT'}, 'POST', True)
+        self.assertEqual(error.exception.code, -4411)
+        self.assertFalse(error.exception.uncertain)
+        message = str(error.exception)
+        for hint in ('API Key 所属账户', 'XAUUSDT', 'TradFi', '无需为此实际下单', '下一次预检', '币安客服'):
+            self.assertIn(hint, message)
+        for sensitive in ('test-key', 'test-secret', 'signature=', 'timestamp='):
+            self.assertNotIn(sensitive, message)
+        broker.opener.open.assert_called_once()
+        self.assertEqual(broker.opener.open.call_args.args[0].method, 'POST')
+        self.assertEqual(broker.opener.open.call_args.args[0].full_url.split('?')[0],
+                         'https://fapi.binance.com/fapi/v1/order/test')
+
     def test_rejected_key_explains_possible_causes_without_retry(self):
         from urllib.error import HTTPError
         from trading_brokers import ApiError
