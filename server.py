@@ -1185,7 +1185,8 @@ def inspect_binance(config, api_key='', api_secret=''):
         'usdt_usd': fx, 'account': account, 'permissions': permissions,
         'permission_warning': permission_warning, 'fees': fees,
         'message': '币安公开行情及合约规格正常' if mode == 'paper'
-                   else '币安行情、账户交易权限和合约设置检查通过',
+                   else ('币安连接检查通过：行情、账户及基础权限正常。\n'
+                         '本次未进行开仓预检；该品种下单资格以交易台的开仓预检结果为准。'),
         'orders_sent': False,
     }
 

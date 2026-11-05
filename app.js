@@ -331,7 +331,7 @@ $('check-binance').onclick = () => action('check-binance', async () => {
   if(r.permission_warning) lines.push(`API 权限明细未能读取：${r.permission_warning}`);
   if(r.fees) lines.push(`账户费率：Maker ${Number(r.fees.maker).toFixed(4)}% / Taker ${Number(r.fees.taker).toFixed(4)}%`);
   if(r.transport_warning) lines.push('提示：'+r.transport_warning);
-  lines.push('本次仅读检查，未发送任何订单。');
+  lines.push('本次仅做连接检查，未发送任何订单。');
   $('bid').value=r.quote.bid;$('binance-ask').value=r.quote.ask;
   message('binance-result',lines.join('\n'),false);
 });
