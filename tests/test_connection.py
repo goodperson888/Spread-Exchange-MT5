@@ -78,6 +78,34 @@ class ConnectorTests(unittest.TestCase):
             fake = FakeMT5(); setattr(fake.symbol, field, value)
             self.assertIsNone(connector.inspect_terminal({'symbol':'XAUUSDm'}, fake)['symbol'])
 
+    def test_symbol_diagnostic_explains_each_rejection_without_more_api_calls(self):
+        for field, value, reason in (('currency_base','','基础货币'), ('currency_base',None,'未返回'),
+                                     ('currency_base','USD','基础货币'), ('currency_profit','EUR','盈利货币'),
+                                     ('custom',True,'自定义品种')):
+            with self.subTest(field=field,value=value):
+                fake=FakeMT5();setattr(fake.symbol,field,value)
+                fake.symbol.currency_margin='USD';fake.symbol.description='Gold vs US Dollar / Spot'
+                fake.symbol.api_secret='must-not-be-exported'
+                with patch.object(fake,'symbol_info',wraps=fake.symbol_info) as info, \
+                     patch.object(fake,'symbols_get',wraps=fake.symbols_get) as symbols:
+                    result=connector.inspect_terminal({'symbol':'XAUUSDm'},fake)
+                info.assert_called_once_with('XAUUSDm');symbols.assert_called_once_with()
+                self.assertTrue(result['connected']);self.assertIsNone(result['symbol'])
+                self.assertEqual(result['code'],'UNSUPPORTED_SYMBOL')
+                diagnostic=result['symbol_diagnostics']
+                self.assertEqual(diagnostic[field],value)
+                self.assertEqual(diagnostic['currency_margin'],'USD')
+                self.assertEqual(diagnostic['trade_contract_size'],100)
+                self.assertIn(reason,' '.join(diagnostic['reasons']))
+                self.assertNotIn('must-not-be-exported',json.dumps(result,allow_nan=False))
+
+    def test_invalid_spec_diagnostic_is_json_safe_and_does_not_claim_ounces(self):
+        fake=FakeMT5();fake.symbol.trade_contract_size=float('nan')
+        result=connector.inspect_terminal({'symbol':'XAUUSDm'},fake)
+        self.assertEqual(result['code'],'INVALID_SPEC');self.assertIsNone(result['symbol'])
+        self.assertIsNone(result['symbol_diagnostics']['trade_contract_size'])
+        json.dumps(result,allow_nan=False)
+
     def test_permissions_and_stale_quote(self):
         fake = FakeMT5(); fake.terminal.tradeapi_disabled = True
         fake.account.trade_allowed = False; fake.account.margin_mode = 0

@@ -61,6 +61,27 @@ test('lots preview updates immediately after refresh without a fresh MT5 check',
   f.edit('lots','');assert.match(f.el('plan-result').textContent,/必须大于 0/);
 });
 
+test('failed MT5 check shows raw symbol fields and never applies unverified contract',async()=>{
+  const result={connected:true,identity_matches:true,symbol:null,message:'已连接 MT5，但品种未通过校验',
+    symbol_diagnostics:{name:'XAUUSD',description:'<img src=x>',currency_base:'',currency_profit:'USD',
+      currency_margin:'USD',custom:false,trade_contract_size:100,trade_mode:4,trade_calc_mode:3,
+      volume_min:.01,volume_step:.01,volume_max:100,reasons:['基础货币字段 currency_base 未返回，无法确认 XAU']}};
+  const f=await fixture({'/api/mt5/check':()=>({result})});
+  await f.el('check-mt5').onclick();
+  const text=f.el('mt5-result').textContent;
+  assert.match(text,/currency_base：空值/);
+  assert.match(text,/currency_profit："USD"/);
+  assert.match(text,/currency_margin："USD"/);
+  assert.match(text,/custom：false/);
+  assert.match(text,/trade_contract_size：100（尚未确认计量单位）/);
+  assert.match(text,/未通过：基础货币/);
+  assert.match(text,/<img src=x>/);assert.equal(f.el('mt5-result').innerHTML,'');
+  assert.equal(f.run('hasResult'),false);
+  assert.ok(!f.calls.some(c=>c.url==='/api/mt5/apply'));
+  f.run('showResult({symbol:null,message:"未知",symbol_diagnostics:{custom:null,reasons:[]}})');
+  assert.match(f.el('mt5-result').textContent,/custom：未返回/);
+});
+
 test('risk thresholds save numerically and never ask to reconnect the trading engine',async()=>{
   const live={connected:true,config_pending:false,state:{enabled:false,groups:[],orders:[]},capabilities:{mode:'live',reconciled:true}};
   const f=await fixture({'/api/trading/reconcile':()=>live,'/api/trading/status':()=>live});

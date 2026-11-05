@@ -261,6 +261,18 @@ $('clear-credentials').onclick=()=>action('clear-credentials',async()=>{
 function showResult(r) {
   const lines = [r.message];
   if (r.identity) lines.push('实际账户：' + r.identity.account + ' · ' + r.identity.server + ' · ' + r.identity.currency);
+  if (!r.symbol && r.symbol_diagnostics) {
+    const d=r.symbol_diagnostics;
+    const raw=value=>value===null||value===undefined?'未返回':value===''?'空值':JSON.stringify(value);
+    lines.push('品种诊断（MT5 实际返回）：'+raw(d.name)+'；描述 '+raw(d.description));
+    lines.push('基础货币 currency_base：'+raw(d.currency_base)+'；盈利货币 currency_profit：'+raw(d.currency_profit));
+    lines.push('预付款货币 currency_margin：'+raw(d.currency_margin)+'（与基础货币分开核对）');
+    lines.push('自定义品种 custom：'+raw(d.custom)+'；合约量 trade_contract_size：'+raw(d.trade_contract_size)+'（尚未确认计量单位）');
+    lines.push('计算模式 trade_calc_mode：'+raw(d.trade_calc_mode)+'；交易模式 trade_mode：'+raw(d.trade_mode));
+    lines.push('手数规则：最小 '+raw(d.volume_min)+' / 步长 '+raw(d.volume_step)+' / 最大 '+raw(d.volume_max));
+    for (const reason of d.reasons||[]) lines.push('未通过：'+reason);
+    lines.push('请把这段品种诊断复制或截图用于核对；品种名称和合约量本身不能确认配平单位。');
+  }
   if (r.symbol && r.symbol.name) lines.push('黄金品种：' + r.symbol.name + '；每手 ' + r.symbol.contract_size_oz + ' 盎司；最小 ' + r.symbol.volume_min + ' / 步长 ' + r.symbol.volume_step + ' / 最大 ' + r.symbol.volume_max + ' 手');
   if (r.quote) lines.push('检查时 Bid ' + r.quote.bid + ' / Ask ' + r.quote.ask + '；报价年龄 ' + r.quote.age_ms + ' 毫秒');
   if (r.quote) { 

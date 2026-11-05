@@ -17,6 +17,32 @@ def failure(code, message):
                 real_order_enabled=False, checked_at_ms=int(time.time() * 1000))
 
 
+def symbol_diagnostics(info):
+    """Read only already-fetched symbol metadata; never guess contract units."""
+    fields = ('name', 'description', 'currency_base', 'currency_profit', 'currency_margin')
+    result = {key: getattr(info, key, None) for key in fields}
+    result['custom'] = getattr(info, 'custom', None)
+    for key in ('trade_contract_size', 'trade_calc_mode', 'trade_mode',
+                'volume_min', 'volume_step', 'volume_max'):
+        value = getattr(info, key, None)
+        result[key] = value if isinstance(value, (int, float)) and math.isfinite(value) else None
+    reasons = []
+    for key, expected, label in (('currency_base', 'XAU', '基础货币'), ('currency_profit', 'USD', '盈利货币')):
+        original = getattr(info, key, None)
+        value = '' if original is None else str(original).upper()
+        if value != expected:
+            if original is None:
+                reasons.append(f'{label}字段 {key} 未返回，无法确认 {expected}')
+            elif not value:
+                reasons.append(f'{label}字段 {key} 为空值，无法确认 {expected}')
+            else:
+                reasons.append(f'{label}字段 {key} 不是 {expected}')
+    if getattr(info, 'custom', False):
+        reasons.append('custom 为 true：自定义品种不能自动按盎司配平')
+    result['reasons'] = reasons
+    return result
+
+
 def inspect_terminal(settings, api=None, platform=None):
     platform = platform or sys.platform
     if api is None:
@@ -67,9 +93,9 @@ def inspect_terminal(settings, api=None, platform=None):
         if info is None:
             result.update(code='SELECT_SYMBOL', message='请选择本账户的黄金品种，再检查连接。' if gold else '未发现基础货币 XAU、盈亏货币 USD 的黄金品种，请核对经纪商合约。')
             return result
-        if (str(getattr(info, 'currency_base', '')).upper() != 'XAU' or
-                str(getattr(info, 'currency_profit', '')).upper() != 'USD' or getattr(info, 'custom', False)):
-            result.update(code='UNSUPPORTED_SYMBOL', message='所选品种不是标准 XAU/USD 黄金品种，不能自动按盎司配平。')
+        result['symbol_diagnostics'] = symbol_diagnostics(info)
+        if result['symbol_diagnostics']['reasons']:
+            result.update(code='UNSUPPORTED_SYMBOL', message='已连接 MT5，但所选品种未通过黄金规格校验；具体原因见下方品种诊断。')
             return result
         spec = dict(name=str(info.name), contract_size_oz=float(info.trade_contract_size),
                     volume_min=float(info.volume_min), volume_step=float(info.volume_step),
