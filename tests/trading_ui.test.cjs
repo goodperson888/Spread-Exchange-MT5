@@ -7,6 +7,8 @@ const vm = require('node:vm');
 // Execute the actual button handlers without contacting any trading account.
 function pageFixture(reconcileFails = false, handlers = {}) {
   const elements = new Map(), calls = [], charts=[], streams=[], listeners={};
+  const intervals=[];let testNow=Date.now();
+  class TestDate extends Date {static now(){return testNow;}}
   const doc={hidden:false, getElementById:id=>el(id),addEventListener:(name,fn)=>{listeners[name]=fn;}};
   class FakeStream {
     constructor(){this.handlers={};this.closed=false;streams.push(this);}
@@ -27,7 +29,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../trading-app.js'), 'utf8'), {
     document:doc, window:{addEventListener(){},EventSource:FakeStream,GoldPairQuotes:require('../quote-stream.js')},
     loaded:false, saveConfig:async()=>{}, AbortController,
-    setTimeout(){}, clearTimeout(){}, setInterval(){},
+    Date:TestDate,setTimeout(){}, clearTimeout(){}, setInterval(fn,ms){intervals.push({fn,ms});},
     echarts:{init:()=>({getOption:()=>({}), setOption(option){charts.push(option);}})},
     fetch:async (url, options) => {
       calls.push({url, ...options});
@@ -49,8 +51,40 @@ function pageFixture(reconcileFails = false, handlers = {}) {
       return {ok:status===200, json:async()=>body};
     }
   });
-  return {el, calls, charts, streams, doc, listeners};
+  return {el, calls, charts, streams, doc, listeners,
+    ageRisk(ms){testNow+=ms;for(const interval of intervals)if(interval.ms===1000)interval.fn();}};
 }
+
+test('risk cards show both platforms and expire even when status polling stops',async()=>{
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({connected:true,state:{groups:[],orders:[]},
+    liquidation_risk:{binance:{level:'warning',message:'接近强平',age_ms:1000,stale_after_ms:20000,
+      distance_percent:3,equity:900,maintenance_margin:30,positions:[{side:'short',qty:1,mark_price:4000,liquidation_price:4120,distance_percent:3}]},
+      mt5:{level:'danger',message:'保证金不足',age_ms:1000,margin:100,equity:80,margin_level:80,
+        currency:'USD',margin_so_mode:0,margin_so_call:100,margin_so_so:50}}})});
+  await f.el('trading-reconcile').onclick();
+  assert.equal(f.el('risk-binance-card').dataset.level,'warning');
+  assert.equal(f.el('risk-mt5-card').dataset.level,'danger');
+  assert.match(f.el('risk-binance-metrics').innerHTML,/空头 1 XAU.*强平价 4,120/);
+  assert.match(f.el('risk-mt5-metrics').innerHTML,/经纪商强平线.*50%/);
+  const calls=f.calls.length;
+  f.ageRisk(20000);
+  assert.equal(f.el('risk-binance-card').dataset.level,'stale');
+  assert.equal(f.el('risk-mt5-card').dataset.level,'stale');
+  assert.match(f.el('risk-binance-state').textContent,/数据过期/);
+  assert.match(f.el('risk-binance-message').textContent,/当前风险状态未知/);
+  assert.equal(f.calls.length,calls);
+});
+
+test('unknown risk does not render missing metrics as zero and escapes upstream text',async()=>{
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({state:{groups:[],orders:[]},
+    liquidation_risk:{binance:{level:'unknown',equity:null,positions:[]},
+      mt5:{level:'unknown',currency:'<img src=x>',margin_so_mode:1,margin_so_so:50}}})});
+  await f.el('trading-reconcile').onclick();
+  assert.equal(f.el('risk-binance-card').dataset.level,'unknown');
+  assert.doesNotMatch(f.el('risk-binance-metrics').innerHTML,/>0 USDT/);
+  assert.match(f.el('risk-mt5-metrics').innerHTML,/&lt;img src=x&gt;/);
+  assert.doesNotMatch(f.el('risk-mt5-metrics').innerHTML,/<img/);
+});
 
 test('event log translates preflight reasons, merges duplicates and keeps more than eight rows', async () => {
   const events=[{time:30000,kind:'entry_preflight_blocked',data:{threshold:3.7,reason:'校时失败'}},

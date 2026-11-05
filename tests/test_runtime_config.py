@@ -39,6 +39,21 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(result['config_pending']);self.assertEqual(result['plan']['lots'],.02)
         self.assertNotIn('never-display',str(result))
 
+    def test_risk_thresholds_apply_without_reconnecting_or_network_calls(self):
+        runtime=self.fixture();saved=copy.deepcopy(runtime.config)
+        saved['risk_alerts']={'binance_warning_distance_percent':8,'mt5_warning_margin_level_percent':300}
+        self.assertFalse(runtime.config_changed(saved))
+        monitor=SimpleNamespace(status=Mock(return_value={'level':'warning'}))
+        runtime.risk_monitor=monitor
+        runtime._last_mt5_snapshot={'account':{'equity':1000,'margin':100,'margin_so_mode':0,'margin_so_call':100,'margin_so_so':50}}
+        import time
+        runtime._last_mt5_snapshot_at=time.monotonic()
+        with patch('server.load_config',return_value=saved): result=runtime.snapshot()
+        self.assertFalse(result['config_pending'])
+        self.assertEqual(result['liquidation_risk']['alerts']['mt5_warning_margin_level_percent'],300)
+        self.assertEqual(result['liquidation_risk']['mt5']['level'],'normal')
+        monitor.status.assert_called_once()
+
     def test_reconnecting_an_enabled_engine_is_rejected_before_network_calls(self):
         runtime=self.fixture();runtime.engine.state['enabled']=True
         with patch('server.Binance',Mock()) as client:

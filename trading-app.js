@@ -199,7 +199,7 @@
   }
   function updateWorkflow() {
     const state=last?.state||{}, connected=Boolean(last?.connected), reconciled=last?.capabilities?.reconciled===true;
-    const pending=connected&&(last?.config_pending===true || typeof dirtyFields!=='undefined'&&dirtyFields.size>0);
+    const pending=connected&&(last?.config_pending===true || typeof dirtyFields!=='undefined'&&[...dirtyFields].some(id=>!id.startsWith('risk-')));
     if(!connected)el('trading-mode').textContent=(el('exec-mode').value==='live'?'实盘配置':'纸面配置')+' · 未连接';
     const status=el('workflow-status');
     if(status)status.textContent=!connected?'下一步：连接双边行情（首次使用先完成连接设置）':pending?'参数有变更：当前引擎继续使用连接时配置；暂停新开仓后重新连接生效。':!reconciled?'下一步：持仓对账，通过后可启动自动开仓。':state.enabled?'自动开仓运行中 · 暂停只停止新开仓，已有仓位继续管理。':'准备就绪 · 可启动自动开仓';
@@ -211,12 +211,49 @@
       el('apply-entry').disabled=!connected;
     }
     const pendingNode=el('config-pending');
-    if(pendingNode){pendingNode.hidden=!pending;pendingNode.textContent='已保存 ≠ 已生效。手数、止盈和其他参数须重新连接；仅开仓阈值可单独点击「应用」。已有组保留原规则。';}
+    if(pendingNode){pendingNode.hidden=!pending;pendingNode.textContent='已保存 ≠ 已生效。手数、止盈等交易参数须重新连接；开仓阈值可单独点击「应用」，风险提醒阈值保存即生效。已有组保留原规则。';}
     const groups=(state.groups||[]).filter(g=>g.status!=='closed');
     text('live-groups',groups.length+' 组');
     text('live-exposure',groups.length?'MT5 '+n(groups.reduce((sum,g)=>sum+Number(g.lots||0),0))+' 手（各组开仓量）':connected?'当前无本策略持仓':'等待连接与对账');
   }
+  let riskSample=null, riskReceivedAt=0;
+  function renderRisk() {
+    const elapsed=Math.max(0,Date.now()-riskReceivedAt);
+    const fmt=(value,suffix='')=>typeof value==='number'&&Number.isFinite(value)?n(value)+suffix:'—';
+    const metric=(label,value)=>`<div><span>${escape(label)}</span><strong>${escape(value)}</strong></div>`;
+    const labels={normal:'未触发预警',warning:'接近预警线',danger:'危险提醒',unknown:'风险状态未知',stale:'数据过期',paper:'纸面模式',disconnected:'未连接'};
+    for(const side of ['binance','mt5']) {
+      const card=el(`risk-${side}-card`);if(!card)continue;
+      const sample=riskSample?.[side]||{level:'unknown',message:'等待账户风险数据'};
+      const age=typeof sample.age_ms==='number'?sample.age_ms+elapsed:null;
+      const stale=age!==null&&age>=(sample.stale_after_ms??20000)&&!['paper','disconnected'].includes(sample.level);
+      const known=Object.prototype.hasOwnProperty.call(labels,sample.level)||sample.level==='idle';
+      const level=stale?'stale':known?sample.level:'unknown';
+      card.dataset.level=level;
+      el(`risk-${side}-state`).textContent=level==='idle'?(side==='binance'?'无该品种持仓':'无保证金占用'):labels[level];
+      el(`risk-${side}-message`).textContent=stale?'风险数据已过期，当前风险状态未知；以下数值为上次快照。':sample.message||'风险状态未知';
+      el(`risk-${side}-age`).textContent=age===null?'尚无真实账户快照':`账户快照 ${Math.floor(age/1000)} 秒前${sample.updated_ms?' · '+dateTime(sample.updated_ms):''}`;
+      let metrics='';
+      if(side==='binance') {
+        metrics=metric('最近强平距离',fmt(sample.distance_percent,'%'))+
+          metric('账户保证金余额',fmt(sample.equity,' USDT'))+
+          metric('账户维持保证金',fmt(sample.maintenance_margin,' USDT'))+
+          metric('账户可用余额',fmt(sample.available,' USDT'));
+        metrics+=(sample.positions||[]).map(p=>`<div class="risk-position">${p.side==='short'?'空头':'多头'} ${escape(fmt(p.qty))} XAU · 标记价 ${escape(fmt(p.mark_price))} · 强平价 ${escape(p.liquidation_price>0?fmt(p.liquidation_price):'未返回有效值')} USDT · 距离 ${escape(fmt(p.distance_percent,'%'))}</div>`).join('');
+      } else {
+        const currency=sample.currency||'账户币种';
+        const unit=sample.margin_so_mode===0?'%':sample.margin_so_mode===1?' '+currency:'';
+        metrics=metric('账户保证金水平',sample.margin>0?fmt(sample.margin_level,'%'):'—')+
+          metric('经纪商强平线',fmt(sample.margin_so_so,unit))+
+          metric('经纪商追保线',fmt(sample.margin_so_call,unit))+
+          metric('账户净值 / 可用保证金',`${fmt(sample.equity)} / ${fmt(sample.free_margin)} ${currency}`);
+        if(sample.margin_so_mode===1)metrics+='<div class="risk-position">金额强平模式 · 不换算黄金强平价</div>';
+      }
+      el(`risk-${side}-metrics`).innerHTML=metrics;
+    }
+  }
   function render(result) {
+    riskSample=result.liquidation_risk||null;riskReceivedAt=Date.now();renderRisk();
     last=result;
     const state=result.state||{}, q=(latestLive&&result.quote&&latestLive.key===result.quote.key&&latestLive.time_ms>result.quote.time_ms?latestLive:result.quote);
     const report=result.position_report;
@@ -554,4 +591,5 @@
   window.addEventListener('gold-busy-changed',updateWorkflow);
   setTimeout(()=>status().then(startStream).catch(error=>text('trading-result',error.message,true)),400);
   timer=setInterval(()=>{if(!document.hidden&&!busy&&!window.goldPairUiBusy)status().catch(error=>text('trading-result',error.message,true));},3000);
+  setInterval(()=>{if(!document.hidden)renderRisk();},1000);
 })();

@@ -15,7 +15,27 @@
 <div><span>退出价差</span><strong id="live-exit">—</strong><small>买回币安 Ask − 卖 MT5 Bid</small></div>
 <div><span>距基础开仓阈值</span><strong id="live-distance">—</strong><small id="live-opportunity">等待双边行情</small></div>
 <div><span>当前持仓</span><strong id="live-groups">0 组</strong><small id="live-exposure">等待连接与对账</small></div>
-</div><div class="workspace-columns"><section class="panel" aria-labelledby="plan-heading">
+</div>
+<section class="risk-panel" aria-labelledby="risk-heading">
+<div class="risk-heading"><h2 id="risk-heading">双边强平风险</h2><span class="muted">只读提醒 · 不自动减仓或平仓</span></div>
+<div class="risk-cards">
+<article id="risk-binance-card" class="risk-card" data-level="unknown" aria-labelledby="risk-binance-heading">
+<div class="risk-card-heading"><h3 id="risk-binance-heading">币安永续</h3><span id="risk-binance-state" class="risk-badge" role="status">风险状态未知</span></div>
+<div id="risk-binance-metrics" class="risk-metrics">等待连接</div><p id="risk-binance-message" class="note">未连接，风险状态未知</p><small id="risk-binance-age" class="muted">尚无账户快照</small>
+</article>
+<article id="risk-mt5-card" class="risk-card" data-level="unknown" aria-labelledby="risk-mt5-heading">
+<div class="risk-card-heading"><h3 id="risk-mt5-heading">MT5 账户</h3><span id="risk-mt5-state" class="risk-badge" role="status">风险状态未知</span></div>
+<div id="risk-mt5-metrics" class="risk-metrics">等待连接</div><p id="risk-mt5-message" class="note">未连接，风险状态未知</p><small id="risk-mt5-age" class="muted">尚无账户快照</small>
+</article>
+</div>
+<details class="risk-settings"><summary>预警阈值与指标说明</summary><div class="grid">
+<label>币安距离强平预警线（≤ %）<input id="risk-binance-warning" type="number" min="0.01" max="100" step="0.1" value="5"></label>
+<label>币安距离强平危险线（≤ %）<input id="risk-binance-danger" type="number" min="0.01" max="100" step="0.1" value="2"></label>
+<label>MT5 保证金水平预警线（≤ %）<input id="risk-mt5-warning" type="number" min="0.01" max="1000000" step="1" value="200"></label>
+<label>MT5 保证金水平危险线（≤ %）<input id="risk-mt5-danger" type="number" min="0.01" max="1000000" step="1" value="100"></label>
+</div><p class="note">阈值自动保存后立即用于页面提醒，无需重新连接；每侧危险线须低于预警线。初始值仅为提醒参数，不代表安全标准。币安距离以标记价为基准，显示当前品种所有方向中最近的一侧；全仓其他持仓会影响强平价。MT5 按整个账户计算，百分比模式下同时检查经纪商追保与强平线；金额模式仅展示原始阈值。数据超过 20 秒显示过期。上述提醒不保证能赶在强平前触发。</p></details>
+</section>
+<div class="workspace-columns"><section class="panel" aria-labelledby="plan-heading">
 <div class="heading"><div><p class="eyebrow">每组配置</p><h2 id="plan-heading">每组数量与配平</h2></div><span id="plan-state" class="badge neutral">等待 MT5 规格</span></div>
 <div class="grid">
 <label>每组 MT5 手数<input id="lots" type="number" step="any" value="0.02"></label>
@@ -52,7 +72,7 @@
 <label class="check"><input id="require-net" type="checkbox" checked> 平仓要求达到最低净收益</label>
 <label id="min-net-field"><span id="min-net-label">最低净收益（USD）</span><input id="min-net" type="number" value="0" min="0" step="0.01"></label>
 </div>
-<p id="entry-preflight" class="note">接近阈值时自动预检；开仓阈值可单独应用，其他参数重新连接生效。</p><details><summary>高级连接与执行参数</summary><div class="grid">
+<p id="entry-preflight" class="note">接近阈值时自动预检；开仓阈值可单独应用，手数等交易参数重新连接生效。</p><details><summary>高级连接与执行参数</summary><div class="grid">
 <label>兼容轮询间隔（毫秒）<input id="poll-ms" type="number" value="250" min="250" max="5000"></label>
 <label>平仓重试次数<input id="close-retries" type="number" value="3" min="1" max="5"></label>
 <label>MT5 策略识别码（Magic）<input id="magic" type="number" value="9121701" min="1" max="2147483647"></label>

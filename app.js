@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 const bindings = {
   mt5: {adapter:'mt5-adapter', symbol:'mt5-symbol', terminal_path:'terminal-path', mcp_url:'mcp-url', account:'account', server:'mt5-server'},
   strategy: {mt5_lots:'lots', entry_spread_usd:'entry', take_contraction_usd:'take', max_groups:'max-groups', max_quote_age_ms:'max-age', max_clock_skew_ms:'max-clock-skew', max_unhedged_ms:'max-unhedged', max_slippage_usd:'slippage', unwind_slippage_usd:'unwind-slippage', grid_spacing_usd:'grid-spacing', grid_max_adds:'grid-adds'},
+  risk_alerts: {binance_warning_distance_percent:'risk-binance-warning',binance_danger_distance_percent:'risk-binance-danger',mt5_warning_margin_level_percent:'risk-mt5-warning',mt5_danger_margin_level_percent:'risk-mt5-danger'},
 };
 const DRAFT_KEY = 'GoldPairLocal.configDraft.v2';
 const LEGACY_DRAFT_KEY = 'GoldPairLocal.configDraft.v1';
@@ -12,6 +13,7 @@ const sectionFields = {
   mt5: new Set([...Object.values(bindings.mt5), 'mt5-mcp-token']),
   binance: new Set(['symbol','recv-window','binance-proxy','trading-api-key','trading-api-secret']),
   execution: new Set(['exec-mode','entry-leg','poll-ms','magic','close-retries']),
+  risk_alerts: new Set(Object.values(bindings.risk_alerts)),
 };
 let credentialsDirty = false;
 let saveQueue = Promise.resolve();
@@ -67,6 +69,7 @@ function formConfig() {
   mt5.mcp_token=value('mt5-mcp-token');
   return {
     mode:'paper', symbol:value('symbol').toUpperCase(), mt5,
+    risk_alerts:Object.fromEntries(Object.entries(bindings.risk_alerts).map(([key,id])=>[key,Number(value(id))])),
     binance:{recv_window_ms:Number(value('recv-window')),proxy_url:value('binance-proxy'),api_key:value('trading-api-key'),api_secret:value('trading-api-secret')},
     strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),grid_enabled:$('grid-enabled').checked,
       cooldown_seconds:Number(value('cooldown')),max_total_lots:Number(value('max-total')),exit_mode:value('exit-mode'),target_mode:value('target-mode'),exit_spread_usd:Number(value('absolute-exit')),

@@ -32,6 +32,7 @@ from trading_store import Store
 import position_adoption
 from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, observed_quote
 from entry_preflight import EntryPreflight
+from liquidation_risk import BinanceRiskMonitor, risk_snapshot
 
 ROOT = Path(__file__).resolve().parent
 DATA = (Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GoldPairLocal') if getattr(sys, 'frozen', False) else ROOT / 'data'
@@ -102,6 +103,7 @@ class TradingRuntime:
         self.push_bridge = None
         self._last_mt5_snapshot = None
         self._last_mt5_snapshot_at = 0
+        self._mt5_risk_error = ''
         self.position_report = None
         self.adoption_preview = None
         self.engine.before_import_close = self._guard_import_close
@@ -111,6 +113,7 @@ class TradingRuntime:
         self._last_rest_market = None
         self._last_rest_market_at = 0
         self.entry_preflight = None
+        self.risk_monitor = None
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._loop, name='gold-pair-market', daemon=True)
         self.thread.start()
@@ -126,6 +129,8 @@ class TradingRuntime:
             self.market_stream.close()
         if self.entry_preflight:
             self.entry_preflight.close()
+        if self.risk_monitor:
+            self.risk_monitor.close()
         self.store.close()
 
     def connect(self, config, api_key='', api_secret='', mt5_mcp_token=''):
@@ -159,6 +164,8 @@ class TradingRuntime:
             new_terminal = None
             new_stream = None
             new_preflight = None
+            new_risk_monitor = None
+            mt5_snapshot_started = None
             meta = {'mt5_transport':'工作进程持久会话 + tick 轮询'}
             try:
                 new_spec = new_binance.spec(config['symbol'])
@@ -183,6 +190,7 @@ class TradingRuntime:
                 else:
                     checked_spec(config['mt5'], require_applied=True)
                     new_terminal = Terminal(config['mt5'], config['execution']['magic'])
+                    mt5_snapshot_started = time.monotonic()
                     snapshot = new_terminal.call('snapshot')
                     snapshot['quote'] = self.mt5_freshness.observe(snapshot['quote'],config['mt5'])
                     if not snapshot['allowed']:
@@ -230,6 +238,10 @@ class TradingRuntime:
                 broker = PaperBroker() if mode == 'paper' else LiveBroker(config, new_binance, new_terminal, new_spec)
                 if mode == 'live':
                     new_preflight = EntryPreflight(new_binance, new_binance, new_spec)
+                    risk_client = Binance(production=True, key=api_key, secret=api_secret,
+                                          recv_window_ms=config['binance']['recv_window_ms'],
+                                          proxy_url=config['binance'].get('proxy_url', ''))
+                    new_risk_monitor = BinanceRiskMonitor(risk_client, config['symbol'])
             except Exception:
                 if new_stream:
                     new_stream.close()
@@ -237,19 +249,24 @@ class TradingRuntime:
                     new_terminal.close()
                 if new_preflight:
                     new_preflight.close()
+                if new_risk_monitor:
+                    new_risk_monitor.close()
                 raise
 
             if self.pump: self.pump.close()
             old_terminal = self.terminal
             old_stream = self.market_stream
             old_preflight = self.entry_preflight
+            old_risk_monitor = getattr(self, 'risk_monitor', None)
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
             self.entry_preflight = new_preflight
+            self.risk_monitor = new_risk_monitor
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.engine.quote_provider = self._execution_quote
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
             self._last_mt5_snapshot = snapshot if config['mt5']['adapter']=='native' else None
-            self._last_mt5_snapshot_at = time.monotonic()
+            self._last_mt5_snapshot_at = mt5_snapshot_started
+            self._mt5_risk_error = ''
             self.quote, self.connected, self.last_error = new_quote, True, ''
             self.market_meta = meta
             self.position_report = None
@@ -282,6 +299,8 @@ class TradingRuntime:
                 old_stream.close()
             if old_preflight and old_preflight is not new_preflight:
                 old_preflight.close()
+            if old_risk_monitor and old_risk_monitor is not new_risk_monitor:
+                old_risk_monitor.close()
             return self.snapshot()
 
     def _quote(self, mt5, binance, config=None):
@@ -384,9 +403,15 @@ class TradingRuntime:
             self.engine.tick(c, self.plan, q)
         # Maintenance is separate from quote intake. It can delay a strategy pass,
         # but cannot freeze push reception or the chart; the next pass reads latest.
-        if c['mt5']['adapter']=='native' and time.monotonic()-self._last_mt5_snapshot_at>=2:
-            self._last_mt5_snapshot = self.terminal.call('snapshot')
-            self._last_mt5_snapshot_at = time.monotonic()
+        if c['mt5']['adapter']=='native' and time.monotonic()-(self._last_mt5_snapshot_at or 0)>=2:
+            snapshot_started = time.monotonic()
+            try:
+                self._last_mt5_snapshot = self.terminal.call('snapshot')
+            except Exception:
+                self._mt5_risk_error = 'MT5 账户快照读取失败'
+                raise
+            self._last_mt5_snapshot_at = snapshot_started
+            self._mt5_risk_error = ''
             if not self._last_mt5_snapshot['allowed']:
                 raise ValueError('MT5 自动交易权限已关闭；已暂停开仓')
             self._update_live_carry(self._last_mt5_snapshot['positions'])
@@ -635,6 +660,7 @@ class TradingRuntime:
     def config_changed(self, current_config):
         incoming=copy.deepcopy(current_config);effective=copy.deepcopy(self.config)
         if not effective: return False
+        incoming.pop('risk_alerts', None);effective.pop('risk_alerts', None)
         if effective['costs']['usdt_usd_auto']:
             incoming['costs']['usdt_usd']=effective['costs']['usdt_usd']
         if effective['costs']['binance_fee_auto'] and effective['execution']['mode']=='live':
@@ -946,6 +972,7 @@ class TradingRuntime:
 
     def snapshot(self):
         with self.lock:
+            saved_config = load_config()
             # A valuation snapshot remains available while management is paused,
             # without invoking strategy decisions or changing durable state.
             st = copy.deepcopy(self.engine.state)
@@ -962,7 +989,12 @@ class TradingRuntime:
                 'position_report': self.position_report,
                 'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd'],
                                      'mt5_symbol': self.config['mt5']['symbol'], 'symbol': self.config['symbol']} if self.config else None,
-                'config_pending': bool(self.connected and self.config_changed(load_config())),
+                'config_pending': bool(self.connected and self.config_changed(saved_config)),
+                'liquidation_risk': risk_snapshot(
+                    self.config['execution']['mode'] if self.config else 'paper', self.connected,
+                    getattr(self, 'risk_monitor', None), getattr(self, '_last_mt5_snapshot', None),
+                    getattr(self, '_last_mt5_snapshot_at', None), saved_config.get('risk_alerts', {}),
+                    mt5_error=getattr(self, '_mt5_risk_error', '')),
                 'entry_preflight': self.entry_preflight.status() if self.entry_preflight else None,
                 'capabilities': {'live_orders': bool(self.config and self.config['execution']['mode'] == 'live'),
                                  'mode': self.config['execution']['mode'] if self.config else 'paper',

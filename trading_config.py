@@ -3,6 +3,7 @@ import math
 import re
 from decimal import Decimal
 from urllib.parse import urlsplit
+from liquidation_risk import validate_alerts
 
 
 def validate_proxy_url(value):
@@ -24,6 +25,7 @@ def validate_proxy_url(value):
 
 def validate(c):
     s, e, costs = c['strategy'], c['execution'], c['costs']
+    validate_alerts(c.get('risk_alerts', {}))
     validate_proxy_url(c.get('binance', {}).get('proxy_url', ''))
     if not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
         raise ValueError('币安合约名称无效，请填写平台实际名称，例如 XAUUSDT')

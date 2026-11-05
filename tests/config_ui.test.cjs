@@ -61,6 +61,21 @@ test('lots preview updates immediately after refresh without a fresh MT5 check',
   f.edit('lots','');assert.match(f.el('plan-result').textContent,/必须大于 0/);
 });
 
+test('risk thresholds save numerically and never ask to reconnect the trading engine',async()=>{
+  const live={connected:true,config_pending:false,state:{enabled:false,groups:[],orders:[]},capabilities:{mode:'live',reconciled:true}};
+  const f=await fixture({'/api/trading/reconcile':()=>live,'/api/trading/status':()=>live});
+  f.loadTrading();await f.el('trading-reconcile').onclick();
+  f.edit('risk-binance-warning','8');f.edit('risk-mt5-warning','300');
+  assert.doesNotMatch(f.el('workflow-status').textContent,/重新连接/);
+  assert.equal(f.el('trading-toggle').disabled,false);
+  await f.run('saveConfig()');
+  const payload=f.calls.filter(x=>x.url==='/api/config'&&x.body).at(-1).body;
+  assert.equal(payload.risk_alerts.binance_warning_distance_percent,8);
+  assert.equal(payload.risk_alerts.mt5_warning_margin_level_percent,300);
+  assert.equal(f.run('dirtyFields.size'),0);
+  assert.ok(!f.calls.some(x=>['/api/trading/start','/api/trading/connect','/api/trading/close'].includes(x.url)));
+});
+
 test('old runtime plan never replaces the current quantity preview',async()=>{
   const f=await fixture({'/api/trading/reconcile':()=>({connected:true,plan:{lots:.02,qty:2},
     state:{groups:[],orders:[]},config_pending:true,capabilities:{mode:'paper',reconciled:true}})});

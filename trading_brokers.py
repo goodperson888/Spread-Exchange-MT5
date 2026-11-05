@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 from urllib.error import HTTPError
+from liquidation_risk import mt5_risk_fields
 
 try:
     import websocket
@@ -488,7 +489,7 @@ def worker_main():
                                   volume_max=s.volume_max,volume_step=s.volume_step,trade_mode=s.trade_mode,
                                   currency_base=s.currency_base,currency_profit=s.currency_profit),
                         account=dict(account=str(a.login),server=a.server,currency=a.currency,margin_mode=a.margin_mode,
-                                     trade_mode=a.trade_mode,free_margin=a.margin_free),
+                                     trade_mode=a.trade_mode,free_margin=a.margin_free,**mt5_risk_fields(a)),
                         allowed=bool(t.trade_allowed and not t.tradeapi_disabled and a.trade_allowed and a.trade_expert),
                         orders=[dict(ticket=str(x.ticket),symbol=x.symbol,type=x.type,volume=x.volume_current) for x in pending],
                         positions=[dict(identifier=str(p.identifier),ticket=str(p.ticket),lots=p.volume,side=p.type,magic=p.magic,swap=p.swap,
