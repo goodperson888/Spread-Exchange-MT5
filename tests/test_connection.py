@@ -73,6 +73,47 @@ class ConnectorTests(unittest.TestCase):
         fake.symbols.append(other)
         self.assertEqual(connector.inspect_terminal({}, fake)['code'], 'SELECT_SYMBOL')
 
+    def test_empty_symbol_shows_rejected_gold_hints_without_reading_more_symbols(self):
+        fake=FakeMT5();fake.symbol.currency_base=''
+        fake.symbol.description='Gold vs US Dollar / Spot'
+        unrelated=copy.copy(fake.symbol);unrelated.name='EURUSD';unrelated.description='Euro vs US Dollar'
+        fake.symbols.append(unrelated)
+        with patch.object(fake,'symbol_info',wraps=fake.symbol_info) as info, \
+             patch.object(fake,'symbols_get',wraps=fake.symbols_get) as symbols, \
+             patch.object(fake,'symbol_select',wraps=fake.symbol_select) as select:
+            result=connector.inspect_terminal({'symbol':''},fake)
+        symbols.assert_called_once_with();info.assert_not_called();select.assert_not_called()
+        self.assertEqual(result['code'],'SELECT_SYMBOL')
+        self.assertTrue(result['connected']);self.assertIsNone(result['symbol'])
+        self.assertEqual(result['candidates'],[])
+        self.assertEqual(result['symbol_scan'],{'total_symbols':2,'validated_candidates':0,'diagnostic_matches':1,'shown':1})
+        diagnostic=result['symbol_diagnostic_candidates'][0]
+        self.assertEqual(diagnostic['name'],'XAUUSDm');self.assertEqual(diagnostic['currency_base'],'')
+        self.assertIn('为空值',diagnostic['reasons'][0])
+
+    def test_auto_scan_diagnostic_is_bounded_and_never_accepts_name_only(self):
+        fake=FakeMT5();fake.symbol.currency_base='EUR'
+        fake.symbols=[]
+        for index in range(12):
+            info=copy.copy(fake.symbol);info.name='GOLD'+str(index);fake.symbols.append(info)
+        result=connector.inspect_terminal({},fake)
+        self.assertEqual(result['symbol_scan']['diagnostic_matches'],12)
+        self.assertEqual(len(result['symbol_diagnostic_candidates']),5)
+        self.assertEqual(result['candidates'],[]);self.assertIsNone(result['symbol'])
+        fake.symbols=[]
+        result=connector.inspect_terminal({},fake)
+        self.assertEqual(result['symbol_scan']['total_symbols'],0)
+        self.assertEqual(result['symbol_diagnostic_candidates'],[])
+
+    def test_incomplete_requested_symbol_has_specific_message_and_diagnostic_hints(self):
+        fake=FakeMT5();fake.symbol.currency_base=''
+        with patch.object(fake,'symbol_info',wraps=fake.symbol_info) as info:
+            result=connector.inspect_terminal({'symbol':'x'},fake)
+        info.assert_called_once_with('x')
+        self.assertIn('无法读取所填品种',result['message'])
+        self.assertEqual(result['symbol_diagnostic_candidates'][0]['name'],'XAUUSDm')
+        self.assertEqual(result['candidates'],[]);self.assertIsNone(result['symbol'])
+
     def test_non_gold_and_missing_spec(self):
         for field, value in (('currency_base','EUR'), ('trade_contract_size',float('nan')), ('volume_step',0)):
             fake = FakeMT5(); setattr(fake.symbol, field, value)
@@ -236,6 +277,18 @@ class HttpTests(unittest.TestCase):
         with patch.object(server, 'run_probe', return_value=result): self.request('/api/mt5/check', {})
         self.request('/api/config', {'mt5':{'account':'456'}})
         self.assertEqual(self.request('/api/mt5/apply', {})[0], 400)
+
+    def test_empty_symbol_http_check_keeps_diagnostics_and_refuses_apply(self):
+        self.request('/api/config',{'mt5':{'adapter':'native','symbol':''}})
+        fake=FakeMT5();fake.symbol.currency_base=''
+        with patch.object(server,'run_probe',side_effect=lambda settings:connector.inspect_terminal(settings,fake)):
+            code,body=self.request('/api/mt5/check',{})
+        self.assertEqual(code,200)
+        result=body['result']
+        self.assertEqual(result['code'],'SELECT_SYMBOL')
+        self.assertEqual(result['symbol_diagnostic_candidates'][0]['currency_base'],'')
+        self.assertEqual(result['symbol_scan']['total_symbols'],1)
+        self.assertEqual(self.request('/api/mt5/apply',{})[0],400)
 
     def test_invalid_lot_and_expired_specs(self):
         self.request('/api/config', {'mt5': {'adapter': 'native'}})

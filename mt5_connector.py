@@ -43,6 +43,19 @@ def symbol_diagnostics(info):
     return result
 
 
+def symbol_scan_diagnostics(symbols, gold):
+    """Name/description matches are diagnostic hints, never executable candidates."""
+    hints = []
+    for info in symbols:
+        text = (str(getattr(info, 'name', ''))+' '+str(getattr(info, 'description', ''))).upper()
+        if (str(getattr(info, 'currency_base', '')).upper() == 'XAU' or
+                any(token in text for token in ('XAU', 'GOLD', '黄金'))):
+            hints.append(info)
+    return dict(symbol_scan={'total_symbols':len(symbols), 'validated_candidates':len(gold),
+                             'diagnostic_matches':len(hints), 'shown':min(5,len(hints))},
+                symbol_diagnostic_candidates=[symbol_diagnostics(info) for info in hints[:5]])
+
+
 def inspect_terminal(settings, api=None, platform=None):
     platform = platform or sys.platform
     if api is None:
@@ -91,7 +104,14 @@ def inspect_terminal(settings, api=None, platform=None):
             selected = gold[0].name
         info = api.symbol_info(selected) if selected else None
         if info is None:
-            result.update(code='SELECT_SYMBOL', message='请选择本账户的黄金品种，再检查连接。' if gold else '未发现基础货币 XAU、盈亏货币 USD 的黄金品种，请核对经纪商合约。')
+            result.update(symbol_scan_diagnostics(symbols, gold))
+            if selected:
+                message = '已连接 MT5，但无法读取所填品种的详细信息；请核对终端中的完整品种名后重新检查。'
+            elif gold:
+                message = '已连接 MT5，发现多个通过货币字段校验的黄金品种；请选择具体品种，再检查连接。'
+            else:
+                message = '已连接 MT5，但自动识别未找到通过校验的黄金品种；请查看下方候选诊断，并手动填写终端中的完整品种名后重新检查。'
+            result.update(code='SELECT_SYMBOL', message=message)
             return result
         result['symbol_diagnostics'] = symbol_diagnostics(info)
         if result['symbol_diagnostics']['reasons']:

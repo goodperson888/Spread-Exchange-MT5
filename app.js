@@ -261,16 +261,23 @@ $('clear-credentials').onclick=()=>action('clear-credentials',async()=>{
 function showResult(r) {
   const lines = [r.message];
   if (r.identity) lines.push('实际账户：' + r.identity.account + ' · ' + r.identity.server + ' · ' + r.identity.currency);
-  if (!r.symbol && r.symbol_diagnostics) {
-    const d=r.symbol_diagnostics;
+  if (!r.symbol && r.symbol_scan) {
+    const scan=r.symbol_scan;
+    lines.push(`自动识别诊断：已扫描 ${scan.total_symbols} 个品种，通过货币字段校验 ${scan.validated_candidates} 个；名称或描述相关 ${scan.diagnostic_matches} 个，展示 ${scan.shown} 个。`);
+    lines.push('以下候选仅供诊断，不表示已通过黄金合约校验。');
+  }
+  const diagnostics=r.symbol_diagnostics?[r.symbol_diagnostics]:(r.symbol_diagnostic_candidates||[]);
+  if (!r.symbol && diagnostics.length) {
     const raw=value=>value===null||value===undefined?'未返回':value===''?'空值':JSON.stringify(value);
-    lines.push('品种诊断（MT5 实际返回）：'+raw(d.name)+'；描述 '+raw(d.description));
-    lines.push('基础货币 currency_base：'+raw(d.currency_base)+'；盈利货币 currency_profit：'+raw(d.currency_profit));
-    lines.push('预付款货币 currency_margin：'+raw(d.currency_margin)+'（与基础货币分开核对）');
-    lines.push('自定义品种 custom：'+raw(d.custom)+'；合约量 trade_contract_size：'+raw(d.trade_contract_size)+'（尚未确认计量单位）');
-    lines.push('计算模式 trade_calc_mode：'+raw(d.trade_calc_mode)+'；交易模式 trade_mode：'+raw(d.trade_mode));
-    lines.push('手数规则：最小 '+raw(d.volume_min)+' / 步长 '+raw(d.volume_step)+' / 最大 '+raw(d.volume_max));
-    for (const reason of d.reasons||[]) lines.push('未通过：'+reason);
+    for (const d of diagnostics) {
+      lines.push('品种诊断（MT5 实际返回）：'+raw(d.name)+'；描述 '+raw(d.description));
+      lines.push('基础货币 currency_base：'+raw(d.currency_base)+'；盈利货币 currency_profit：'+raw(d.currency_profit));
+      lines.push('预付款货币 currency_margin：'+raw(d.currency_margin)+'（与基础货币分开核对）');
+      lines.push('自定义品种 custom：'+raw(d.custom)+'；合约量 trade_contract_size：'+raw(d.trade_contract_size)+'（尚未确认计量单位）');
+      lines.push('计算模式 trade_calc_mode：'+raw(d.trade_calc_mode)+'；交易模式 trade_mode：'+raw(d.trade_mode));
+      lines.push('手数规则：最小 '+raw(d.volume_min)+' / 步长 '+raw(d.volume_step)+' / 最大 '+raw(d.volume_max));
+      for (const reason of d.reasons||[]) lines.push('未通过：'+reason);
+    }
     lines.push('请把这段品种诊断复制或截图用于核对；品种名称和合约量本身不能确认配平单位。');
   }
   if (r.symbol && r.symbol.name) lines.push('黄金品种：' + r.symbol.name + '；每手 ' + r.symbol.contract_size_oz + ' 盎司；最小 ' + r.symbol.volume_min + ' / 步长 ' + r.symbol.volume_step + ' / 最大 ' + r.symbol.volume_max + ' 手');
@@ -281,8 +288,12 @@ function showResult(r) {
   }
   for (const reason of r.blockers || []) lines.push('待处理：' + reason);
   message('mt5-result', lines.join('\n'), !r.connected || !r.identity_matches || !r.symbol);
-  $('mt5-symbols').replaceChildren(...(r.candidates || []).map(name => {
-    const option = document.createElement('option'); option.value = name; return option;
+  const verified=new Set(r.candidates||[]);
+  const names=[...new Set([...verified,...diagnostics.map(d=>d.name).filter(name=>typeof name==='string'&&name)])];
+  $('mt5-symbols').replaceChildren(...names.map(name => {
+    const option = document.createElement('option'); option.value = name;
+    if(!verified.has(name)) option.label=name+'（待校验，仅供诊断）';
+    return option;
   }));
   
   // 设置hasResult状态

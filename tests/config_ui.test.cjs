@@ -82,6 +82,26 @@ test('failed MT5 check shows raw symbol fields and never applies unverified cont
   assert.match(f.el('mt5-result').textContent,/custom：未返回/);
 });
 
+test('empty symbol auto detection renders candidate diagnosis without applying hints',async()=>{
+  const result={connected:true,identity_matches:true,symbol:null,code:'SELECT_SYMBOL',message:'自动识别未找到通过校验的黄金品种',
+    symbol_scan:{total_symbols:123,validated_candidates:0,diagnostic_matches:1,shown:1},
+    symbol_diagnostic_candidates:[{name:'XAUUSD',description:'Gold vs US Dollar / Spot',currency_base:'',
+      currency_profit:'USD',custom:false,trade_contract_size:100,reasons:['基础货币字段 currency_base 为空值，无法确认 XAU']}]};
+  const f=await fixture({'/api/mt5/check':()=>({result})});
+  const list=f.el('mt5-symbols');list.replaceChildren=(...options)=>{list.options=options;};
+  f.edit('mt5-symbol','');await f.el('check-mt5').onclick();
+  const text=f.el('mt5-result').textContent;
+  assert.match(text,/已扫描 123 个品种/);
+  assert.match(text,/候选仅供诊断/);
+  assert.match(text,/MT5 实际返回.*XAUUSD/);
+  assert.match(text,/currency_base：空值/);
+  assert.match(text,/未通过：基础货币/);
+  assert.equal(f.run('hasResult'),false);
+  assert.ok(!f.calls.some(c=>c.url==='/api/mt5/apply'));
+  assert.equal(list.options[0].value,'XAUUSD');
+  assert.match(list.options[0].label,/待校验，仅供诊断/);
+});
+
 test('risk thresholds save numerically and never ask to reconnect the trading engine',async()=>{
   const live={connected:true,config_pending:false,state:{enabled:false,groups:[],orders:[]},capabilities:{mode:'live',reconciled:true}};
   const f=await fixture({'/api/trading/reconcile':()=>live,'/api/trading/status':()=>live});
