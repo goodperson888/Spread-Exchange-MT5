@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 // Execute the actual button handlers without contacting any trading account.
 function pageFixture(reconcileFails = false, handlers = {}) {
-  const elements = new Map(), calls = [], charts=[], streams=[], listeners={};
+  const elements = new Map(), calls = [], charts=[], streams=[], listeners={}, windowListeners={};
   const intervals=[];let testNow=Date.now();
   class TestDate extends Date {static now(){return testNow;}}
   const doc={hidden:false, getElementById:id=>el(id),addEventListener:(name,fn)=>{listeners[name]=fn;}};
@@ -35,10 +35,10 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   const snapshot = () => ({connected:true, state:{enabled, groups:[], orders:[]},
     capabilities:{mode:'live', reconciled}});
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../trading-app.js'), 'utf8'), {
-    document:doc, window:{addEventListener(){},EventSource:FakeStream,GoldPairQuotes:require('../quote-stream.js')},
+    document:doc, window:{addEventListener(name,fn){windowListeners[name]=fn;},EventSource:FakeStream,GoldPairQuotes:require('../quote-stream.js')},
     loaded:false, saveConfig:async()=>{}, AbortController,
     Date:TestDate,setTimeout(){}, clearTimeout(){}, setInterval(fn,ms){intervals.push({fn,ms});},
-    echarts:{init:()=>({getOption:()=>({}), setOption(option){charts.push(option);}})},
+    echarts:{init:()=>({getOption:()=>({}), resize(){},setOption(option){charts.push(option);}})},
     fetch:async (url, options) => {
       calls.push({url, ...options});
       const action = url.split('/').at(-1);
@@ -59,7 +59,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
       return {ok:status===200, json:async()=>body};
     }
   });
-  return {el, calls, charts, streams, doc, listeners,
+  return {el, calls, charts, streams, doc, listeners,windowListeners,
     ageRisk(ms){testNow+=ms;for(const interval of intervals)if(interval.ms===1000)interval.fn();}};
 }
 
@@ -302,4 +302,91 @@ test('record close errors remain visible where the user pressed the button', asy
   await f.el('trading-reconcile').onclick();
   await f.el('groups').querySelectorAll('[data-close]')[0].onclick();
   assert.match(f.el('records-feedback').textContent,/本次操作未完成：请先完成持仓对账/);
+});
+
+const flushUI=()=>new Promise(resolve=>setImmediate(resolve));
+function monitoredSnapshot(now=Date.now()) {
+  return {connected:true,capabilities:{mode:'live',reconciled:true},
+    strategy_runtime:{entry_spread_usd:2.7,max_quote_age_ms:3000},
+    position_report:{time_ms:now-10000,mt5:[],binance:[],binance_orders:[]},
+    quote:{key:'a',time_ms:now,entry:3,exit:3.1,valid:true,
+      mt5:{observed_ms:now,bid:100,ask:100.1},binance:{observed_ms:now,bid:103,ask:103.1}},
+    state:{groups:[],orders:[]}};
+}
+
+test('returning to the trading view reloads a reset missed while records were visible',async()=>{
+ const snapshot=monitoredSnapshot();
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,'/api/trading/status':()=>snapshot});
+ await f.el('trading-reconcile').onclick();
+ const initial=f.calls.filter(c=>c.url.includes('chart?')).length;
+ assert.ok(f.charts.length);
+ f.listeners.visibilitychange();await flushUI();
+ f.el('view-trading').hidden=true;
+ f.streams.at(-1).emit({reset:true,samples:[snapshot.quote]});await flushUI();
+ assert.equal(f.calls.filter(c=>c.url.includes('chart?')).length,initial);
+ f.el('view-trading').hidden=false;
+ f.windowListeners['gold-workspace-changed']();await flushUI();
+ assert.equal(f.calls.filter(c=>c.url.includes('chart?')).length,initial+1);
+ assert.equal(f.calls.filter(c=>c.method==='POST').length,1);
+});
+
+test('live ticks do not repeatedly abort a history recovery already in flight',async()=>{
+ const snapshot=monitoredSnapshot();let finishHistory,hold=false;
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,'/api/trading/status':()=>snapshot,
+   '/api/trading/chart?minutes=0':()=>hold?new Promise(resolve=>{finishHistory=resolve;}):{samples:[]}});
+ await f.el('trading-reconcile').onclick();
+ f.listeners.visibilitychange();await flushUI();
+ hold=true;
+ const before=f.calls.filter(c=>c.url.includes('chart?')).length;
+ f.streams.at(-1).emit({reset:true,samples:[snapshot.quote]});await flushUI();
+ for(let i=1;i<=5;i++)f.streams.at(-1).emit({samples:[{...snapshot.quote,time_ms:snapshot.quote.time_ms+i}]});
+ f.streams.at(-1).emit({reset:true,samples:[snapshot.quote]});
+ await flushUI();
+ assert.equal(f.calls.filter(c=>c.url.includes('chart?')).length,before+1);
+ finishHistory({samples:[]});await flushUI();
+ assert.doesNotMatch(f.el('trading-result').textContent,/恢复历史失败/);
+ hold=false;f.windowListeners['gold-workspace-changed']();await flushUI();
+ assert.equal(f.calls.filter(c=>c.url.includes('chart?')).length,before+2);
+});
+
+test('reconciliation freshness expires locally and distinguishes valuation from platform checks',async()=>{
+ const snapshot=monitoredSnapshot();
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});
+ await f.el('trading-reconcile').onclick();
+ assert.match(f.el('records-position-check').textContent,/上次完整对账.*10 秒前.*非持续进行/);
+ const calls=f.calls.length;f.ageRisk(5000);
+ assert.match(f.el('records-position-check').textContent,/报价已过期.*15 秒前/);
+ assert.equal(f.calls.length,calls);
+ assert.equal(f.el('position-check-status').textContent,f.el('records-position-check').textContent);
+});
+
+test('group rules stay visible when pending main parameters change and abnormal groups have no ordinary TP line',async()=>{
+ const snapshot=monitoredSnapshot();snapshot.config_pending=true;
+ snapshot.state.groups=['open','unwinding','closing'].map((status,i)=>({id:'g'+i,status,
+   entry:3,lots:.01,qty:1,contract:100,parameters:{take_contraction_usd:2.3,max_slippage_usd:.2,unwind_slippage_usd:1},
+   valuation:{remaining:{mt5:1,binance:1}}}));
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});
+ f.el('take-contraction').value='9';
+ await f.el('trading-reconcile').onclick();
+ assert.match(f.el('parameter-scope').textContent,/尚未全部生效.*现有组仍保留原规则/);
+ assert.match(f.el('groups').innerHTML,/本组已锁定规则.*收窄 ≥ 2.3/);
+ const marks=f.charts.at(-1).series[0].markLine.data;
+ assert.ok(marks.some(x=>x.name.includes('#g0 已锁定止盈')));
+ assert.ok(!marks.some(x=>/#g1|#g2/.test(x.name)));
+});
+
+test('chart shades missing samples and disconnects invalid quotes',async()=>{
+ const now=Date.now(),snapshot=monitoredSnapshot(now);
+ const rows=[now-500000,now-499000,now-498000,now-2000,now-1000,now]
+   .map(time_ms=>({...snapshot.quote,time_ms}));
+ rows.at(-1).valid=false;
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,
+   '/api/trading/chart?minutes=0':()=>({samples:rows})});
+ await f.el('trading-reconcile').onclick();
+ const line=f.charts.at(-1).series[0];
+ assert.equal(line.connectNulls,false);
+ assert.equal(line.data.filter(x=>x[1]===null).length,2);
+ assert.match(f.el('chart-gaps').textContent,/2 处.*灰色/);
+ assert.ok(line.markArea.data.some(x=>x[0].name==='本机采样缺失'));
+ assert.ok(line.markArea.data.some(x=>x[0].name==='报价无效或过期'));
 });

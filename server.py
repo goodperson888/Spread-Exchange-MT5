@@ -1001,6 +1001,7 @@ class TradingRuntime:
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,
                 'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd'],
+                                     'max_quote_age_ms': self.config['strategy']['max_quote_age_ms'],
                                      'mt5_symbol': self.config['mt5']['symbol'], 'symbol': self.config['symbol']} if self.config else None,
                 'config_pending': bool(self.connected and self.config_changed(saved_config)),
                 'liquidation_risk': risk_snapshot(
@@ -1021,7 +1022,7 @@ class TradingRuntime:
             # before a new connection has established the runtime key.
             config = self.config or load_config()
             key = pair_key(config) if config else ''
-            return self.store.samples(key, since)
+        return self.store.read_samples(key, since)
 
 
 TRADING = TradingRuntime()

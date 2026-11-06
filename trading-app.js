@@ -43,6 +43,8 @@
   let chart, timer, busy=false, last=null, resetChartZoom=true, actionError='';
   let chartView=null, stream=null, streamReady=false, paintPending=false, lastPaintAt=0, chartSamples=[], plotGeneration=0, latestLive=null, statusBusy=false;
   let pendingQuotes=[], paintTimer=null, paintFrame=null, plotController=null;
+  let historyDirty=true, historyKey=null, historyLoadedAt=0, historyRevision=0;
+  function invalidateHistory(){historyDirty=true;historyRevision++;}
   // Keep the browser-side high-frequency window bounded; longer history comes
   // from the local SQLite chart endpoint and is already downsampled for display.
   const quoteBuffer=window.GoldPairQuotes?new window.GoldPairQuotes.QuoteBuffer(30000):null;
@@ -86,15 +88,18 @@
         const payload=JSON.parse(event.data),key=last?.quote?.key;
         const rows=(payload.samples||[]).filter(q=>!key||q.key===key);
         if(rows.length){
+          if(latestLive&&rows[0].time_ms-latestLive.time_ms>10000)invalidateHistory();
           latestLive=rows.at(-1);
           for(const row of rows)pendingQuotes.push(row);
           if(pendingQuotes.length>30000)pendingQuotes=pendingQuotes.slice(-30000);
           const q=latestLive,age=x=>Math.max(0,Date.now()-(x?.observed_ms||x?.time_ms||0)),sourceTime=x=>x?.source_time_ms||x?.time_ms||0;
-          el('quote-latency').textContent=`MT5 ${q.mt5_transport||'行情'} · 币安 ${q.binance_transport||'行情'} · 报价年龄：MT5 ${age(q.mt5)} ms / 币安 ${age(q.binance)} ms · 本机收到时间差 ${Math.abs((q.mt5?.observed_ms||0)-(q.binance?.observed_ms||0))} ms · 原始时间差 ${Math.abs(sourceTime(q.mt5)-sourceTime(q.binance))} ms${q.valid===false?' · 当前报价不满足交易校验':''}`;
+          const sourceGap=Math.abs(sourceTime(q.mt5)-sourceTime(q.binance));
+          el('quote-latency').textContent=`MT5 ${q.mt5_transport||'行情'} · 币安 ${q.binance_transport||'行情'} · 报价年龄：MT5 ${age(q.mt5)} ms / 币安 ${age(q.binance)} ms · 本机收到时间差 ${Math.abs((q.mt5?.observed_ms||0)-(q.binance?.observed_ms||0))} ms · 原始时间差 ${sourceGap>=60000?'约 '+n(sourceGap/60000)+' 分钟（不代表传输延迟）':sourceGap+' ms'}${q.valid===false?' · 当前报价不满足交易校验':''}`;
           showQuote(q);paintSoon();
         }
         streamLabel();
-        if(payload.reset)plot().catch(error=>text('trading-result','恢复历史失败：'+error.message,true));
+        if(payload.reset)invalidateHistory();
+        if(historyDirty&&!plotController&&!el('view-trading')?.hidden&&(payload.reset||Date.now()-historyLoadedAt>15000))plot().catch(error=>text('trading-result','恢复历史失败：'+error.message,true));
       } catch(error){text('trading-result','行情推送解析失败：'+error.message,true);}
     });
   }
@@ -165,7 +170,9 @@
       const feeDetail=exitFee>0?`<br><span class="muted" title="按当前币安 Ask × USDT/USD × 币安 taker 费率，加上 MT5 剩余手数 × 单边每手佣金估算">预计平仓费 -${exitFee.toFixed(2)} USD<br>币安 -${exitBinance.toFixed(2)} + MT5 -${exitMt5.toFixed(2)}</span>`:'';
       const stateLabel=pending.length?'成交待确认 · '+(states[g.status]||g.status):abnormalClosed?'异常撤回已完成':states[g.status]||g.status;
       const pnlLabel=pending.length?'收益待核对':g.status==='closed'?(abnormalClosed?'异常撤回净结果':'平仓净收益'):'实时净收益';
-      return `<tr><td><strong>#${escape(g.id)}</strong>${gridLabel}<br><span class="muted">${dateTime(g.opened_ms)}${g.closed_ms?'<br>→ '+dateTime(g.closed_ms):''}</span></td><td>${escape(stateLabel)}<br><span class="record-basis">${basis}</span>${g.execution_warning?'<br><span class="muted">'+escape(g.execution_warning)+'</span>':''}</td><td>${n(g.lots)} 手 / ${n(g.qty)} 盎司${entryLabel}<br><span class="muted">币安 ${amount('binance').toFixed(2)} USDT<br>MT5 ${amount('mt5').toFixed(2)} USD</span></td><td>毛收益 ${usd(v.gross)}<br><span title="已由成交回报或平台记录确认">已成交手续费 -${Number(v.fees||0).toFixed(2)} USD</span>${feeDetail}</td><td>${carryDetail}</td><td class="${Number(v.net)>=0?'pnl-positive':'pnl-negative'}"><strong>${pending.length?'—':usd(v.net)}</strong><br><span class="muted">${pnlLabel}</span></td><td>币安 ${remainingLabel('binance')}<br>MT5 ${remainingLabel('mt5')}${g.reason?'<br>'+escape(g.reason):''}</td><td>${action}</td></tr>`;
+      const s=g.parameters||{},ruleNumber=value=>Number.isFinite(value)?n(value):'—',ruleLabel=s.target_mode==='absolute'?`退出价差 ≤ ${ruleNumber(s.exit_spread_usd)}`:`收窄 ≥ ${ruleNumber(s.take_contraction_usd)}`;
+      const savedRules=`<details class="help-details"><summary>${g.imported?'本组当前规则':'本组已锁定规则'}</summary><p class="note">止盈：${ruleLabel} USD/盎司${s.require_net_profit?'；净收益至少 '+usd(s.min_net_profit_usd):''}<br>单组亏损限制：${s.group_loss_enabled?usd(s.group_max_loss_usd):'未启用'}<br>持仓时限：${Number(s.max_hold_minutes)>0?n(s.max_hold_minutes)+' 分钟':'未启用'}<br>普通 / 保护滑点：${ruleNumber(s.max_slippage_usd)} / ${ruleNumber(s.unwind_slippage_usd)} USD/盎司<br>主页面改值不会覆盖本组规则；全策略总亏损限制按当前引擎参数执行。${g.imported?'接管组退出规则可在旧仓管理区单独修改。':''}</p></details>`;
+      return `<tr><td><strong>#${escape(g.id)}</strong>${gridLabel}<br><span class="muted">${dateTime(g.opened_ms)}${g.closed_ms?'<br>→ '+dateTime(g.closed_ms):''}</span></td><td>${escape(stateLabel)}<br><span class="record-basis">${basis}</span>${g.execution_warning?'<br><span class="muted">'+escape(g.execution_warning)+'</span>':''}</td><td>${n(g.lots)} 手 / ${n(g.qty)} 盎司${entryLabel}<br><span class="muted">币安 ${amount('binance').toFixed(2)} USDT<br>MT5 ${amount('mt5').toFixed(2)} USD</span></td><td>毛收益 ${usd(v.gross)}<br><span title="已由成交回报或平台记录确认">已成交手续费 -${Number(v.fees||0).toFixed(2)} USD</span>${feeDetail}</td><td>${carryDetail}</td><td class="${Number(v.net)>=0?'pnl-positive':'pnl-negative'}"><strong>${pending.length?'—':usd(v.net)}</strong><br><span class="muted">${pnlLabel}</span></td><td>币安 ${remainingLabel('binance')}<br>MT5 ${remainingLabel('mt5')}${g.reason?'<br>'+escape(g.reason):''}</td><td>${action}${savedRules}</td></tr>`;
     }).join('');
     return `<table class="records-table"><thead><tr><th>交易组 / 时间</th><th>状态</th><th>配平量 / 开仓金额</th><th>交易收益与手续费</th><th>资金费 / Swap</th><th>净收益</th><th>剩余敞口 / 原因</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
@@ -199,7 +206,7 @@
       el('mt5-bid').value=q.mt5.bid;el('mt5-ask').value=q.mt5.ask;
       text('live-entry',n(q.entry));text('live-exit',n(q.exit));
       const threshold=last?.strategy_runtime?.entry_spread_usd;
-      const valid=q.valid!==false&&Date.now()-Math.min(q.mt5.observed_ms||q.mt5.time_ms,q.binance.observed_ms||q.binance.time_ms)<=Number(el('max-age').value||3000);
+      const valid=q.valid!==false&&Date.now()-Math.min(q.mt5.observed_ms||q.mt5.time_ms,q.binance.observed_ms||q.binance.time_ms)<=Number(last?.strategy_runtime?.max_quote_age_ms||3000);
       text('live-distance',Number.isFinite(threshold)?n(Math.max(0,threshold-q.entry))+' USD':'—');
       text('live-opportunity',!valid?'报价过期或不同步，禁止开仓':!Number.isFinite(threshold)?'连接后显示有效阈值':q.entry>=threshold?'达到基础阈值，仍须通过执行保护':'等待价差达到基础阈值');
     }
@@ -229,9 +236,22 @@
     const pendingNode=el('config-pending');
     if(pendingNode){pendingNode.hidden=!pending;pendingNode.textContent='已保存 ≠ 已生效。手数、止盈等交易参数须重新连接；开仓阈值可单独点击「应用」，风险提醒阈值保存即生效。已有组保留原规则。';}
     const groups=(state.groups||[]).filter(g=>g.status!=='closed');
+    text('parameter-scope',pending?'参数已修改，尚未全部生效；重新连接后用于后续开仓，现有组仍保留原规则。':connected?`现有 ${groups.length} 组保留各自开仓规则；在记录页可查看。开仓阈值须点“应用”，风险提醒保存即生效。`:'手数和普通策略参数须保存并连接后生效；已有组不会随输入改变。');
     text('live-groups',groups.length+' 组');
     const unknown=groups.some(g=>unconfirmed(g,state.orders||[]).length);
     text('live-exposure',unknown?'成交待确认，请核对双边实际持仓':groups.length?'MT5 '+n(groups.reduce((sum,g)=>sum+Number(g.valuation?.remaining?.mt5||0)/Number(g.contract||100),0))+' 手（已确认剩余）':connected?'当前无本策略持仓':'等待连接与对账');
+  }
+  function renderPositionFreshness() {
+    if(!last)return;
+    const state=last.state||{},report=last.position_report;
+    const q=latestLive?.key===last.quote?.key?latestLive:last.quote;
+    const stale=!q||q.valid===false||['mt5','binance'].some(side=>Date.now()-Number(q[side]?.observed_ms||q[side]?.time_ms||0)>Number(last.strategy_runtime?.max_quote_age_ms||3000));
+    const age=Number.isFinite(report?.time_ms)?Math.max(0,Math.floor((Date.now()-report.time_ms)/1000)):null;
+    const value=!last.connected?'未连接：已有仓位未恢复自动管理。':last.capabilities?.mode==='paper'?'纸面模式：收益随模拟行情估算，不读取实盘持仓。':
+      (state.orders||[]).some(o=>o.result?.status!=='done')?'成交待确认：剩余数量与收益等待核对。':
+      state.recovery||!last.capabilities?.reconciled?'等待完整持仓对账：报价估值不代表平台仓位已核实。':
+      `${stale?'报价已过期，收益仅按最后收到的报价估算。':'收益随报价估算；'}${age!==null?'上次完整对账 '+dateTime(report.time_ms)+'（'+age+' 秒前）。':'尚无完整对账时间记录。'}完整对账非持续进行，平台手动改仓需重新核对。`;
+    text('position-check-status',value);text('records-position-check',value);
   }
   let riskSample=null, riskReceivedAt=0;
   function renderRisk() {
@@ -272,6 +292,11 @@
   function render(result) {
     riskSample=result.liquidation_risk||null;riskReceivedAt=Date.now();renderRisk();
     last=result;
+    const incomingKey=result.quote?.key;
+    if(incomingKey&&incomingKey!==historyKey){
+      historyKey=incomingKey;invalidateHistory();
+      chartSamples=quoteBuffer?quoteBuffer.merge([],windowStart(),incomingKey):[];
+    }
     const state=result.state||{}, q=(latestLive&&result.quote&&latestLive.key===result.quote.key&&latestLive.time_ms>result.quote.time_ms?latestLive:result.quote);
     const report=result.position_report;
     const display=x=>x===null||x===undefined?'—':escape(x);
@@ -377,6 +402,7 @@
       text('runtime-plan','引擎尚未连接；上方为当前输入预览。');
     }
     updateWorkflow();
+    renderPositionFreshness();
     renderIncome(q);
     el('orders').innerHTML=orderRows(state.orders||[],state.groups||[]);
     renderEvents(result.events||[]);
@@ -473,21 +499,25 @@
   async function plot() {
     if(document.hidden||el('view-trading')?.hidden)return;
     const generation=++plotGeneration;
+    const revision=historyRevision;
+    const requestedKey=last?.quote?.key;
     plotController?.abort();
     const controller=new AbortController();plotController=controller;
     try {
       const minutes=Number(el('chart-window').value);
       const r=await request('/api/trading/chart?minutes='+minutes,undefined,controller);
-      if(document.hidden||generation!==plotGeneration)return;
+      if(document.hidden||generation!==plotGeneration||requestedKey!==last?.quote?.key)return;
       // Keep ticks received during the history request; merge only once per paint.
       chartSamples=quoteBuffer?quoteBuffer.replaceHistory(r.samples||[],windowStart(),last?.quote?.key):(r.samples||[]);
+      historyDirty=revision!==historyRevision;historyLoadedAt=Date.now();
       drawChart(chartSamples);
     } catch(error) {
       if(generation===plotGeneration&&!document.hidden)throw error;
     } finally {if(plotController===controller)plotController=null;}
   }
   function drawChart(rawSamples) {
-    const samples=window.GoldPairQuotes?window.GoldPairQuotes.renderPoints(rawSamples,Math.max(1,Number(el('chart-window').value)||1440)*60000,chartView):rawSamples;
+    const series=window.GoldPairQuotes?.chartSeries?window.GoldPairQuotes.chartSeries(rawSamples,Math.max(1,Number(el('chart-window').value)||1440)*60000,chartView):{samples:rawSamples,lines:rawSamples,gaps:[]};
+    const {samples,lines,gaps}=series;
     if(!chart) {
       chart=echarts.init(el('spread-chart'));
       if(chart.on)chart.on('datazoom',()=>{
@@ -498,10 +528,9 @@
       });
     }
     const groups=last?.state?.groups||[];
-    const marks=groups.filter(g=>g.status!=='closed').map(g=>({name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported&&!g.management_enabled?' 目标（暂停）':' 止盈'),yAxis:g.parameters.target_mode==='absolute'?g.parameters.exit_spread_usd:g.entry-g.parameters.take_contraction_usd}));
-    const expected=samples.length>1?(samples.at(-1).time_ms-samples[0].time_ms)/(samples.length-1):0;
-    const lines=[];let previous;
-    for(const x of samples){if(previous&&x.time_ms-previous.time_ms>Math.max(10000,expected*6,Math.max(1,Number(el('chart-window').value)||1440)*60000/3000))lines.push({time_ms:previous.time_ms+1,entry:null,exit:null});lines.push(x);previous=x;}
+    const marks=groups.filter(g=>g.status==='open').map(g=>({name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported?(g.management_enabled?' 接管止盈':' 目标（暂停）'):' 已锁定止盈'),yAxis:g.parameters?.target_mode==='absolute'?g.parameters.exit_spread_usd:g.entry-g.parameters?.take_contraction_usd})).filter(mark=>Number.isFinite(mark.yAxis));
+    const missing=gaps.map(gap=>[{name:gap.reason,xAxis:gap.start,itemStyle:{color:'rgba(100,116,139,.16)'},label:{show:true,color:'#536274',position:'insideTop'}},{xAxis:gap.end}]);
+    text('chart-gaps',gaps.length?`发现 ${gaps.length} 处无有效采样区间，已用灰色标出；最近一处 ${date(gaps.at(-1).start)} 至 ${date(gaps.at(-1).end)}。可点“回到最新”补读本机历史；停机或断线期间未采集的报价无法补造。`:'当前已加载的采样未发现明显缺口；停留后台后会自动补读本机记录。');
     const nearest=(at,field)=>{let best=null,distance=Infinity;for(const x of samples){const d=Math.abs(x.time_ms-at);if(d<distance){best=x;distance=d;}}return best&&Number.isFinite(best[field])?[at,best[field]]:null;};
     const firstTime=samples[0]?.time_ms??0,lastTime=samples.at(-1)?.time_ms??0;
     const opened=groups.filter(g=>!g.imported&&g.opened_ms>=firstTime&&g.opened_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.opened_ms,g.entry]}));
@@ -518,7 +547,7 @@
     const start=resetChartZoom?0:(oldZoom?.start??0),end=resetChartZoom?100:(oldZoom?.end??100);resetChartZoom=false;
     const thresholdLine=threshold===null?[]:[{name:`开仓阈值 ${threshold.toFixed(2)}`,yAxis:threshold,lineStyle:{color:'#b75e24',width:2,type:'dashed'},label:{show:true,color:'#8a461e',formatter:`开仓阈值 ${threshold.toFixed(2)}`}}];
     chart.setOption({animation:false,legend:{top:5,type:'scroll'},tooltip:{trigger:'axis',confine:true,valueFormatter:v=>Number.isFinite(v)?v.toFixed(3):'—'},grid:{left:75,right:120,top:70,bottom:80},xAxis:{type:'time',minInterval:1000,axisPointer:{label:{formatter:params=>dateTime(params.value)}}},yAxis:{type:'value',scale:true,name:'价差 USD/盎司'},dataZoom:[{type:'inside',filterMode:'none',minValueSpan:1000,start,end},{type:'slider',filterMode:'none',minValueSpan:1000,bottom:15,start,end}],series:[
-      {id:'entry',name:'入场（卖币安Bid / 买MT5Ask）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.entry]),itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:threshold===null?[]:[[{name:'开仓触发区',yAxis:threshold},{yAxis:'max'}]]},markLine:{symbol:'none',silent:true,data:[...thresholdLine,...marks],label:{formatter:'{b}: {c}'}}},
+      {id:'entry',name:'入场（卖币安Bid / 买MT5Ask）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.entry]),itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:[...(threshold===null?[]:[[{name:'开仓触发区',yAxis:threshold},{yAxis:'max'}]]),...missing]},markLine:{symbol:'none',silent:true,data:[...thresholdLine,...marks],label:{formatter:'{b}: {c}'}}},
       {id:'exit',name:'退出（买回币安Ask / 卖MT5Bid）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.exit]),itemStyle:{color:'#247b68'},lineStyle:{width:2,type:'dashed'}},
       {id:'open',name:'策略开仓',type:'scatter',symbol:'triangle',symbolSize:12,itemStyle:{color:'#b75e24'},data:opened},
       {id:'close',name:'策略平仓',type:'scatter',symbol:'diamond',symbolSize:12,itemStyle:{color:'#6b50a6'},data:closed}
@@ -533,7 +562,7 @@
       render(r);
       // Keep the last chart visible when disconnected, but do not keep
       // re-fetching it as if live monitoring were still running.
-      if(withChart && (!chart || (!streamReady && r.connected))) await plot();
+      if(withChart && !plotController && (historyDirty || !chart || (!streamReady && r.connected))) await plot();
     } finally { statusBusy=false; }
   }
   async function saveBeforeTrading() {
@@ -601,7 +630,7 @@
   window.addEventListener('resize',()=>chart?.resize());
   window.addEventListener('gold-workspace-changed',()=>{
     chart?.resize();paintSoon();
-    if(!chart&&!el('view-trading')?.hidden)plot().catch(error=>text('trading-result',error.message,true));
+    if((historyDirty||!chart)&&!el('view-trading')?.hidden)plot().catch(error=>text('trading-result',error.message,true));
   });
   window.addEventListener('gold-form-changed',updateWorkflow);
   window.addEventListener('gold-config-saved',()=>status(false).catch(()=>{}));
@@ -609,5 +638,5 @@
   window.addEventListener('gold-busy-changed',updateWorkflow);
   setTimeout(()=>status().then(startStream).catch(error=>text('trading-result',error.message,true)),400);
   timer=setInterval(()=>{if(!document.hidden&&!busy&&!window.goldPairUiBusy)status().catch(error=>text('trading-result',error.message,true));},3000);
-  setInterval(()=>{if(!document.hidden)renderRisk();},1000);
+  setInterval(()=>{if(!document.hidden){renderRisk();renderPositionFreshness();}},1000);
 })();
