@@ -267,6 +267,7 @@ class Engine:
 
     def valuation(self, g, q):
         fx=q.get('usdt_usd',g['costs']['usdt_usd']);c=g['costs'];gross=0;fees=0
+        fee_base=dict(binance=0.,mt5=0.)
         owned=self.amounts(g)
         for o in self.state['orders']:
             if o['group']!=g['id']: continue
@@ -274,7 +275,9 @@ class Engine:
             sign=1 if (o['leg']=='binance')==(o['action']=='open') else -1
             order_fx=o.get('fx',g['costs']['usdt_usd'])
             gross+=sign*qty*price*(order_fx if o['leg']=='binance' else 1)
-            fees+=r.get('fee', qty*price*c['binance_taker_percent']/100 if o['leg']=='binance' else qty/g['contract']*c['mt5_commission_per_lot_side'])*(order_fx if o['leg']=='binance' else 1)
+            fee=r.get('fee', qty*price*c['binance_taker_percent']/100 if o['leg']=='binance' else qty/g['contract']*c['mt5_commission_per_lot_side'])*(order_fx if o['leg']=='binance' else 1)
+            fees+=fee
+            fee_base[o['leg']]+=max(0,fee)
         gross-=owned['binance']*q['binance']['ask']*fx
         gross+=owned['mt5']*q['mt5']['bid']
         exit_fee_binance=owned['binance']*q['binance']['ask']*fx*c['binance_taker_percent']/100
@@ -294,12 +297,21 @@ class Engine:
             fees+=g['history_fees_usd']
             funding+=g['history_funding_usd']
             carry=mt5_swap+funding
+        # User-declared cashback is an estimate, independent of verified
+        # platform commissions. Never rebate funding, Swap or negative fees.
+        rebate_binance=(fee_base['binance']+max(0,exit_fee_binance))*c.get('binance_rebate_percent',0)/100
+        rebate_mt5=(fee_base['mt5']+max(0,exit_fee_mt5))*c.get('mt5_rebate_percent',0)/100
+        rebate=rebate_binance+rebate_mt5
+        before_rebate=gross-fees-exit_fee+carry
         flat=max(owned.values())<1e-8
         return dict(gross=round(gross,8),fees=round(fees,8),estimated_exit_fee=round(exit_fee,8),
                     estimated_exit_fee_binance=round(exit_fee_binance,8),estimated_exit_fee_mt5=round(exit_fee_mt5,8),
                     mt5_swap=round(mt5_swap,8),binance_funding=round(funding,8),carry=round(carry,8),
-                    net=round(gross-fees-exit_fee+carry,8),remaining=owned,
-                    costs_verified=verified,estimated=not flat or (g['mode']!='paper' and not verified))
+                    net_before_rebate=round(before_rebate,8),estimated_rebate=round(rebate,8),
+                    estimated_rebate_binance=round(rebate_binance,8),estimated_rebate_mt5=round(rebate_mt5,8),
+                    rebate_fee_base_binance=round(fee_base['binance'],8),rebate_fee_base_mt5=round(fee_base['mt5'],8),
+                    net=round(before_rebate+rebate,8),remaining=owned,
+                    costs_verified=verified,estimated=not flat or rebate>0 or (g['mode']!='paper' and not verified))
 
     def _finish_open(self, c, p, g, q, threshold=None):
         """Continue the second leg after the first leg is confirmed.

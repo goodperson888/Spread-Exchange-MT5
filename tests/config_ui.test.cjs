@@ -61,6 +61,17 @@ test('lots preview updates immediately after refresh without a fresh MT5 check',
   f.edit('lots','');assert.match(f.el('plan-result').textContent,/必须大于 0/);
 });
 
+test('rebate percentages restore and save independently of the exchange fee rate',async()=>{
+ const f=await fixture();
+ assert.equal(f.el('binance-rebate').value,'0');assert.equal(f.el('mt5-rebate').value,'0');
+ f.edit('binance-rebate','30');f.edit('mt5-rebate','50');
+ const payload=f.run('formConfig()');
+ assert.equal(payload.costs.binance_rebate_percent,30);assert.equal(payload.costs.mt5_rebate_percent,50);
+ assert.equal(payload.costs.binance_taker_percent,f.config.costs.binance_taker_percent);
+ f.run('populate({...formConfig(),costs:{...formConfig().costs,binance_rebate_percent:12.5,mt5_rebate_percent:0}})');
+ assert.equal(f.el('binance-rebate').value,'12.5');assert.equal(f.el('mt5-rebate').value,'0');
+});
+
 test('failed MT5 check shows raw symbol fields and never applies unverified contract',async()=>{
   const result={connected:true,identity_matches:true,symbol:null,message:'已连接 MT5，但品种未通过校验',
     symbol_diagnostics:{name:'XAUUSD',description:'<img src=x>',currency_base:'',currency_profit:'USD',

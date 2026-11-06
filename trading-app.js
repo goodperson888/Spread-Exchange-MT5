@@ -167,18 +167,20 @@
       const carryDetail=('binance_funding' in v||'mt5_swap' in v)?`资金费 ${usd(funding)}<br>MT5 Swap ${usd(swap)}`:`合计 ${usd(v.carry||0)}`;
       const abnormalClosed=g.status==='closed'&&/拒单|异常|敞口|部分/.test(String(g.reason||''));
       const action=g.status==='closed'?'':g.status==='closing'?`<button disabled>${pending.length?'核对成交后继续平仓':'平仓处理中…'}</button>`:`<button data-close="${escape(g.id)}"${busy?' disabled':''}>${pending.length?'请求核对后平仓':g.status==='attention'?'重试平仓':'平仓'}</button>`;
-      const editAction=g.status==='open'&&!g.imported&&!pending.length?`<button data-edit-exit="${escape(g.id)}" type="button"${busy?' disabled':''}>调整退出条件</button>`:'';
+      const editAction=g.status==='open'&&!g.imported&&!pending.length?`<button data-edit-exit="${escape(g.id)}" type="button"${busy?' disabled':''}>调整退出条件与返佣</button>`:'';
       const entryLabel=g.open_binance && Number.isFinite(Number(g.entry))?`<br><span class="muted" title="币安开仓成交价 × 该笔记录的 USDT/USD − MT5 开仓成交价；双边成交可能不在同一时刻">开仓成交价差 ${n(g.entry)} USD/盎司</span>`:'';
       const gridLabel=Number(g.grid_index||0)>0?`<br><span class="muted">网格补仓第 ${Number(g.grid_index)} 次</span>`:'';
       const exitFee=Number(v.estimated_exit_fee||0), exitBinance=Number(v.estimated_exit_fee_binance||0), exitMt5=Number(v.estimated_exit_fee_mt5||0);
       const feeDetail=unverified?'<br><span class="muted">预计平仓费待持仓核对</span>':exitFee>0?`<br><span class="muted" title="按当前币安 Ask × USDT/USD × 币安 taker 费率，加上 MT5 剩余手数 × 单边每手佣金估算">预计平仓费 -${exitFee.toFixed(2)} USD<br>币安 -${exitBinance.toFixed(2)} + MT5 -${exitMt5.toFixed(2)}</span>`:'';
+      const rebate=Number(v.estimated_rebate||0),hasRebate=rebate>0||Number(g.costs?.binance_rebate_percent)>0||Number(g.costs?.mt5_rebate_percent)>0;
+      const rebateDetail=hasRebate?`<br><span class="muted" title="按填写比例估计，含预计平仓费返佣；尚未核对到账，不覆盖原手续费">预计返佣 ${unverified?'待核对':usd(rebate)}（未确认到账）${unverified?'':'<br>未含返佣净收益 '+usd(v.net_before_rebate)}</span>`:'';
       const stateLabel=pending.length?'成交待确认 · '+(states[g.status]||g.status):abnormalClosed?'异常撤回已完成':states[g.status]||g.status;
       const pnlLabel=unverified?'收益待核对':g.status==='closed'?(abnormalClosed?'异常撤回净结果':'平仓净收益')+(g.mode==='paper'?'（纸面模拟）':g.imported?'（含接管历史估算）':v.costs_verified?'':'（估算／待费用复核）'):'实时净收益（估算）';
       const feeLabel=g.mode==='paper'?'模拟成交手续费':v.costs_verified?'已核验成交手续费':'成交手续费（含估算）';
       const feeTitle=g.mode==='paper'?'按纸面配置模拟，不读取实盘成交费用':v.costs_verified?'已用平台成交记录复核':'已发生成交可能仍按费率或每手佣金估算；普通实盘组平仓后异步复核，接管前成本为用户录入';
       const s=g.parameters||{},ruleNumber=value=>Number.isFinite(value)?n(value):'—',ruleLabel=s.target_mode==='absolute'?`退出价差 ≤ ${ruleNumber(s.exit_spread_usd)}`:`收窄 ≥ ${ruleNumber(s.take_contraction_usd)}`;
-      const savedRules=`<details class="help-details" data-group-rules="${escape(g.id)}"${expandedRules.has(g.id)?' open':''}><summary>${g.imported?'本组当前规则':'本组已锁定规则'}</summary><p class="note">止盈：${ruleLabel} USD/盎司${s.require_net_profit?'；净收益至少 '+usd(s.min_net_profit_usd):''}<br>单组亏损限制：${s.group_loss_enabled?usd(s.group_max_loss_usd):'未启用'}<br>持仓时限：${Number(s.max_hold_minutes)>0?n(s.max_hold_minutes)+' 分钟':'未启用'}<br>普通 / 保护滑点：${ruleNumber(s.max_slippage_usd)} / ${ruleNumber(s.unwind_slippage_usd)} USD/盎司<br>主页面改值不会覆盖本组规则；普通组可在下方退出条件入口单独预览确认。全策略总亏损限制按当前引擎参数执行。${g.imported?'接管组退出规则可在旧仓管理区单独修改。':''}</p></details>`;
-      return `<tr><td><strong>#${escape(g.id)}</strong>${gridLabel}<br><span class="muted">${dateTime(g.opened_ms)}${g.closed_ms?'<br>→ '+dateTime(g.closed_ms):''}</span></td><td>${escape(stateLabel)}<br><span class="record-basis">${basis}</span>${g.execution_warning?'<br><span class="muted">'+escape(g.execution_warning)+'</span>':''}</td><td>${n(g.lots)} 手 / ${n(g.qty)} 盎司${entryLabel}<br><span class="muted">币安 ${amount('binance').toFixed(2)} USDT<br>MT5 ${amount('mt5').toFixed(2)} USD</span></td><td>毛收益 ${unverified?'待核对':usd(v.gross)}<br><span title="${feeTitle}">${feeLabel} ${usd(-Number(v.fees||0))}</span>${feeDetail}</td><td>${carryDetail}</td><td class="${Number(v.net)>=0?'pnl-positive':'pnl-negative'}"><strong>${unverified?'—':usd(v.net)}</strong><br><span class="muted">${pnlLabel}</span></td><td>币安 ${remainingLabel('binance')}<br>MT5 ${remainingLabel('mt5')}${g.reason?'<br>'+escape(g.reason):''}</td><td>${action}${editAction}${savedRules}</td></tr>`;
+      const savedRules=`<details class="help-details" data-group-rules="${escape(g.id)}"${expandedRules.has(g.id)?' open':''}><summary>${g.imported?'本组当前规则':'本组已锁定规则'}</summary><p class="note">止盈：${ruleLabel} USD/盎司${s.require_net_profit?'；净收益至少 '+usd(s.min_net_profit_usd):''}<br>单组亏损限制：${s.group_loss_enabled?usd(s.group_max_loss_usd):'未启用'}<br>持仓时限：${Number(s.max_hold_minutes)>0?n(s.max_hold_minutes)+' 分钟':'未启用'}<br>预计手续费返佣：币安 ${n(g.costs?.binance_rebate_percent||0)}% / MT5 ${n(g.costs?.mt5_rebate_percent||0)}%（计入净收益，非到账）<br>普通 / 保护滑点：${ruleNumber(s.max_slippage_usd)} / ${ruleNumber(s.unwind_slippage_usd)} USD/盎司<br>主页面改值不会覆盖本组规则；普通组可在下方退出条件入口单独预览确认。全策略总亏损限制按当前引擎参数执行。${g.imported?'接管组退出规则可在旧仓管理区单独修改。':''}</p></details>`;
+      return `<tr><td><strong>#${escape(g.id)}</strong>${gridLabel}<br><span class="muted">${dateTime(g.opened_ms)}${g.closed_ms?'<br>→ '+dateTime(g.closed_ms):''}</span></td><td>${escape(stateLabel)}<br><span class="record-basis">${basis}</span>${g.execution_warning?'<br><span class="muted">'+escape(g.execution_warning)+'</span>':''}</td><td>${n(g.lots)} 手 / ${n(g.qty)} 盎司${entryLabel}<br><span class="muted">币安 ${amount('binance').toFixed(2)} USDT<br>MT5 ${amount('mt5').toFixed(2)} USD</span></td><td>毛收益 ${unverified?'待核对':usd(v.gross)}<br><span title="${feeTitle}">${feeLabel} ${usd(-Number(v.fees||0))}</span>${feeDetail}${rebateDetail}</td><td>${carryDetail}</td><td class="${Number(v.net)>=0?'pnl-positive':'pnl-negative'}"><strong>${unverified?'—':usd(v.net)}</strong><br><span class="muted">${pnlLabel}${hasRebate&&!unverified?' · 含预计返佣':''}</span></td><td>币安 ${remainingLabel('binance')}<br>MT5 ${remainingLabel('mt5')}${g.reason?'<br>'+escape(g.reason):''}</td><td>${action}${editAction}${savedRules}</td></tr>`;
     }).join('');
     return `<table class="records-table"><thead><tr><th>交易组 / 时间</th><th>状态</th><th>配平量 / 开仓金额</th><th>交易收益与手续费</th><th>资金费 / Swap</th><th>净收益</th><th>剩余敞口 / 原因</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
@@ -430,11 +432,21 @@
     return options;
   }
   const savedExitRules=g=>Object.fromEntries(Object.keys(ruleInputs).map(key=>[key,g.parameters?.[key]]));
+  const rebateInputs={binance_rebate_percent:'binance-rebate',mt5_rebate_percent:'mt5-rebate'};
+  const savedRebates=g=>Object.fromEntries(Object.keys(rebateInputs).map(key=>[key,g.costs?.[key]||0]));
+  const describeRebates=r=>`预计手续费返佣：币安 ${n(r.binance_rebate_percent)}% / MT5 ${n(r.mt5_rebate_percent)}%；计入净收益及平仓判断，非已到账`;
+  function readRebates(){
+    return Object.fromEntries(Object.entries(rebateInputs).map(([key,id])=>{
+      const value=el('exit-rule-'+id).value;
+      if(!value.trim()||!Number.isFinite(Number(value))||Number(value)<0||Number(value)>100)throw Error('返佣比例请填 0～100；30 表示手续费的 30%。');
+      return [key,Number(value)];
+    }));
+  }
   function exitDraftCurrent() {
     if(!exitDraft||!last?.connected||!last.capabilities?.reconciled||last.state?.recovery||(last.state?.orders||[]).some(o=>o.result?.status!=='done'))return false;
     const current=exitChoices().find(c=>c.value===exitDraft.choice);
     return Boolean(current&&current.groups.length===exitDraft.groups.length&&current.groups.every(g=>
-      exitDraft.groups.some(old=>old.id===g.id&&old.revision===(g.exit_rules_revision||0)&&JSON.stringify(old.rules)===JSON.stringify(savedExitRules(g)))));
+      exitDraft.groups.some(old=>old.id===g.id&&old.revision===(g.exit_rules_revision||0)&&JSON.stringify(old.rules)===JSON.stringify(savedExitRules(g))&&JSON.stringify(old.rebates)===JSON.stringify(savedRebates(g)))));
   }
   function renderExitEditor() {
     const options=exitChoices(),select=el('exit-rule-group'),signature=options.map(x=>x.value+':'+x.groups.map(g=>g.id).sort().join(',')).join(';');
@@ -472,9 +484,10 @@
   el('exit-rule-group').onchange=()=>{exitDraft=null;exitPreview=null;el('exit-rule-fields').hidden=true;text('exit-rule-result','选择后请载入当前规则。');renderExitEditor();};
   el('exit-rule-load').onclick=()=>{
     const choice=exitChoices().find(x=>x.value===el('exit-rule-group').value);if(!choice)return;
-    exitDraft={choice:choice.value,groups:choice.groups.map(g=>({id:g.id,revision:g.exit_rules_revision||0,rules:savedExitRules(g)}))};exitPreview=null;
+    exitDraft={choice:choice.value,groups:choice.groups.map(g=>({id:g.id,revision:g.exit_rules_revision||0,rules:savedExitRules(g),rebates:savedRebates(g)}))};exitPreview=null;
     const rules=exitDraft.groups[0].rules;
     for(const [key,id] of Object.entries(ruleInputs))el('exit-rule-'+id).value=String(rules[key]??'');
+    for(const [key,id] of Object.entries(rebateInputs))el('exit-rule-'+id).value=String(exitDraft.groups[0].rebates[key]);
     el('exit-rule-fields').hidden=false;
     text('exit-rule-result','已载入 '+choice.label+'。篮子按第一组回填，预览会逐组列出原规则；确认前不会修改。');renderExitEditor();
   };
@@ -484,14 +497,14 @@
   el('exit-rule-preview').onclick=()=>{
     try {
       if(!exitDraftCurrent())throw Error('成员、状态或规则已变化，请重新载入');
-      const rules=readExitRules();
-      exitPreview={groups:exitDraft.groups.map(g=>g.id),expected_revisions:Object.fromEntries(exitDraft.groups.map(g=>[g.id,g.revision])),rules};
-      text('exit-rule-result',exitDraft.groups.map(g=>'#'+g.id+' 原规则：'+describeExitRules(g.rules)).join('\n')+'\n统一修改为：'+describeExitRules(rules)+'\n仅影响以上已有组；总亏损限制及滑点保护保持原值。持仓时限从原开仓时间计，不重新计时。确认后下一次有效行情检查起生效，条件已满足时可能立即触发平仓。');
+      const rules=readExitRules(),rebates=readRebates();
+      exitPreview={groups:exitDraft.groups.map(g=>g.id),expected_revisions:Object.fromEntries(exitDraft.groups.map(g=>[g.id,g.revision])),rules,rebates};
+      text('exit-rule-result',exitDraft.groups.map(g=>'#'+g.id+' 原规则：'+describeExitRules(g.rules)+'；'+describeRebates(g.rebates)).join('\n')+'\n统一修改为：'+describeExitRules(rules)+'；'+describeRebates(rebates)+'\n仅影响以上已有组；总亏损限制及滑点保护保持原值。持仓时限从原开仓时间计，不重新计时。确认后下一次有效行情检查起生效，条件已满足时可能立即触发平仓。');
       renderExitEditor();
     } catch(error){exitPreview=null;text('exit-rule-result',error.message,true);renderExitEditor();}
   };
   el('exit-rule-apply').onclick=()=>action(async()=>{
-    if(!exitPreview||!exitDraftCurrent()||JSON.stringify(readExitRules())!==JSON.stringify(exitPreview.rules))throw Error('预览已失效，请重新载入或预览');
+    if(!exitPreview||!exitDraftCurrent()||JSON.stringify(readExitRules())!==JSON.stringify(exitPreview.rules)||JSON.stringify(readRebates())!==JSON.stringify(exitPreview.rebates))throw Error('预览已失效，请重新载入或预览');
     const payload=exitPreview;
     const result=await request('/api/trading/exit-rules',payload);
     exitDraft=null;exitPreview=null;render(result);el('exit-rule-fields').hidden=true;text('exit-rule-result',result.message);
@@ -506,7 +519,10 @@
     const sum=(items,key)=>items.reduce((total,g)=>total+Number(g.valuation?.[key]||0),0);
     const allCarry=sum(groups,'carry'),allFees=sum(groups,'fees')+sum(active,'estimated_exit_fee');
     const pending=active.some(g=>valuationPending(g,orders));
-    el('pnl-stats').innerHTML=[[pending?'收益待核对':'实时净收益',pending?'—':usd(sum(active,'net'))],['已平仓净收益',usd(sum(closed,'net'))],['累计资金费 + Swap（含已平仓）',usd(allCarry)],['手续费及预估平仓费',pending?'待核对':usd(-allFees)]].map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${value}</strong></div>`).join('');
+    const activeRebate=sum(active,'estimated_rebate'),closedRebate=sum(closed,'estimated_rebate');
+    const stats=[[pending?'收益待核对':activeRebate>0?'实时净收益（含预计返佣）':'实时净收益',pending?'—':usd(sum(active,'net'))],['已平仓净收益'+(closedRebate>0?'（含预计返佣）':''),usd(sum(closed,'net'))],['累计资金费 + Swap（含已平仓）',usd(allCarry)],['手续费及预估平仓费',pending?'待核对':usd(-allFees)]];
+    if(activeRebate+closedRebate>0||groups.some(g=>Number(g.costs?.binance_rebate_percent)>0||Number(g.costs?.mt5_rebate_percent)>0))stats.push(['预计返佣（未确认到账）',pending?'待核对':usd(activeRebate+closedRebate)]);
+    el('pnl-stats').innerHTML=stats.map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${value}</strong></div>`).join('');
     const container=el('groups');
     for(const detail of container.querySelectorAll('details[data-group-rules]')) {
       if(detail.open)expandedRules.add(detail.dataset.groupRules);else expandedRules.delete(detail.dataset.groupRules);

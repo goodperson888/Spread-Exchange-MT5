@@ -59,6 +59,40 @@ class ExitRulesTests(unittest.TestCase):
         self.e.tick(self.c,self.plan,quote(self.c))
         self.assertEqual(self.e.active()[0]['parameters']['take_contraction_usd'],2)
 
+    def test_rebates_apply_only_to_selected_group_and_are_durable_and_audited(self):
+        body=self.body();body['rebates']=dict(binance_rebate_percent=30,mt5_rebate_percent=50)
+        self.r.apply_exit_rules(body)
+        self.assertEqual(self.g['costs']['binance_rebate_percent'],30)
+        self.assertEqual(self.store.load()['groups'][0]['costs']['mt5_rebate_percent'],50)
+        self.assertEqual(self.c,self.original);self.broker.submit.assert_not_called()
+        event=self.store.events(1)[0]['data']['changes'][0]
+        self.assertEqual(event['rebates_before']['binance_rebate_percent'],0)
+        self.assertEqual(event['rebates_after']['binance_rebate_percent'],30)
+        from execution_diagnostics import build_report
+        report=build_report(self.e.state,self.store.events())
+        self.assertEqual(report['groups'][0]['costs']['binance_rebate_percent'],30)
+        self.assertEqual(report['events'][0]['data']['changes'][0]['rebates_after']['mt5_rebate_percent'],50)
+
+    def test_invalid_or_stale_rebate_edit_cannot_change_any_group(self):
+        before=copy.deepcopy(self.g)
+        for rates in ({'binance_rebate_percent':30},dict(binance_rebate_percent=-1,mt5_rebate_percent=0),
+                      dict(binance_rebate_percent=30,mt5_rebate_percent=True),
+                      dict(binance_rebate_percent=30,mt5_rebate_percent=0,fee=1)):
+            body=self.body();body['rebates']=rates
+            with self.assertRaises(ValueError):self.r.apply_exit_rules(body)
+            self.assertEqual(self.g,before)
+        body=self.body();body['rebates']=dict(binance_rebate_percent=30,mt5_rebate_percent=50)
+        body['expected_revisions'][self.g['id']]=99
+        with self.assertRaises(ValueError):self.r.apply_exit_rules(body)
+        self.assertEqual(self.g,before)
+
+    def test_rebate_edit_commit_failure_rolls_back_rates_rules_and_revision(self):
+        before=copy.deepcopy(self.g);body=self.body(take_contraction_usd=1)
+        body['rebates']=dict(binance_rebate_percent=30,mt5_rebate_percent=50)
+        with patch.object(self.store,'commit',side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):self.r.apply_exit_rules(body)
+        self.assertEqual(self.g,before);self.broker.submit.assert_not_called()
+
     def test_pause_blocks_grid_adds_but_retains_ordinary_exits(self):
         self.c['strategy'].update(grid_enabled=True,grid_max_adds=2,max_groups=3,grid_spacing_usd=1)
         self.g['parameters'].update(grid_enabled=True)

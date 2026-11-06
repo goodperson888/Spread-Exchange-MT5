@@ -84,3 +84,16 @@ test('open group mark-to-market moves with the latest quote while closed group s
  const unverified={...open,valuation_status:'unverified'};
  assert.deepEqual(markGroups([unverified],basis,latest)[0],unverified);
 });
+
+test('live projected profit preserves incurred rebates and reprices future fee rebates',()=>{
+ const basis={key:'a',time_ms:1000,usdt_usd:1,binance:{ask:100},mt5:{bid:99}};
+ const latest={key:'a',time_ms:1250,usdt_usd:1,binance:{ask:110},mt5:{bid:102}};
+ const group={key:'a',status:'open',contract:100,costs:{usdt_usd:1,binance_taker_percent:1,mt5_commission_per_lot_side:100,binance_rebate_percent:30,mt5_rebate_percent:50},
+   valuation:{gross:10,fees:10,carry:1,rebate_fee_base_binance:6,rebate_fee_base_mt5:4,remaining:{binance:1,mt5:1}}};
+ const v=markGroups([group],basis,latest)[0].valuation;
+ assert.equal(v.gross,3);assert.equal(v.estimated_exit_fee,2.1);
+ assert.equal(v.estimated_rebate_binance,2.13);assert.equal(v.estimated_rebate_mt5,2.5);
+ assert.ok(Math.abs(v.net_before_rebate-(-8.1))<1e-9);
+ assert.ok(Math.abs(v.net-(-3.47))<1e-9);
+ assert.equal(group.valuation.net,undefined);
+});

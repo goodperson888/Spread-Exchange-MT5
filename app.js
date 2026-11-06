@@ -76,7 +76,7 @@ function formConfig() {
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
       total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold'))},
     execution:{mode:value('exec-mode'), quote_source:'market', entry_leg:value('entry-leg'), poll_ms:Number(value('poll-ms')), magic:Number(value('magic')), close_retry_limit:Number(value('close-retries'))},
-    costs:{usdt_usd_auto:$('auto-fx').checked,usdt_usd:Number(value('usdt-fx')),binance_fee_auto:$('auto-binance-fee').checked,binance_taker_percent:Number(value('binance-fee')), mt5_commission_per_lot_side:Number(value('mt5-fee')), mt5_swap_per_lot_day:Number(value('mt5-swap')), paper_funding_percent_day:Number(value('paper-funding'))},
+    costs:{usdt_usd_auto:$('auto-fx').checked,usdt_usd:Number(value('usdt-fx')),binance_fee_auto:$('auto-binance-fee').checked,binance_taker_percent:Number(value('binance-fee')), mt5_commission_per_lot_side:Number(value('mt5-fee')),binance_rebate_percent:Number(value('binance-rebate')),mt5_rebate_percent:Number(value('mt5-rebate')), mt5_swap_per_lot_day:Number(value('mt5-swap')), paper_funding_percent_day:Number(value('paper-funding'))},
   };
 }
 function editableField(id) {
@@ -144,7 +144,7 @@ function populate(c) {
   const extra={cooldown_seconds:'cooldown',max_total_lots:'max-total',exit_mode:'exit-mode',target_mode:'target-mode',exit_spread_usd:'absolute-exit',min_net_profit_usd:'min-net',group_max_loss_usd:'group-loss',total_max_loss_usd:'total-loss',max_hold_minutes:'max-hold'};
   for(const [key,id] of Object.entries(extra)) $(id).value=s[key] ?? $(id).value;
   for(const [key,id] of Object.entries({require_net_profit:'require-net',group_loss_enabled:'group-loss-on',total_loss_enabled:'total-loss-on',grid_enabled:'grid-enabled'})) $(id).checked=Boolean(s[key]);
-  for(const [key,id] of Object.entries({usdt_usd:'usdt-fx',binance_taker_percent:'binance-fee',mt5_commission_per_lot_side:'mt5-fee',mt5_swap_per_lot_day:'mt5-swap',paper_funding_percent_day:'paper-funding'})) $(id).value=costs[key] ?? $(id).value;
+  for(const [key,id] of Object.entries({usdt_usd:'usdt-fx',binance_taker_percent:'binance-fee',mt5_commission_per_lot_side:'mt5-fee',binance_rebate_percent:'binance-rebate',mt5_rebate_percent:'mt5-rebate',mt5_swap_per_lot_day:'mt5-swap',paper_funding_percent_day:'paper-funding'})) $(id).value=costs[key] ?? $(id).value;
   $('auto-fx').checked=costs.usdt_usd_auto ?? true;
   $('auto-binance-fee').checked=costs.binance_fee_auto ?? true;
   for(const [key,id] of [['contract_size_oz','contract'],['volume_min','volume-min'],['volume_step','volume-step']])

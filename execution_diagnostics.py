@@ -45,7 +45,8 @@ def build_report(state, events):
             'execution_open/close.elapsed_ms使用单调时钟，含本机同步日志、双腿串行处理和可能的查询等待，截止组完成确认前；不含最后一次组状态提交。',
             '缺少的字段表示旧版未记录或无法确定，不能当作零；重启后不推算单调耗时；纸面模式不可用于评估实盘速度。',
             '导出按需读取本机数据库，不调用交易平台、不取得交易线程或写日志的锁。',
-            'source=external 表示平台外部平仓回补；platform_time_ms是未经时区推算的平台原始时间，reconcile_time_ms是本机发现时间，组closed_ms为本机确认完成时间；两者差不代表程序下单耗时。'
+            'source=external 表示平台外部平仓回补；platform_time_ms是未经时区推算的平台原始时间，reconcile_time_ms是本机发现时间，组closed_ms为本机确认完成时间；两者差不代表程序下单耗时。',
+            'estimated_rebate为用户按手续费比例预计的返佣，非实际到账；net_before_rebate不含该项，net含该项并参与退出判断。'
         ],'groups':[],'orders':[],'events':[]}
     for g in groups:
         row={'id':group_ids[g['id']], 'mode':choice(g,'mode',('paper','live')),
@@ -59,7 +60,8 @@ def build_report(state, events):
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
         row.update(numbers(g,'exit_rules_revision'))
-        row['costs']=numbers(g.get('costs',{}),'usdt_usd')
+        row['costs']=numbers(g.get('costs',{}),'usdt_usd binance_rebate_percent mt5_rebate_percent')
+        row['valuation']=numbers(g.get('valuation',{}),'gross fees estimated_exit_fee net_before_rebate estimated_rebate estimated_rebate_binance estimated_rebate_mt5 net')
         for action in ('open','close'):
             if 'execution_'+action in g:
                 row['execution_'+action]=numbers(g['execution_'+action],'started_ms signal_time_ms signal_spread confirmed_ms elapsed_ms')
@@ -94,7 +96,9 @@ def build_report(state, events):
                 gid=group_ids.get(change.get('group'))
                 if gid:changes.append({'group':gid,**numbers(change,'revision'),
                                        'before':exit_parameters(change.get('before',{})),
-                                       'after':exit_parameters(change.get('after',{}))})
+                                       'after':exit_parameters(change.get('after',{})),
+                                       'rebates_before':numbers(change.get('rebates_before',{}),'binance_rebate_percent mt5_rebate_percent'),
+                                       'rebates_after':numbers(change.get('rebates_after',{}),'binance_rebate_percent mt5_rebate_percent')})
             if changes:report['events'].append({'kind':'exit_rules_updated',**numbers(event,'time'),'data':{'changes':changes}})
             continue
         if event.get('kind') not in kinds: continue

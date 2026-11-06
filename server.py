@@ -881,7 +881,7 @@ class TradingRuntime:
             if not self.connected:raise ValueError('请先连接双边行情')
             if not self.reconciled:raise ValueError('请先完成持仓对账')
             ids=exit_rules.apply(self.engine,self.config,body)
-            return {**self.snapshot(),'message':f'已更新 {len(ids)} 组的退出规则；下一次有效行情检查起生效，满足条件可能立即平仓。'}
+            return {**self.snapshot(),'message':f'已更新 {len(ids)} 组的退出规则及所填返佣比例；预计返佣计入净收益，下一次有效行情检查起生效，满足条件可能立即平仓。'}
 
     def apply_entry_threshold(self, value):
         """Apply only the live opening threshold without reconnecting.

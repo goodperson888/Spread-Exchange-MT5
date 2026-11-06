@@ -520,6 +520,46 @@ test('editing after preview and a newer server rule version both invalidate appl
  assert.equal(f.el('exit-rule-take').value,'1');
 });
 
+test('existing group rebate edit is previewed and changing it invalidates confirmation',async()=>{
+ const snapshot=editableSnapshot();snapshot.state.groups[0].costs={binance_rebate_percent:20,mt5_rebate_percent:0};
+ let applied;
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,'/api/trading/exit-rules':body=>{applied=body;return {...snapshot,message:'已更新返佣'};}});
+ await f.el('trading-reconcile').onclick();f.el('groups').querySelectorAll('[data-edit-exit]')[0].onclick();
+ assert.equal(f.el('exit-rule-binance-rebate').value,'20');
+ f.el('exit-rule-binance-rebate').value='30';f.el('exit-rule-mt5-rebate').value='50';
+ f.el('exit-rule-preview').onclick();
+ assert.match(f.el('exit-rule-result').textContent,/币安 20%.*MT5 0%[\s\S]*币安 30%.*MT5 50%/);
+ assert.match(f.el('exit-rule-result').textContent,/计入净收益及平仓判断，非已到账/);
+ f.el('exit-rule-binance-rebate').value='31';f.el('exit-rule-fields').oninput();
+ assert.equal(f.el('exit-rule-apply').disabled,true);
+ f.el('exit-rule-preview').onclick();await f.el('exit-rule-apply').onclick();
+ assert.deepEqual(applied.rebates,{binance_rebate_percent:31,mt5_rebate_percent:50});
+ assert.ok(!f.calls.some(c=>c.url==='/api/config'||c.url.includes('/close')));
+});
+
+test('invalid rebate percent prevents preview and applying a forged stale preview',async()=>{
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>editableSnapshot()});
+ await f.el('trading-reconcile').onclick();f.el('groups').querySelectorAll('[data-edit-exit]')[0].onclick();
+ for(const value of ['','101','-1','Infinity']){
+  f.el('exit-rule-binance-rebate').value=value;f.el('exit-rule-preview').onclick();
+  assert.equal(f.el('exit-rule-apply').disabled,true);assert.match(f.el('exit-rule-result').textContent,/返佣比例请填/);
+ }
+ assert.equal(f.calls.filter(c=>c.method==='POST').length,1);
+});
+
+test('verified commissions do not label expected cashback as settled profit',async()=>{
+ const snapshot=editableSnapshot();const g=snapshot.state.groups[0];g.status='closed';
+ g.costs={binance_rebate_percent:30,mt5_rebate_percent:0};
+ g.valuation={fees:10,net_before_rebate:-2,net:1,estimated_rebate:3,costs_verified:true,remaining:{binance:0,mt5:0}};
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});await f.el('trading-reconcile').onclick();
+ assert.match(f.el('groups').innerHTML,/已核验成交手续费 -10.00 USD/);
+ assert.match(f.el('groups').innerHTML,/预计返佣 \+3.00 USD（未确认到账）/);
+ assert.match(f.el('groups').innerHTML,/未含返佣净收益 -2.00 USD/);
+ assert.match(f.el('groups').innerHTML,/平仓净收益 · 含预计返佣/);
+ assert.match(f.el('pnl-stats').innerHTML,/已平仓净收益（含预计返佣）.*\+1.00 USD/);
+ assert.match(f.el('pnl-stats').innerHTML,/预计返佣（未确认到账）.*\+3.00 USD/);
+});
+
 test('basket preview identifies every current member and unknown fills disable changes',async()=>{
  const snapshot=editableSnapshot('basket');snapshot.state.groups.push({...snapshot.state.groups[0],id:'g2'});
  const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});

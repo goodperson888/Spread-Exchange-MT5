@@ -5,6 +5,16 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 from liquidation_risk import validate_alerts
 
+REBATE_FIELDS=('binance_rebate_percent','mt5_rebate_percent')
+
+
+def rebate_rates(costs):
+    rates={key:costs.get(key,0) for key in REBATE_FIELDS}
+    if any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or not 0<=v<=100
+           for v in rates.values()):
+        raise ValueError('手续费返佣比例必须为 0～100 的百分数；30 表示返还手续费的 30%')
+    return rates
+
 
 def validate_proxy_url(value):
     """Accept an optional credential-free HTTP proxy URL."""
@@ -78,6 +88,7 @@ def validate(c):
         raise ValueError('汇率或币安手续费率无效')
     if not 0 <= costs['mt5_commission_per_lot_side'] <= 10000:
         raise ValueError('MT5 佣金参数无效')
+    rebate_rates(costs)
 
 
 def pair_key(c):

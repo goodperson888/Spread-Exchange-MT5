@@ -82,7 +82,12 @@
       const exitMt5=m/g.contract*c.mt5_commission_per_lot_side;
       const exit=exitBinance+exitMt5;
       if(![gross,exit,v.fees,v.carry].every(Number.isFinite))return g;
-      return {...g,valuation:{...v,gross,estimated_exit_fee:exit,estimated_exit_fee_binance:exitBinance,estimated_exit_fee_mt5:exitMt5,net:gross-v.fees-exit+v.carry}};
+      const rebateBinance=(Number(v.rebate_fee_base_binance||0)+Math.max(0,exitBinance))*Number(c.binance_rebate_percent||0)/100;
+      const rebateMt5=(Number(v.rebate_fee_base_mt5||0)+Math.max(0,exitMt5))*Number(c.mt5_rebate_percent||0)/100;
+      const before=gross-v.fees-exit+v.carry;
+      return {...g,valuation:{...v,gross,estimated_exit_fee:exit,estimated_exit_fee_binance:exitBinance,estimated_exit_fee_mt5:exitMt5,
+        estimated_rebate:rebateBinance+rebateMt5,estimated_rebate_binance:rebateBinance,estimated_rebate_mt5:rebateMt5,
+        net_before_rebate:before,net:before+rebateBinance+rebateMt5}};
     });
   }
   const api={QuoteBuffer,renderPoints,chartSeries,sameChartMarket,markGroups};

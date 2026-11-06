@@ -2,7 +2,7 @@
 import copy
 import math
 
-from trading_config import pair_key
+from trading_config import pair_key, rebate_rates, REBATE_FIELDS
 
 
 FIELDS=('target_mode','take_contraction_usd','exit_spread_usd','require_net_profit',
@@ -56,16 +56,24 @@ def apply(engine, config, body):
     elif len(selected)!=1 or selected[0]['parameters'].get('exit_mode')!='group':
         raise ValueError('逐组退出请单独选择一组')
     rules=normalize(body.get('rules'))
-    before=[(g,copy.deepcopy(g['parameters']),g.get('exit_rules_revision')) for g in selected]
+    rates=None
+    if 'rebates' in body:
+        if not isinstance(body['rebates'],dict) or set(body['rebates'])!=set(REBATE_FIELDS):
+            raise ValueError('请完整填写币安和 MT5 手续费返佣比例')
+        rates=rebate_rates(body['rebates'])
+    before=[(g,copy.deepcopy(g['parameters']),g.get('exit_rules_revision'),copy.deepcopy(g['costs'])) for g in selected]
     changes=[]
-    for g,old,revision in before:
-        g['parameters'].update(rules);g['exit_rules_revision']=(revision or 0)+1
-        changes.append({'group':g['id'],'revision':g['exit_rules_revision'],
-                        'before':{key:old.get(key) for key in FIELDS},'after':dict(rules)})
-    try:engine.save('exit_rules_updated',{'changes':changes})
+    try:
+        for g,old,revision,costs in before:
+            g['parameters'].update(rules);g['exit_rules_revision']=(revision or 0)+1
+            if rates is not None:g['costs'].update(rates)
+            changes.append({'group':g['id'],'revision':g['exit_rules_revision'],
+                            'before':{key:old.get(key) for key in FIELDS},'after':dict(rules),
+                            'rebates_before':rebate_rates(costs),'rebates_after':rebate_rates(g['costs'])})
+        engine.save('exit_rules_updated',{'changes':changes})
     except Exception:
-        for g,old,revision in before:
-            g['parameters']=old
+        for g,old,revision,costs in before:
+            g['parameters']=old;g['costs']=costs
             if revision is None:g.pop('exit_rules_revision',None)
             else:g['exit_rules_revision']=revision
         raise
