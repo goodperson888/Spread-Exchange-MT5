@@ -13,7 +13,7 @@
   const dateTime = t => t ? new Date(t).toLocaleString('zh-CN') : '—';
   const usd = x => Number.isFinite(Number(x)) ? `${Number(x)>=0?'+':''}${Number(x).toFixed(2)} USD` : '—';
   const escape = value => String(value ?? '').replace(/[&<>'"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
-  const eventLabels={boot:'程序启动',start:'启动自动开仓',pause:'暂停自动开仓',entry_preflight_blocked:'开仓预检暂未通过',entry_skipped:'跳过本次开仓',group_opening:'准备开仓',group_opened:'双边开仓完成',group_closed:'交易组已结束',order_intent:'准备发送订单',order_result:'订单回报',order_reconciled:'订单对账完成',entry_recovered:'延迟回报已确认，双边开仓完成',order_reconcile_retry:'订单对账重试',order_reconcile_exhausted:'快速确认结束，继续低频对账',close_requested:'请求平仓',close_attempt:'尝试平仓',exit_signal:'触发退出条件',entry_threshold_applied:'开仓阈值已更新',reconciled:'持仓对账通过',paper_reconciled:'纸面持仓对账通过',auto_reconciled_flat:'空仓自动对账通过',costs_verified:'费用已核验',cost_verification_pending:'等待费用核验',exit_rules_updated:'已有组退出规则已修改',adoption_management:'已有仓位管理状态变更',adoption_closing_costs_checked:'接管仓位平仓费用已核验'};
+  const eventLabels={boot:'程序启动',start:'启动自动开仓',pause:'暂停自动开仓',entry_preflight_blocked:'开仓预检暂未通过',entry_skipped:'跳过本次开仓',group_opening:'准备开仓',group_opened:'双边开仓完成',group_closed:'交易组已结束',order_intent:'准备发送订单',order_result:'订单回报',order_reconciled:'订单对账完成',entry_recovered:'延迟回报已确认，双边开仓完成',order_reconcile_retry:'订单对账重试',order_reconcile_exhausted:'快速确认结束，继续低频对账',close_requested:'请求平仓',close_attempt:'尝试平仓',exit_signal:'触发退出条件',entry_threshold_applied:'开仓阈值已更新',reconciled:'持仓对账通过',paper_reconciled:'纸面持仓对账通过',auto_reconciled_flat:'空仓自动对账通过',costs_verified:'费用已核验',cost_verification_pending:'等待费用核验',exit_rules_updated:'已有组退出规则已修改',external_position_changed:'发现平台持仓变化，已暂停交易',external_close_backfilled:'平台外部平仓记录已回补',adoption_management:'已有仓位管理状态变更',adoption_closing_costs_checked:'接管仓位平仓费用已核验'};
   const eventFields={request_ms:'下单回报耗时（毫秒）',query_ms:'订单查询耗时（毫秒）',threshold:'开仓阈值',reason:'原因',state:'状态',group:'交易组',id:'订单标识',leg:'平台',action:'操作',qty:'数量',price:'价格',status:'回报状态',error:'说明',result:'回报',mode:'模式',entry:'开仓价差',value:'数值',attempt:'尝试次数',net:'净收益',net_estimate:'预估净收益',signal_spread:'触发价差',binance_qty:'币安数量',mt5_lots:'MT5手数',position_mode:'持仓模式',enabled:'启用',code:'原因代码',ticket:'订单号',submitted:'已发送',raw_status:'交易所状态',error_code:'错误码',fee:'手续费',changes:'修改项',before:'原规则',after:'新规则',revision:'规则版本',target_mode:'止盈方式',take_contraction_usd:'收窄量',exit_spread_usd:'退出价差',require_net_profit:'要求最低净收益',min_net_profit_usd:'最低净收益',group_loss_enabled:'单组亏损限制启用',group_max_loss_usd:'单组最大亏损',max_hold_minutes:'从原开仓计持仓时限（分钟）'};
   const eventValues={waiting:'等待检查',checking:'检查中',expired:'已过期',failed:'失败',ready:'通过',done:'已结束',pending:'待确认',unknown:'未知',binance:'币安',mt5:'MT5',open:'开仓',close:'平仓',paper:'纸面',live:'实盘',hedge:'双向持仓',one_way:'单向持仓',contraction:'价差收窄',absolute:'绝对退出价差'};
   function eventDetails(value,key='') {
@@ -187,19 +187,19 @@
       const r=o.result||{},g=byGroup.get(o.group),filled=Number(r.qty||0),price=Number(r.price||0);
       const direction=o.leg==='binance'?(o.action==='open'?'卖出':'买入'):(o.action==='open'?'买入':'卖出');
       const quantity=o.leg==='mt5'&&g?`${n(filled)} 盎司 / ${n(filled/g.contract)} 手`:`${n(filled)} XAU`;
-      const status=o.imported?'原持仓成本登记（本次未下单）':r.status==='done'?(filled>0?'已成交':'未成交'):(r.status==='pending'?'待确认':'状态未知');
+      const status=o.source==='external'?'平台外部平仓 · 已回补':o.imported?'原持仓成本登记（本次未下单）':r.status==='done'?(filled>0?'已成交':'未成交'):(r.status==='pending'?'待确认':'状态未知');
       const fee=o.imported?'历史费用见接管汇总':Number.isFinite(Number(r.fee))?`${Number(r.fee).toFixed(4)} ${o.leg==='binance'?'USDT':'USD'}`:'未单独回填';
       const stages=[];
       if(Number.isFinite(o.dispatch_ms)&&Number.isFinite(o.signal_time_ms)) stages.push(`采样→调用 ${Math.max(0,o.dispatch_ms-o.signal_time_ms)} ms`);
       if(Number.isFinite(o.intent_journal_ms)) stages.push(`意图落盘 ${o.intent_journal_ms} ms`);
       if(Number.isFinite(r.request_ms)) stages.push(`适配器调用 ${r.request_ms} ms`);
-      if(Number.isFinite(r.reconcile_time_ms)) stages.push(`查询确认 ${Math.max(0,r.reconcile_time_ms-o.created_ms)} ms（非实际成交延迟）`);
+      if(o.source!=='external'&&Number.isFinite(r.reconcile_time_ms)) stages.push(`查询确认 ${Math.max(0,r.reconcile_time_ms-o.created_ms)} ms（非实际成交延迟）`);
       else if(!Number.isFinite(r.request_ms)&&Number.isFinite(r.fill_time_ms)) stages.push(`意图→本机回报 ${Math.max(0,r.fill_time_ms-o.created_ms)} ms`);
-      const timing=o.imported||!stages.length?'':`<br><span class="muted" title="本机测量，含适配器内部校验；不是交易所撮合时间">${stages.join('<br>')}</span>`;
+      const timing=o.source==='external'?'<br><span class="muted">平台成交时间 · 后台回补</span>':o.imported||!stages.length?'':`<br><span class="muted" title="本机测量，含适配器内部校验；不是交易所撮合时间">${stages.join('<br>')}</span>`;
       const signal=Number.isFinite(o.signal_spread)?n(o.signal_spread):'—';
       const actual=Number.isFinite(o.actual_spread)?n(o.actual_spread):'等待双边成交';
       const spreadDelta=Number.isFinite(o.spread_slippage)?`${o.spread_slippage>=0?'+':''}${n(o.spread_slippage)}`:'—';
-      return `<tr><td>${dateTime(o.created_ms)}${timing}</td><td>#${escape(o.group)}</td><td>${o.leg==='binance'?'币安':'MT5'}<br>${escape(o.symbol)}</td><td>${o.action==='open'?'开仓':'平仓'} · ${direction}</td><td>申请 ${n(o.requested)} 盎司<br>${r.status==='done'?'成交 '+quantity:'成交待确认（已确认 '+quantity+'）'}</td><td>${price?`${n(price)}<br>${(filled*price).toFixed(2)} ${o.leg==='binance'?'USDT':'USD'}`:'—'}</td><td>${signal}<br><span class="muted">${actual}</span><br><span class="muted">偏移 ${spreadDelta}</span></td><td>${fee}</td><td>${status}${r.error?'<br>'+escape(r.error):''}<br><span class="muted">${escape(r.ticket||o.id)}</span></td></tr>`;
+      return `<tr><td>${dateTime(o.created_ms)}${timing}</td><td>#${escape(o.group)}</td><td>${o.leg==='binance'?'币安':'MT5'}<br>${escape(o.symbol)}</td><td>${o.action==='open'?'开仓':'平仓'} · ${direction}</td><td>${o.source==='external'?'外部成交':'申请'} ${n(o.requested)} 盎司<br>${r.status==='done'?'成交 '+quantity:'成交待确认（已确认 '+quantity+'）'}</td><td>${price?`${n(price)}<br>${(filled*price).toFixed(2)} ${o.leg==='binance'?'USDT':'USD'}`:'—'}</td><td>${signal}<br><span class="muted">${actual}</span><br><span class="muted">偏移 ${spreadDelta}</span></td><td>${fee}</td><td>${status}${r.error?'<br>'+escape(r.error):''}<br><span class="muted">${escape(r.ticket||o.id)}</span></td></tr>`;
     }).join('');
     return `<table class="records-table"><thead><tr><th>时间</th><th>交易组</th><th>平台 / 品种</th><th>动作</th><th>申请 / 成交数量</th><th>成交价 / 金额</th><th>监控价差<br>实际成交价差<br>偏移</th><th>成交手续费</th><th>状态 / 票据</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
@@ -239,7 +239,7 @@
     }
     el('trading-pause').disabled=pauseBusy||!connected||!state.enabled;
     el('trading-pause').textContent=pauseBusy?'正在暂停新开仓…':'暂停新开仓';
-    text('new-entry-status',pauseBusy?'新开仓：正在暂停，等待服务端确认':!connected?'新开仓：未连接':state.enabled?'新开仓：运行中':'新开仓：已暂停 · 已有仓位继续按规则管理');
+    text('new-entry-status',pauseBusy?'新开仓：正在暂停，等待服务端确认':!connected?'新开仓：未连接':state.enabled?'新开仓：运行中':state.recovery||connected&&!reconciled?'新开仓：已暂停 · 等待持仓核对，已有仓位管理暂未恢复':'新开仓：已暂停 · 已有仓位继续按规则管理');
     el('new-entry-status').dataset.state=pauseBusy?'pending':state.enabled?'running':'paused';
     const pendingNode=el('config-pending');
     if(pendingNode){pendingNode.hidden=!pending;pendingNode.textContent='已保存 ≠ 已生效。手数、止盈等交易参数须重新连接；开仓阈值可单独点击「应用」，风险提醒阈值保存即生效。已有组保留原规则。';}
@@ -255,10 +255,16 @@
     const q=latestLive?.key===last.quote?.key?latestLive:last.quote;
     const stale=!q||q.valid===false||['mt5','binance'].some(side=>Date.now()-Number(q[side]?.observed_ms||q[side]?.time_ms||0)>Number(last.strategy_runtime?.max_quote_age_ms||3000));
     const age=Number.isFinite(report?.time_ms)?Math.max(0,Math.floor((Date.now()-report.time_ms)/1000)):null;
-    const value=!last.connected?'未连接：已有仓位未恢复自动管理。':last.capabilities?.mode==='paper'?'纸面模式：收益随模拟行情估算，不读取实盘持仓。':
+    let value=!last.connected?'未连接：已有仓位未恢复自动管理。':last.capabilities?.mode==='paper'?'纸面模式：收益随模拟行情估算，不读取实盘持仓。':
       (state.orders||[]).some(o=>o.result?.status!=='done')?'成交待确认：剩余数量与收益等待核对。':
       state.recovery||!last.capabilities?.reconciled?'等待完整持仓对账：报价估值不代表平台仓位已核实。':
-      `${stale?'报价已过期，收益仅按最后收到的报价估算。':'收益随报价估算；'}${age!==null?'上次完整对账 '+dateTime(report.time_ms)+'（'+age+' 秒前）。':'尚无完整对账时间记录。'}完整对账非持续进行，平台手动改仓需重新核对。`;
+      `${stale?'报价已过期，收益仅按最后收到的报价估算。':'收益随报价估算；'}${age!==null?'上次完整对账 '+dateTime(report.time_ms)+'（'+age+' 秒前）。':'尚无完整对账时间记录。'}完整对账非持续进行；后台仅按成交历史回补可归属的外部平仓。`;
+    const monitor=last.external_close_status;
+    if(last.connected&&last.capabilities?.mode==='live'&&monitor) {
+      const active=(state.groups||[]).some(g=>g.status!=='closed');
+      const outdated=active&&Date.now()-Number(monitor.time_ms||0)>20000;
+      value+=' 后台核对：'+(outdated?'数据已过期，请检查连接或点击持仓对账。':monitor.message);
+    }
     text('position-check-status',value);text('records-position-check',value);
   }
   let riskSample=null, riskReceivedAt=0;

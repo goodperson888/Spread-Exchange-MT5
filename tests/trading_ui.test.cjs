@@ -503,3 +503,30 @@ test('fees label estimates, platform-verified costs and paper results accurately
   assert.doesNotMatch(f.el('groups').innerHTML,/已由成交回报或平台记录确认/);
  }
 });
+
+test('background external-close checks are distinguished from complete reconciliation and expire',async()=>{
+ const snapshot=monitoredSnapshot();
+ snapshot.state.groups=[{id:'external',status:'attention',external_attention:true,parameters:{},valuation:{remaining:{binance:1,mt5:0}}}];
+ snapshot.state.recovery=true;snapshot.capabilities.reconciled=false;
+ snapshot.external_close_status={time_ms:Date.now(),level:'warning',message:'已回补可确认成交；仍有剩余仓位，请核对后处理'};
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});
+ await f.el('trading-reconcile').onclick();
+ assert.match(f.el('position-check-status').textContent,/后台核对：已回补.*剩余仓位/);
+ assert.match(f.el('records-position-check').textContent,/等待完整持仓对账/);
+ assert.match(f.el('new-entry-status').textContent,/管理暂未恢复/);
+ f.ageRisk(21000);
+ assert.match(f.el('records-position-check').textContent,/后台核对：数据已过期/);
+});
+
+test('external fills show actual platform time and source without fabricated execution speed',async()=>{
+ const snapshot=monitoredSnapshot();
+ snapshot.state.groups=[{id:'external',status:'closed',external_close:true,mode:'live',contract:100,parameters:{},valuation:{remaining:{binance:0,mt5:0}}}];
+ snapshot.state.orders=[{id:'manual',group:'external',leg:'mt5',action:'close',source:'external',symbol:'XAUUSD',created_ms:1000,requested:1,
+  result:{status:'done',qty:1,price:4300,fee:.1,platform_time_ms:1000,reconcile_time_ms:9000}}];
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});
+ await f.el('trading-reconcile').onclick();
+ const tables=f.el('orders').innerHTML;
+ assert.match(tables,/平台外部平仓 · 已回补/);
+ assert.match(tables,/平台成交时间 · 后台回补/);
+ assert.doesNotMatch(tables,/查询确认 8000|适配器调用|意图→本机回报/);
+});

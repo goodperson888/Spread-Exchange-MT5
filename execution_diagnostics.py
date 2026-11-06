@@ -44,12 +44,14 @@ def build_report(state, events):
             'response_received_ms/fill_time_ms为本机收到直接回报时间；reconcile_time_ms为后续查询确认时间。',
             'execution_open/close.elapsed_ms使用单调时钟，含本机同步日志、双腿串行处理和可能的查询等待，截止组完成确认前；不含最后一次组状态提交。',
             '缺少的字段表示旧版未记录或无法确定，不能当作零；重启后不推算单调耗时；纸面模式不可用于评估实盘速度。',
-            '导出按需读取本机数据库，不调用交易平台、不取得交易线程或写日志的锁。'
+            '导出按需读取本机数据库，不调用交易平台、不取得交易线程或写日志的锁。',
+            'source=external 表示平台外部平仓回补；platform_time_ms是未经时区推算的平台原始时间，reconcile_time_ms是本机发现时间，组closed_ms为本机确认完成时间；两者差不代表程序下单耗时。'
         ],'groups':[],'orders':[],'events':[]}
     for g in groups:
         row={'id':group_ids[g['id']], 'mode':choice(g,'mode',('paper','live')),
              'status':choice(g,'status',('opening','open','closing','unwinding','attention','closed')),
              'imported':bool(g.get('imported')), 'symbol':symbol(g.get('symbol')),
+             'external_close':bool(g.get('external_close')),
              'mt5_symbol':symbol(g.get('mt5_symbol')),
              'first_leg':choice(g,'first_leg',('binance','mt5')),
              'second_leg':choice(g,'second_leg',('binance','mt5')),
@@ -67,9 +69,10 @@ def build_report(state, events):
         row={'id':order_ids[o['id']],'group':group_ids[o['group']],
              'leg':choice(o,'leg',('binance','mt5')),'action':choice(o,'action',('open','close')),
              'symbol':symbol(o.get('symbol')),'imported':bool(o.get('imported')),
+             'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
              **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage')}
         row['result']={'status':choice(result,'status',('done','pending','unknown')),
-                       **numbers(result,'qty price fee request_ms response_received_ms fill_time_ms reconcile_time_ms retcode ack_volume ack_price')}
+                       **numbers(result,'qty price fee swap request_ms response_received_ms fill_time_ms reconcile_time_ms platform_time_ms retcode ack_volume ack_price')}
         code=result.get('error_code')
         if isinstance(code,int) or code in ('DEPTH_INSUFFICIENT','DEPTH_CHECK_FAILED'):
             row['result']['error_code']=code
@@ -81,6 +84,10 @@ def build_report(state, events):
            'group_opening','group_opened','group_closed','exit_signal','entry_skipped'}
     for event in events:
         data=event.get('data',{})
+        if event.get('kind') in ('external_position_changed','external_close_backfilled'):
+            related=[group_ids[x] for x in data.get('groups',[]) if x in group_ids]
+            if related: report['events'].append({'kind':event['kind'],**numbers(event,'time'),'data':{'groups':related}})
+            continue
         if event.get('kind')=='exit_rules_updated':
             changes=[]
             for change in data.get('changes',[])[:50]:

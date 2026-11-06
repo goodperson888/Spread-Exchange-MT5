@@ -324,6 +324,28 @@ class Binance:
     def trades(self, symbol, order_id):
         return self.request('/fapi/v1/userTrades',dict(symbol=symbol,orderId=order_id,limit=1000),signed=True)
 
+    def trade_history(self, symbol, start, end):
+        """Complete bounded time windows; a full page is split, never truncated."""
+        start,end = int(start),int(end)
+        if start>end or end-start>180*86400000:
+            raise ValueError('币安成交历史超出自动回补范围')
+        rows = []; remaining = 96
+        def window(lo,hi):
+            nonlocal remaining
+            remaining -= 1
+            if remaining<0: raise ValueError('币安成交记录过多，须人工核对')
+            batch = self.request('/fapi/v1/userTrades',dict(symbol=symbol,startTime=lo,endTime=hi,limit=1000),signed=True)
+            if not isinstance(batch,list): raise ValueError('币安成交历史数据不完整')
+            if len(batch)>=1000:
+                if lo==hi: raise ValueError('币安同毫秒成交过多，须人工核对')
+                mid = (lo+hi)//2
+                window(lo,mid); window(mid+1,hi)
+            else: rows.extend(batch)
+        while start<=end:
+            stop = min(end,start+7*86400000-1)
+            window(start,stop); start = stop+1
+        return rows
+
     def commissions_usdt(self, fills):
         rates={'USDT':1.0};total=0.0
         for fill in fills:
@@ -403,7 +425,7 @@ class BinanceBookTicker:
 
 class Terminal:
     """Persistent isolated MT5 session; a blocked native call cannot freeze the web UI."""
-    def __init__(self, settings, magic):
+    def __init__(self, settings, magic, read_only=False):
         if sys.platform != 'win32':
             raise ValueError('真实 MT5 行情及执行需要 Windows 64 位')
         command=[sys.executable,'--mt5-worker'] if getattr(sys,'frozen',False) else [sys.executable,str(Path(__file__).resolve()),'--mt5-worker']
@@ -411,7 +433,7 @@ class Terminal:
             text=True,encoding='utf-8',creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         self.responses=queue.Queue(); self.lock=threading.Lock()
         threading.Thread(target=self._read,daemon=True).start()
-        try: self.call('init',settings=settings,magic=magic)
+        try: self.call('init',settings=settings,magic=magic,read_only=read_only)
         except Exception:
             self.close(); raise
 
@@ -554,10 +576,34 @@ class NativeMT5Fills:
         return data
 
 
+def native_external_history(mt, symbol, openings):
+    """Read immutable position history without assuming a broker clock offset."""
+    if not isinstance(openings,list) or not 0<len(openings)<=100:
+        raise ValueError('MT5 原开仓编号列表无效')
+    result=[];seen=set()
+    for opening in openings:
+        ticket=int(opening['order_ticket'])
+        if ticket<=0: raise ValueError('MT5 原开仓订单编号未确认')
+        rows=mt.history_deals_get(ticket=ticket)
+        if rows is None: raise ValueError('MT5 原开仓历史读取失败')
+        ids={int(d.position_id) for d in rows if d.symbol==symbol and int(d.order)==ticket}
+        if len(ids)!=1: raise ValueError('MT5 原开仓持仓标识未唯一确认')
+        identifier=next(iter(ids))
+        if opening.get('identifier') and str(opening['identifier'])!=str(identifier):
+            raise ValueError('MT5 原持仓标识不符')
+        if identifier in seen: continue
+        seen.add(identifier)
+        deals=mt.history_deals_get(position=identifier)
+        if deals is None: raise ValueError('MT5 持仓成交历史读取失败')
+        result.extend(d._asdict() for d in deals if d.symbol==symbol)
+        if len(result)>20000: raise ValueError('MT5 历史过多，须人工核对')
+    return result
+
+
 def worker_main():
     import MetaTrader5 as mt
     from datetime import datetime, timezone
-    settings={}; magic=0
+    settings={}; magic=0; read_only=False
     def history(start):
         rows=mt.history_deals_get(datetime.fromtimestamp(start/1000,timezone.utc),datetime.now(timezone.utc))
         if rows is None: raise ValueError('MT5 成交历史读取失败')
@@ -574,13 +620,15 @@ def worker_main():
         try:
             r=json.loads(line); cmd=r['command']
             if cmd=='init':
-                settings=r['settings'];magic=int(r['magic'])
+                settings=r['settings'];magic=int(r['magic']);read_only=bool(r.get('read_only',False))
                 if not settings.get('account') or not settings.get('server') or not settings.get('symbol'):
                     raise ValueError('先检查并应用 MT5 账户和品种')
                 path=settings.get('terminal_path','');args=[path] if path else []
                 if not mt.initialize(*args,timeout=10000): raise ValueError('MT5 初始化失败')
                 identity(); mt.symbol_select(settings['symbol'],True); data=True
             else:
+                if read_only and cmd not in ('snapshot','quote','history','external_history'):
+                    raise ValueError('持仓核对会话只允许读取行情、持仓和成交')
                 a,t=identity(); s=mt.symbol_info(settings['symbol'])
                 if not s: raise ValueError('MT5 品种不可用')
                 if cmd=='quote':
@@ -605,6 +653,13 @@ def worker_main():
                                         symbol=p.symbol,price_open=p.price_open,time_ms=p.time_msc,
                                         profit=p.profit,comment=p.comment) for p in positions])
                 elif cmd=='history': data=[d._asdict() for d in history(r['start_ms']) if d.symbol==s.name and d.magic==magic]
+                elif cmd=='external_history':
+                    if int(time.time()*1000)-int(r['start_ms'])>180*86400000:
+                        raise ValueError('MT5 成交历史超出自动回补范围')
+                    # Manual exits usually use a different magic/comment. The
+                    # caller proves ownership via the original opening deal's
+                    # immutable position_id, not via the closing comment.
+                    data=native_external_history(mt,s.name,r['openings'])
                 elif cmd=='rates':
                     tf={'M1':mt.TIMEFRAME_M1,'M5':mt.TIMEFRAME_M5,'H1':mt.TIMEFRAME_H1}[r['period']]
                     rates=mt.copy_rates_from_pos(s.name,tf,1,r['count'])

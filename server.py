@@ -32,6 +32,7 @@ from trading_store import Store
 from execution_diagnostics import export_report
 import position_adoption
 import exit_rules
+import external_closes
 from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, observed_quote
 from entry_preflight import EntryPreflight
 from liquidation_risk import BinanceRiskMonitor, risk_snapshot
@@ -117,6 +118,8 @@ class TradingRuntime:
         self._last_rest_market_at = 0
         self.entry_preflight = None
         self.risk_monitor = None
+        self.external_monitor = None
+        self.external_close_status = None
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._loop, name='gold-pair-market', daemon=True)
         self.thread.start()
@@ -124,6 +127,7 @@ class TradingRuntime:
     def close(self):
         self.stop_event.set()
         self.market_wake.set()
+        if self.external_monitor: self.external_monitor.close()
         if self.pump: self.pump.close()
         if self.push_bridge: self.push_bridge.close()
         if self.terminal:
@@ -261,9 +265,12 @@ class TradingRuntime:
             old_stream = self.market_stream
             old_preflight = self.entry_preflight
             old_risk_monitor = getattr(self, 'risk_monitor', None)
+            old_external_monitor = getattr(self, 'external_monitor', None)
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
             self.entry_preflight = new_preflight
             self.risk_monitor = new_risk_monitor
+            self.external_monitor = None
+            self.external_close_status = None
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.engine.quote_provider = self._execution_quote
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
@@ -304,7 +311,113 @@ class TradingRuntime:
                 old_preflight.close()
             if old_risk_monitor and old_risk_monitor is not new_risk_monitor:
                 old_risk_monitor.close()
+            if old_external_monitor: old_external_monitor.close()
+            if mode=='live':
+                observer = Binance(production=True,key=api_key,secret=api_secret,
+                                   recv_window_ms=config['binance']['recv_window_ms'],
+                                   proxy_url=config['binance'].get('proxy_url',''))
+                self.external_monitor = external_closes.ExternalCloseMonitor(
+                    self,observer,lambda: Terminal(config['mt5'],config['execution']['magic'],read_only=True),start=False)
+                self.external_monitor.start()
             return self.snapshot()
+
+    def _external_capture(self, monitor):
+        # A background observer never waits for paired execution or borrows its
+        # terminal/client. Capture only settled ordinary positions.
+        if not self.lock.acquire(blocking=False): return None
+        try:
+            if (self.stop_event.is_set() or monitor is not getattr(self,'external_monitor',None)
+                    or not self.connected or self.config['execution']['mode']!='live'
+                    or self.config['mt5']['adapter']!='native'): return None
+            active = self.engine.active()
+            if not active or any(g.get('imported') or g.get('key')!=pair_key(self.config)
+                    or g.get('status') not in ('open','attention') or self.engine.uncertain(g) for g in active):
+                return None
+            state = copy.deepcopy(external_closes.observation_state(self.engine.state))
+            return state,copy.deepcopy(self.config),external_closes.fingerprint(state)
+        finally: self.lock.release()
+
+    def _external_publish(self, monitor, token, phase, proposals, errors, mt5_snapshot=None):
+        if not self.lock.acquire(blocking=False): return False
+        try:
+            if (self.stop_event.is_set() or monitor is not getattr(self,'external_monitor',None)
+                    or token!=external_closes.fingerprint(self.engine.state)): return False
+            active = self.engine.active(); at = now_ms()
+            waiting = any(g.get('external_attention') for g in active)
+            if phase=='checked':
+                if waiting:
+                    message = ('已回补可确认成交；仍有剩余仓位，请核对后处理；不会自动重新开仓'
+                               if any(g.get('external_close') for g in active) else
+                               '持仓数量与日志一致；上次异常仍待点击持仓对账确认，交易保持暂停')
+                else: message = '后台每约 5 秒核对程序持仓数量；平台手动平仓查到成交后回补记录'
+                self.external_close_status = dict(time_ms=at,level='warning' if waiting else 'normal',message=message)
+                return True
+            if phase=='unavailable':
+                self.external_close_status = dict(time_ms=at,level='unknown',message='后台持仓核对暂不可用；请检查连接或点击持仓对账')
+                return True
+            if phase in ('detected','blocked'):
+                reason = '发现平台持仓变化，已暂停交易并核对真实成交；不会自动重新开仓'
+                if phase=='blocked': reason = '平台委托或持仓归属异常，已暂停交易；请点击持仓对账'
+                changed = not waiting or self.engine.state.get('enabled')
+                self.engine._entry_deadlines.clear()
+                self.engine.state.update(enabled=False,recovery=True,alarm=reason)
+                self.reconciled = False
+                for g in active: g['external_attention'] = True
+                self.external_close_status = dict(time_ms=at,level='warning',message=reason)
+                if changed: self.engine.save('external_position_changed',{'groups':[g['id'] for g in active]})
+                return True
+            if phase=='pending':
+                self.external_close_status = dict(time_ms=at,level='warning',message='；'.join(errors))
+                return True
+            if phase!='backfill': return False
+            before = copy.deepcopy(self.engine.state)
+            previous_status = self.external_close_status
+            known = {o['id'] for o in self.engine.state['orders']}
+            new = [o for o in proposals if o['id'] not in known]
+            touched = {o['group'] for o in new}
+            self.engine.state['orders'].extend(new)
+            try:
+                for g in active:
+                    if g['id'] not in touched: continue
+                    g['external_attention'] = True
+                    g['external_close'] = True
+                    g['costs_verified'] = False
+                    own = [o for o in self.engine.state['orders'] if o['group']==g['id']]
+                    realized_swap = sum(o['result'].get('swap',0) for o in own if o.get('source')=='external' and o['leg']=='mt5')
+                    if mt5_snapshot is not None:
+                        tickets = self.engine.mt5_tickets(g)
+                        g['live_mt5_swap_usd'] = realized_swap+sum(float(p.get('swap',0)) for p in mt5_snapshot['positions'] if str(p['ticket']) in tickets)
+                    remaining = self.engine.amounts(g)
+                    if max(remaining.values())<1e-8:
+                        g.update(status='closed',reason='平台外部平仓，已按真实成交回补记录',
+                                 closed_ms=at)
+                        actual = self.engine._record_spread(g,'close')
+                        if actual is not None: g['exit'] = actual
+                        g.pop('external_attention',None)
+                    else:
+                        g.update(status='attention',reason='平台外部减仓已回补；仍有剩余仓位，请持仓对账后处理')
+                    q = self.quote or dict(binance=dict(ask=0),mt5=dict(bid=0),usdt_usd=g['costs']['usdt_usd'])
+                    g['valuation'] = self.engine.valuation(g,q)
+                remaining = self.engine.active()
+                completed = bool(new) and not remaining and not errors
+                if completed:
+                    self.engine.state.update(enabled=False,recovery=False,alarm='平台外部平仓记录已回补；新开仓保持暂停')
+                    self.reconciled = True
+                message = ('平台外部平仓记录已回补；新开仓保持暂停' if completed else
+                           '已回补可确认成交；仍有剩余仓位或待确认记录，请持仓对账后处理')
+                if not new and not any(g.get('external_close') for g in active):
+                    message = '尚无可安全回补的完整成交；保留原记录，等待平台历史或人工对账'
+                if errors: message += '；'+'；'.join(errors)
+                self.external_close_status = dict(time_ms=at,level='normal' if completed else 'warning',message=message)
+                if new:
+                    self.engine.save('external_close_backfilled',{'groups':sorted(touched),'orders':[o['id'] for o in new]})
+            except Exception:
+                self.engine.state = before
+                self.external_close_status = previous_status
+                self.reconciled = False
+                raise
+            return True
+        finally: self.lock.release()
 
     def _quote(self, mt5, binance, config=None):
         c = config or self.config
@@ -488,6 +601,8 @@ class TradingRuntime:
             comment=opened['id'] if opened else ''
             swap=sum(float(p.get('swap',0)) for p in positions
                      if str(p.get('ticket',''))==ticket or p.get('comment')==comment)
+            swap+=sum(float(o.get('result',{}).get('swap',0)) for o in orders
+                      if o['group']==group['id'] and o.get('source')=='external' and o['leg']=='mt5')
             group['live_mt5_swap_usd']=swap
             group['live_carry_usd']=swap+group.get('live_binance_funding_usd',0)
         if not active or time.monotonic()-self._last_carry_refresh<60: return
@@ -552,6 +667,13 @@ class TradingRuntime:
                 for order in by_id.values():
                     if order['leg'] != 'binance' or order['result'].get('qty',0)<=0:
                         continue
+                    if order.get('source')=='external':
+                        # Already read and position-validated by the independent
+                        # observer; no additional history on the execution lane.
+                        if not order.get('external_deal_ids') or not math.isfinite(order['result']['fee']):
+                            raise ValueError('外部成交费用记录待核验')
+                        fees[order['id']] = order['result']['fee']
+                        continue
                     if not order['result'].get('ticket'):
                         raise ValueError('币安成交订单号尚未确认')
                     fills = self.binance.trades(order['symbol'], order['result']['ticket'])
@@ -562,6 +684,12 @@ class TradingRuntime:
                 deals = self.terminal.call('history', start_ms=group['opened_ms'] - 60000) if mt5_orders else []
                 mt_swap = 0
                 for order in mt5_orders:
+                    if order.get('source')=='external':
+                        if not order.get('external_deal_ids') or not math.isfinite(order['result']['fee']):
+                            raise ValueError('外部成交费用记录待核验')
+                        fees[order['id']] = order['result']['fee']
+                        mt_swap += order['result'].get('swap',0)
+                        continue
                     rows = [x for x in deals if x.get('comment') == order['id']]
                     if not rows or abs(sum(float(x.get('volume',0))*group['contract'] for x in rows)-order['result']['qty'])>1e-7:
                         raise ValueError('MT5 成交费用记录尚未完整返回')
@@ -688,6 +816,7 @@ class TradingRuntime:
                     self.engine.pause('币安持仓模式在连接后发生变化，请重新持仓对账')
                     raise ValueError('币安持仓模式在连接后发生变化，请重新连接并完成持仓对账')
             self.engine.start(self.config)
+            self.external_close_status = None
             return self.snapshot()
 
     def pause(self):
@@ -1008,6 +1137,7 @@ class TradingRuntime:
                 'state': st, 'events': self.store.events(),
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,
+                'external_close_status': copy.deepcopy(getattr(self,'external_close_status',None)),
                 'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd'],
                                      'max_quote_age_ms': self.config['strategy']['max_quote_age_ms'],
                                      'mt5_symbol': self.config['mt5']['symbol'], 'symbol': self.config['symbol']} if self.config else None,
