@@ -590,20 +590,31 @@ def native_external_history(mt, symbol, openings):
         identifier = str(opening.get('identifier') or '').strip()
         try: ticket=int(opening.get('order_ticket') or 0)
         except (TypeError,ValueError): ticket=0
+        rows = None
         if ticket>0:
-            rows=mt.history_deals_get(ticket=ticket)
-            if rows is None: raise ValueError('MT5 原开仓历史读取失败')
-            ids={int(d.position_id) for d in rows if d.symbol==symbol and int(d.order)==ticket}
-            if len(ids)!=1: raise ValueError('MT5 原开仓持仓标识未唯一确认')
-            identifier= str(next(iter(ids)))
-            if opening.get('identifier') and str(opening['identifier'])!=identifier:
-                raise ValueError('MT5 原持仓标识不符')
-        elif identifier:
-            rows=mt.history_deals_get(position=int(identifier))
+            # A few MT5 servers do not support the ticket filter reliably
+            # after a manual close.  A missing/empty result is recoverable
+            # when the immutable position id or exact opening identity is
+            # available, so do not fail before trying those paths.
+            try: rows=mt.history_deals_get(ticket=ticket)
+            except Exception: rows=None
+            ids={int(d.position_id) for d in (rows or ())
+                 if d.symbol==symbol and int(d.order)==ticket}
+            if ids:
+                if len(ids)!=1: raise ValueError('MT5 原开仓持仓标识未唯一确认')
+                found=str(next(iter(ids)))
+                if opening.get('identifier') and str(opening['identifier'])!=found:
+                    raise ValueError('MT5 原持仓标识不符')
+                identifier=found
+            elif not identifier:
+                rows=None
+        if identifier and not rows:
+            try: rows=mt.history_deals_get(position=int(identifier))
+            except Exception: rows=None
             if rows is None: raise ValueError('MT5 原持仓成交历史读取失败')
             ids={int(d.position_id) for d in rows if d.symbol==symbol}
             if ids!={int(identifier)}: raise ValueError('MT5 原持仓标识不符')
-        else:
+        if not identifier:
             # Last-resort recovery for older journals that retained neither
             # ticket nor position id.  The date range only bounds the native
             # query; ownership still requires a unique symbol + magic +
@@ -615,8 +626,10 @@ def native_external_history(mt, symbol, openings):
             except (TypeError,ValueError): created=0
             if not comment or magic is None or created<=0:
                 raise ValueError('MT5 原开仓编号未确认')
-            rows=mt.history_deals_get(datetime.fromtimestamp(created-86400,timezone.utc),
-                                      datetime.fromtimestamp(created+86400,timezone.utc))
+            try:
+                rows=mt.history_deals_get(datetime.fromtimestamp(created-86400,timezone.utc),
+                                          datetime.fromtimestamp(created+86400,timezone.utc))
+            except Exception: rows=None
             if rows is None: raise ValueError('MT5 原开仓历史读取失败')
             matches=[d for d in rows if d.symbol==symbol and int(d.magic)==magic
                      and str(d.comment)==comment and int(d.entry)==0 and int(d.type)==0]
@@ -626,11 +639,17 @@ def native_external_history(mt, symbol, openings):
             ids={int(d.position_id) for d in matches}
             if len(ids)!=1: raise ValueError('MT5 原开仓持仓标识未唯一确认')
             identifier=str(next(iter(ids)))
-            rows=mt.history_deals_get(ticket=ticket)
+            try: rows=mt.history_deals_get(ticket=ticket)
+            except Exception: rows=None
             if rows is None: raise ValueError('MT5 原开仓历史读取失败')
         if identifier in seen: continue
         seen.add(identifier)
-        deals=rows if identifier and ticket<=0 else mt.history_deals_get(position=int(identifier))
+        # The ticket query above may have returned only the opening deal.  A
+        # position query is the authoritative source for all manual exits.
+        if not (identifier and ticket<=0 and rows):
+            try: deals=mt.history_deals_get(position=int(identifier))
+            except Exception: deals=None
+        else: deals=rows
         if deals is None: raise ValueError('MT5 持仓成交历史读取失败')
         result.extend(d._asdict() for d in deals if d.symbol==symbol)
         if len(result)>20000: raise ValueError('MT5 历史过多，须人工核对')

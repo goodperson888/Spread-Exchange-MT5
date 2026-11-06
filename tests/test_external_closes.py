@@ -432,6 +432,15 @@ class TradeHistoryTests(unittest.TestCase):
         self.assertEqual([d['ticket'] for d in result],[11,12])
         self.assertEqual(mt.history_deals_get.call_args_list[0].kwargs,dict(position=900))
 
+    def test_native_external_history_falls_back_when_ticket_filter_is_unavailable(self):
+        Deal=namedtuple('Deal','ticket order position_id symbol magic entry type comment')
+        opening=Deal(11,1001,900,'XAUUSD',123,0,0,'strategy-open')
+        closing=Deal(12,1002,900,'XAUUSD',0,1,1,'manual close')
+        mt=SimpleNamespace(history_deals_get=Mock(side_effect=[None,(opening,closing),(opening,closing)]))
+        result=native_external_history(mt,'XAUUSD',[dict(order_ticket=1001,identifier=900)])
+        self.assertEqual([d['ticket'] for d in result],[11,12])
+        self.assertEqual(mt.history_deals_get.call_args_list[1].kwargs,dict(position=900))
+
     def test_read_only_native_worker_rejects_order_submission_before_native_calls(self):
         mt=SimpleNamespace(initialize=Mock(return_value=True),shutdown=Mock(),symbol_select=Mock(),order_send=Mock(),
                            symbol_info=Mock(return_value=SimpleNamespace(name='XAUUSD')),
