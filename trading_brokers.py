@@ -651,6 +651,70 @@ def native_external_history(mt, symbol, openings):
     return result
 
 
+def native_external_history_probe(mt, symbol, openings):
+    """Return a safe, relation-preserving MT5 history shape for diagnostics.
+
+    Values that identify an account/order are replaced with D/O/P aliases;
+    execution fields remain visible so broker-specific history differences can
+    be diagnosed without exporting credentials or raw tickets.
+    """
+    from datetime import datetime, timezone
+    allowed=('ticket','order','position_id','symbol','magic','entry','type','reason',
+             'volume','price','time','time_msc','commission','fee','swap','comment')
+    queries=[]; rows=[]; aliases={k:{} for k in ('ticket','order','position_id')}
+
+    def alias(kind,value):
+        if value in (None,''): return None
+        key=str(value); mapping=aliases[kind]
+        if key not in mapping: mapping[key]=f'{kind[0].upper()}{len(mapping)+1}'
+        return mapping[key]
+
+    def read(label,*args,**kwargs):
+        try:
+            value=mt.history_deals_get(*args,**kwargs)
+            queries.append({'query':label,'status':'ok' if value is not None else 'empty'})
+            return value or ()
+        except Exception:
+            queries.append({'query':label,'status':'error'})
+            return ()
+
+    for opening in openings if isinstance(openings,list) else []:
+        ticket=opening.get('order_ticket'); identifier=opening.get('identifier')
+        try: ticket=int(ticket or 0)
+        except (TypeError,ValueError): ticket=0
+        if identifier:
+            rows.extend(read('position',position=int(identifier)))
+        if ticket:
+            rows.extend(read('ticket',ticket=ticket))
+        try: created=float(opening.get('created_ms'))/1000
+        except (TypeError,ValueError): created=0
+        if created>0:
+            rows.extend(read('range',datetime.fromtimestamp(created-86400,timezone.utc),
+                             datetime.fromtimestamp(created+86400,timezone.utc)))
+    unique={}
+    for row in rows:
+        data={}
+        source=row._asdict() if hasattr(row,'_asdict') else getattr(row,'__dict__',{})
+        for key in allowed:
+            if key not in source: continue
+            value=source[key]
+            if key in aliases:
+                data[key]=alias(key,value)
+            elif key=='comment':
+                text=str(value or '')
+                data['comment_present']=bool(text)
+                data['comment_kind']='strategy' if text.startswith('gp') else 'manual' if text else 'empty'
+            elif isinstance(value,(str,int,float,bool)) or value is None:
+                data[key]=value
+        identity=(data.get('ticket'),data.get('order'),data.get('position_id'),
+                  data.get('time_msc'),data.get('volume'),data.get('price'))
+        unique[identity]=data
+    clean=sorted(unique.values(),key=lambda x:(str(x.get('position_id')),x.get('time_msc',0)))
+    fields=sorted({key for row in clean for key in row})
+    return {'schema_version':1,'symbol':symbol,'queries':queries,'row_count':len(clean),
+            'fields':fields,'rows':clean}
+
+
 def worker_main():
     import MetaTrader5 as mt
     from datetime import datetime, timezone
@@ -678,7 +742,7 @@ def worker_main():
                 if not mt.initialize(*args,timeout=10000): raise ValueError('MT5 初始化失败')
                 identity(); mt.symbol_select(settings['symbol'],True); data=True
             else:
-                if read_only and cmd not in ('snapshot','quote','history','external_history','query'):
+                if read_only and cmd not in ('snapshot','quote','history','external_history','external_history_probe','query'):
                     raise ValueError('持仓核对会话只允许读取行情、持仓和成交')
                 a,t=identity(); s=mt.symbol_info(settings['symbol'])
                 if not s: raise ValueError('MT5 品种不可用')
@@ -711,6 +775,10 @@ def worker_main():
                     # caller proves ownership via the original opening deal's
                     # immutable position_id, not via the closing comment.
                     data=native_external_history(mt,s.name,r['openings'])
+                elif cmd=='external_history_probe':
+                    if int(time.time()*1000)-int(r.get('start_ms',0))>180*86400000:
+                        raise ValueError('MT5 成交历史超出自动回补范围')
+                    data=native_external_history_probe(mt,s.name,r['openings'])
                 elif cmd=='rates':
                     tf={'M1':mt.TIMEFRAME_M1,'M5':mt.TIMEFRAME_M5,'H1':mt.TIMEFRAME_H1}[r['period']]
                     rates=mt.copy_rates_from_pos(s.name,tf,1,r['count'])

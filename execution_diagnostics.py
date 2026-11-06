@@ -48,6 +48,10 @@ def build_report(state, events):
             'source=external 表示平台外部平仓回补；platform_time_ms是未经时区推算的平台原始时间，reconcile_time_ms是本机发现时间，组closed_ms为本机确认完成时间；两者差不代表程序下单耗时。',
             'estimated_rebate为用户按手续费比例预计的返佣，非实际到账；net_before_rebate不含该项，net含该项并参与退出判断。'
         ],'groups':[],'orders':[],'events':[]}
+    probe=state.get('mt5_history_probe')
+    if isinstance(probe,dict):
+        report['mt5_history_probe']=probe
+        report['notes'].append('mt5_history_probe为只读历史字段探针：订单、成交和持仓编号已替换为别名；用于比较经纪商返回的字段、类型和关联关系。')
     for g in groups:
         row={'id':group_ids[g['id']], 'mode':choice(g,'mode',('paper','live')),
              'status':choice(g,'status',('opening','open','closing','unwinding','attention','closed')),

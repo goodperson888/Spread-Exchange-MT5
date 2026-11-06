@@ -41,6 +41,14 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn('request_ms',report['orders'][0]['result'])
         self.assertNotIn('elapsed_ms',report['groups'][0])
 
+    def test_mt5_history_probe_is_exported_without_raw_identifiers(self):
+        report=build_report({'groups':[],'orders':[], 'mt5_history_probe':{
+            'schema_version':1,'symbol':'XAUUSD','queries':[{'query':'position','status':'empty'}],
+            'row_count':1,'fields':['entry','position_id'],
+            'rows':[{'position_id':'P1','entry':1,'comment_present':True,'comment_kind':'manual'}]}},[])
+        self.assertEqual(report['mt5_history_probe']['rows'][0]['position_id'],'P1')
+        self.assertNotIn('ticket',json.dumps(report['mt5_history_probe']))
+
     def test_exit_rule_audit_exports_only_safe_fields_and_anonymous_group_ids(self):
         secret='PRIVATE-DO-NOT-EXPORT'
         rules={'target_mode':'absolute','exit_spread_usd':1,'require_net_profit':False,

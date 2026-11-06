@@ -341,9 +341,14 @@ class ExternalCloseMonitor:
                              symbol=o.get('symbol'))
                         for o in state['orders'] if o['leg']=='mt5' and o['action']=='open' and o['result'].get('qty',0)>0]
             history_error = []
+            history_probe = None
             try: deals = self.terminal.call('external_history',start_ms=start,openings=openings)
             except Exception as exc:
                 deals = []
+                try:
+                    probe = self.terminal.call('external_history_probe',start_ms=start,openings=openings)
+                    history_probe = probe if isinstance(probe,dict) else None
+                except Exception: pass
                 # Keep the UI actionable without exposing native/account data.
                 message = str(exc)
                 allowed = ('MT5 原', 'MT5 持仓', 'MT5 成交', 'MT5 平仓')
@@ -373,10 +378,15 @@ class ExternalCloseMonitor:
                 qty,ps = value
                 return qty,sorted((k,str(p.get('identifier')),p.get('side'),p.get('magic'),p.get('comment'),number(p['lots'])) for k,p in ps.items())
             if stable(a)!=stable(b) or pending or latest['orders']:
-                self.runtime._external_publish(self,token,'pending',[],['平台持仓仍在变化，等待下一次核对'])
+                self.runtime._external_publish(self,token,'pending',[],['平台持仓仍在变化，等待下一次核对'],history_probe=history_probe)
                 return
             proposals,errors = propose(state,config,mode,again,latest,fills,deals,self.client.commissions_usdt)
             errors = history_error + errors
+            if errors and history_probe is None:
+                try:
+                    probe = self.terminal.call('external_history_probe',start_ms=start,openings=openings)
+                    history_probe = probe if isinstance(probe,dict) else None
+                except Exception: pass
             if identity_error:
                 # Keep proven MT5 facts, but never claim account-wide flatness
                 # or resume management when Binance ownership is unconfirmed.
@@ -387,7 +397,7 @@ class ExternalCloseMonitor:
                 self.history_attempts+=1
             else:
                 self.history_retry_at=0.;self.history_attempts=0
-            self.runtime._external_publish(self,token,'backfill',proposals,errors,mt5_snapshot=latest)
+            self.runtime._external_publish(self,token,'backfill',proposals,errors,mt5_snapshot=latest,history_probe=history_probe)
         except (ValueError,KeyError,TypeError,OverflowError):
             self.runtime._external_publish(self,token,'blocked',[],[])
         except Exception:

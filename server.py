@@ -337,7 +337,7 @@ class TradingRuntime:
             return state,copy.deepcopy(self.config),external_closes.fingerprint(state)
         finally: self.lock.release()
 
-    def _external_publish(self, monitor, token, phase, proposals, errors, mt5_snapshot=None):
+    def _external_publish(self, monitor, token, phase, proposals, errors, mt5_snapshot=None, history_probe=None):
         if not self.lock.acquire(blocking=False): return False
         try:
             if (self.stop_event.is_set() or monitor.stopped.is_set() or not self.connected
@@ -345,6 +345,9 @@ class TradingRuntime:
                     or token!=external_closes.fingerprint(self.engine.state)): return False
             active = self.engine.active(); at = now_ms()
             waiting = any(g.get('external_attention') for g in active)
+            probe_changed = history_probe is not None and history_probe != self.engine.state.get('mt5_history_probe')
+            if probe_changed:
+                self.engine.state['mt5_history_probe'] = copy.deepcopy(history_probe)
             if phase=='resolved':
                 before=copy.deepcopy(self.engine.state)
                 changed=[]
@@ -412,7 +415,12 @@ class TradingRuntime:
                 if changed: self.engine.save('external_position_changed',{'groups':[g['id'] for g in active]})
                 return True
             if phase=='pending':
-                self.external_close_status = dict(time_ms=at,level='warning',message='；'.join(errors))
+                message='；'.join(errors)
+                if probe_changed: message += '；已记录 MT5 历史字段探针，请重新导出执行诊断'
+                self.external_close_status = dict(time_ms=at,level='warning',message=message)
+                if probe_changed:
+                    self.engine.save('mt5_history_probe', {'row_count': history_probe.get('row_count',0),
+                                                           'query_count': len(history_probe.get('queries',[]))})
                 return True
             if phase!='backfill': return False
             before = copy.deepcopy(self.engine.state)
@@ -459,9 +467,13 @@ class TradingRuntime:
                 if not new and not any(g.get('external_close') for g in active):
                     message = '尚无可安全回补的完整成交；保留原记录，等待平台历史或人工对账'
                 if errors: message += '；'+'；'.join(errors)
+                if probe_changed: message += '；已记录 MT5 历史字段探针，请重新导出执行诊断'
                 self.external_close_status = dict(time_ms=at,level='normal' if completed else 'warning',message=message)
-                if new:
-                    self.engine.save('external_close_backfilled',{'groups':sorted(touched),'orders':[o['id'] for o in new]})
+                if new or probe_changed:
+                    self.engine.save('external_close_backfilled' if new else 'mt5_history_probe',
+                                     ({'groups':sorted(touched),'orders':[o['id'] for o in new]} if new else
+                                      {'row_count': history_probe.get('row_count',0),
+                                       'query_count': len(history_probe.get('queries',[]))}))
             except Exception:
                 self.engine.state = before
                 self.external_close_status = previous_status

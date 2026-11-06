@@ -12,7 +12,7 @@ from collections import namedtuple
 
 import _test_runtime
 from server import TradingRuntime
-from trading_brokers import Binance, PaperBroker, worker_main, native_external_history
+from trading_brokers import Binance, PaperBroker, worker_main, native_external_history, native_external_history_probe
 from trading_engine import Engine
 from trading_store import Store
 from trading_config import pair_key
@@ -440,6 +440,17 @@ class TradeHistoryTests(unittest.TestCase):
         result=native_external_history(mt,'XAUUSD',[dict(order_ticket=1001,identifier=900)])
         self.assertEqual([d['ticket'] for d in result],[11,12])
         self.assertEqual(mt.history_deals_get.call_args_list[1].kwargs,dict(position=900))
+
+    def test_native_external_history_probe_masks_ids_but_keeps_broker_fields(self):
+        Deal=namedtuple('Deal','ticket order position_id symbol magic entry type volume price time_msc commission fee swap comment')
+        opening=Deal(11,1001,900,'XAUUSD',123,0,0,.01,4045.2,1000,-.02,0,0,'gp-open')
+        closing=Deal(12,1002,900,'XAUUSD',0,1,1,.01,4050.1,2000,-.03,-.01,-.2,'manual')
+        mt=SimpleNamespace(history_deals_get=Mock(return_value=(opening,closing)))
+        probe=native_external_history_probe(mt,'XAUUSD',[dict(order_ticket=1001,identifier=900,created_ms=1000000)])
+        self.assertEqual(probe['row_count'],2)
+        self.assertEqual(probe['rows'][0]['position_id'],'P1')
+        self.assertIn('entry',probe['fields']);self.assertIn('commission',probe['fields'])
+        self.assertNotEqual(probe['rows'][0]['ticket'], '11')
 
     def test_read_only_native_worker_rejects_order_submission_before_native_calls(self):
         mt=SimpleNamespace(initialize=Mock(return_value=True),shutdown=Mock(),symbol_select=Mock(),order_send=Mock(),
