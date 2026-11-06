@@ -41,6 +41,21 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn('request_ms',report['orders'][0]['result'])
         self.assertNotIn('elapsed_ms',report['groups'][0])
 
+    def test_exit_rule_audit_exports_only_safe_fields_and_anonymous_group_ids(self):
+        secret='PRIVATE-DO-NOT-EXPORT'
+        rules={'target_mode':'absolute','exit_spread_usd':1,'require_net_profit':False,
+               'min_net_profit_usd':0,'api_secret':secret,'account':secret}
+        state={'groups':[{'id':secret,'parameters':rules,'exit_rules_revision':2}]}
+        events=[{'kind':'exit_rules_updated','time':123,'data':{'changes':[
+            {'group':secret,'revision':2,'before':rules,'after':{**rules,'exit_spread_usd':2},'ticket':secret}]}}]
+        report=build_report(state,events)
+        self.assertNotIn(secret,json.dumps(report))
+        change=report['events'][0]['data']['changes'][0]
+        self.assertEqual(change['group'],'G1');self.assertEqual(change['revision'],2)
+        self.assertEqual(change['before']['exit_spread_usd'],1)
+        self.assertEqual(change['after']['exit_spread_usd'],2)
+        self.assertFalse(change['after']['require_net_profit'])
+
     def test_export_uses_committed_snapshot_without_store_lock_or_writer_wait(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'trading.sqlite3';store=Store(path)

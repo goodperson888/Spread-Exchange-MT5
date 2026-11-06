@@ -20,6 +20,14 @@ function pageFixture(reconcileFails = false, handlers = {}) {
     if (!elements.has(id)) elements.set(id, {
       tagName:'BUTTON', value:'', textContent:'', innerHTML:'', dataset:{},
       classList:{toggle(){}, add(){}, remove(){}}, querySelectorAll(selector){
+        if(id==='groups'&&selector==='[data-edit-exit]'){
+          if(this.editButtonsHTML!==this.innerHTML){
+            this.editButtonsHTML=this.innerHTML;
+            this.editButtons=[...this.innerHTML.matchAll(/<button data-edit-exit="([^"]+)"([^>]*)>/g)]
+              .map(m=>({dataset:{editExit:m[1]},disabled:m[2].includes('disabled')}));
+          }
+          return this.editButtons||[];
+        }
         if(id!=='groups'||selector!=='[data-close]')return [];
         if(this.buttonsHTML!==this.innerHTML){
           this.buttonsHTML=this.innerHTML;
@@ -116,9 +124,13 @@ test('reconcile, start and pause buttons send POST; chart remains GET', async ()
   await el('trading-reconcile').onclick();
   assert.doesNotMatch(el('trading-result').textContent, /本次操作未完成/);
   await el('trading-toggle').onclick();
-  assert.equal(el('trading-toggle').textContent, '暂停新开仓');
-  await el('trading-toggle').onclick();
+  assert.equal(el('trading-toggle').disabled,true);
+  assert.equal(el('trading-pause').disabled,false);
+  assert.match(el('new-entry-status').textContent,/运行中/);
+  await el('trading-pause').onclick();
   assert.equal(el('trading-toggle').textContent, '启动自动开仓');
+  assert.equal(el('trading-pause').disabled,true);
+  assert.match(el('new-entry-status').textContent,/已暂停/);
   const actions=calls.filter(x=>!x.url.includes('chart?'));
   assert.deepEqual(actions.map(x=>x.url), ['reconcile','start','pause'].map(x=>'/api/trading/'+x));
   for (const call of actions) {
@@ -368,7 +380,7 @@ test('group rules stay visible when pending main parameters change and abnormal 
  const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});
  f.el('take-contraction').value='9';
  await f.el('trading-reconcile').onclick();
- assert.match(f.el('parameter-scope').textContent,/尚未全部生效.*现有组仍保留原规则/);
+ assert.match(f.el('parameter-scope').textContent,/尚未全部生效.*现有组保留原规则/);
  assert.match(f.el('groups').innerHTML,/本组已锁定规则.*收窄 ≥ 2.3/);
  const marks=f.charts.at(-1).series[0].markLine.data;
  assert.ok(marks.some(x=>x.name.includes('#g0 已锁定止盈')));
@@ -389,4 +401,105 @@ test('chart shades missing samples and disconnects invalid quotes',async()=>{
  assert.match(f.el('chart-gaps').textContent,/2 处.*灰色/);
  assert.ok(line.markArea.data.some(x=>x[0].name==='本机采样缺失'));
  assert.ok(line.markArea.data.some(x=>x[0].name==='报价无效或过期'));
+});
+
+function editableSnapshot(mode='group') {
+ const snapshot=monitoredSnapshot();
+ snapshot.state.groups=[{id:'g1',key:'a',mode:'live',status:'open',entry:5.7,lots:.01,qty:1,contract:100,
+  parameters:{...JSON.parse(fs.readFileSync(path.join(__dirname,'../config.example.json'),'utf8')).strategy,exit_mode:mode},
+  valuation:{fees:.3,remaining:{mt5:1,binance:1}}}];
+ return snapshot;
+}
+
+test('existing group exits require a preview and explicit apply without saving main parameters',async()=>{
+ const snapshot=editableSnapshot();let applied;
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,'/api/trading/exit-rules':body=>{
+   applied=body;return {...snapshot,message:'已更新所选已有组',state:{...snapshot.state,
+     groups:[{...snapshot.state.groups[0],exit_rules_revision:1,parameters:{...snapshot.state.groups[0].parameters,...body.rules}}]}};
+ }});
+ await f.el('trading-reconcile').onclick();
+ f.el('groups').querySelectorAll('[data-edit-exit]')[0].onclick();
+ assert.equal(f.el('exit-rules-panel').open,true);
+ assert.equal(f.el('exit-rule-group').value,'group:g1');
+ assert.equal(f.el('exit-rule-take').value,'2');
+ f.el('exit-rule-take').value='1.5';f.el('exit-rule-fields').oninput();
+ assert.equal(f.el('exit-rule-apply').disabled,true);
+ f.el('exit-rule-preview').onclick();
+ assert.match(f.el('exit-rule-result').textContent,/#g1 原规则.*收窄 ≥ 2[\s\S]*修改为.*收窄 ≥ 1.5[\s\S]*可能立即触发平仓/);
+ assert.equal(f.calls.filter(c=>c.method==='POST').length,1);
+ assert.equal(f.el('exit-rule-apply').disabled,false);
+ await f.el('exit-rule-apply').onclick();
+ assert.deepEqual(applied.groups,['g1']);assert.deepEqual(applied.expected_revisions,{g1:0});
+ assert.equal(applied.rules.take_contraction_usd,1.5);
+ assert.equal(f.el('exit-rule-apply').disabled,true);
+ assert.equal(f.el('exit-rule-result').textContent,'已更新所选已有组');
+ assert.ok(!f.calls.some(c=>c.url==='/api/config'||c.url.includes('/close')));
+});
+
+test('editing after preview and a newer server rule version both invalidate apply',async()=>{
+ let snapshot=editableSnapshot();
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,'/api/trading/status':()=>snapshot});
+ await f.el('trading-reconcile').onclick();
+ f.el('exit-rule-group').value='group:g1';f.el('exit-rule-load').onclick();
+ f.el('exit-rule-preview').onclick();assert.equal(f.el('exit-rule-apply').disabled,false);
+ f.el('exit-rule-take').value='1';f.el('exit-rule-fields').oninput();assert.equal(f.el('exit-rule-apply').disabled,true);
+ f.el('exit-rule-preview').onclick();
+ snapshot={...snapshot,state:{...snapshot.state,groups:[{...snapshot.state.groups[0],exit_rules_revision:1}]}};
+ await f.windowListeners['gold-config-saved']();
+ assert.equal(f.el('exit-rule-apply').disabled,true);
+ assert.equal(f.el('exit-rule-preview').disabled,true);
+ assert.match(f.el('exit-rule-result').textContent,/已变化.*重新载入/);
+ assert.equal(f.el('exit-rule-take').value,'1');
+});
+
+test('basket preview identifies every current member and unknown fills disable changes',async()=>{
+ const snapshot=editableSnapshot('basket');snapshot.state.groups.push({...snapshot.state.groups[0],id:'g2'});
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});
+ await f.el('trading-reconcile').onclick();
+ assert.match(f.el('exit-rule-group').innerHTML,/整篮子.*全部 2 组/);
+ assert.doesNotMatch(f.el('exit-rule-group').innerHTML,/group:g1/);
+ f.el('exit-rule-group').value='basket';f.el('exit-rule-load').onclick();f.el('exit-rule-preview').onclick();
+ assert.match(f.el('exit-rule-result').textContent,/#g1 原规则[\s\S]*#g2 原规则/);
+ const unknown=pageFixture(false,{'/api/trading/reconcile':()=>({...snapshot,state:{...snapshot.state,
+   orders:[{id:'unknown',group:'g1',leg:'mt5',result:{status:'unknown'}}]}})});
+ await unknown.el('trading-reconcile').onclick();
+ unknown.el('exit-rule-group').value='basket';unknown.el('exit-rule-group').onchange();
+ assert.equal(unknown.el('exit-rule-load').disabled,true);
+});
+
+test('dedicated pause remains usable during another in-flight action and never closes positions',async()=>{
+ const snapshot=editableSnapshot();snapshot.state.enabled=true;let finish;
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,
+  '/api/trading/pause':()=>({...snapshot,state:{...snapshot.state,enabled:false}}),
+  '/api/trading/apply-entry':()=>new Promise(resolve=>{finish=resolve;})});
+ await f.el('trading-reconcile').onclick();
+ const pending=f.el('apply-entry').onclick();
+ assert.equal(f.el('trading-pause').disabled,false);
+ await f.el('trading-pause').onclick();
+ assert.match(f.el('new-entry-status').textContent,/已暂停/);
+ assert.ok(!f.calls.some(c=>c.url.includes('/close')));
+ finish({...snapshot,state:{...snapshot.state,enabled:false}});await pending;
+ assert.equal(f.el('trading-pause').textContent,'暂停新开仓');
+});
+
+test('failed pause keeps the running state and does not claim success',async()=>{
+ const snapshot=editableSnapshot();snapshot.state.enabled=true;
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,'/api/trading/status':()=>snapshot,
+  '/api/trading/pause':()=>{throw Error('连接已断开');}});
+ await f.el('trading-reconcile').onclick();await f.el('trading-pause').onclick();
+ assert.match(f.el('new-entry-status').textContent,/运行中/);
+ assert.match(f.el('trading-result').textContent,/暂停尚未确认/);
+});
+
+test('fees label estimates, platform-verified costs and paper results accurately',async()=>{
+ for(const [mode,verified,label] of [['live',false,'成交手续费（含估算）'],['live',true,'已核验成交手续费'],['paper',false,'模拟成交手续费']]){
+  const snapshot=editableSnapshot();snapshot.state.groups[0].mode=mode;
+  snapshot.state.groups[0].valuation.costs_verified=verified;
+  if(verified)snapshot.state.groups[0].valuation.fees=-.3;
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});
+  await f.el('trading-reconcile').onclick();
+  assert.ok(f.el('groups').innerHTML.includes(label));
+  if(verified)assert.match(f.el('groups').innerHTML,/已核验成交手续费 \+0.30 USD/);
+  assert.doesNotMatch(f.el('groups').innerHTML,/已由成交回报或平台记录确认/);
+ }
 });

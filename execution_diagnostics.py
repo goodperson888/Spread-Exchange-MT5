@@ -20,6 +20,14 @@ def symbol(value):
     return value if isinstance(value,str) and re.fullmatch(r'[\w.#+/-]{1,40}',value) else None
 
 
+def exit_parameters(row):
+    result=numbers(row,'take_contraction_usd exit_spread_usd min_net_profit_usd group_max_loss_usd max_hold_minutes')
+    for key in ('require_net_profit','group_loss_enabled'):
+        if type(row.get(key)) is bool:result[key]=row[key]
+    if row.get('target_mode') in ('contraction','absolute'):result['target_mode']=row['target_mode']
+    return result
+
+
 def build_report(state, events):
     groups=state.get('groups',[])[-200:]
     group_ids={g['id']:'G'+str(i+1) for i,g in enumerate(groups)}
@@ -47,6 +55,8 @@ def build_report(state, events):
              'second_leg':choice(g,'second_leg',('binance','mt5')),
              **numbers(g,'opened_ms closed_ms qty lots contract entry entry_signal exit exit_signal entry_threshold grid_index')}
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
+        row['parameters'].update(exit_parameters(g.get('parameters',{})))
+        row.update(numbers(g,'exit_rules_revision'))
         row['costs']=numbers(g.get('costs',{}),'usdt_usd')
         for action in ('open','close'):
             if 'execution_'+action in g:
@@ -71,6 +81,15 @@ def build_report(state, events):
            'group_opening','group_opened','group_closed','exit_signal','entry_skipped'}
     for event in events:
         data=event.get('data',{})
+        if event.get('kind')=='exit_rules_updated':
+            changes=[]
+            for change in data.get('changes',[])[:50]:
+                gid=group_ids.get(change.get('group'))
+                if gid:changes.append({'group':gid,**numbers(change,'revision'),
+                                       'before':exit_parameters(change.get('before',{})),
+                                       'after':exit_parameters(change.get('after',{}))})
+            if changes:report['events'].append({'kind':'exit_rules_updated',**numbers(event,'time'),'data':{'changes':changes}})
+            continue
         if event.get('kind') not in kinds: continue
         oid=order_ids.get(data.get('id'));gid=group_ids.get(data.get('group'))
         if oid is None and gid is None: continue

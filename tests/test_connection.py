@@ -247,6 +247,15 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual(body['message'], action)
                 method.assert_called_once()
 
+    def test_exit_rules_require_post_and_pass_explicit_body(self):
+        body={'groups':['test-group'],'expected_revisions':{'test-group':0},'rules':{}}
+        with patch.object(server,'TRADING') as runtime:
+            runtime.apply_exit_rules.return_value={'message':'test'}
+            self.assertEqual(self.request('/api/trading/exit-rules')[0],404)
+            runtime.apply_exit_rules.assert_not_called()
+            self.assertEqual(self.request('/api/trading/exit-rules',body)[0],200)
+            runtime.apply_exit_rules.assert_called_once_with(body)
+
     def test_usd_base_gold_cfd_check_apply_and_quantity_plan(self):
         self.request('/api/config', {'mt5':{'adapter':'native', 'symbol':'xauusdm'},
                                     'strategy':{'mt5_lots':.01}})

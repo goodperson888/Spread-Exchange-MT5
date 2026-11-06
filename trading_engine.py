@@ -527,7 +527,8 @@ class Engine:
         if basket:
             qty=sum(g['qty'] for g in basket); entry=sum(g['entry']*g['qty'] for g in basket)/qty
             net=sum(g['valuation']['net'] for g in basket)
-            # Every member's saved condition must agree; edits affect only future groups.
+            # Every current member's saved condition must agree. Explicit
+            # existing-basket edits update all current members atomically.
             if all(self.target(g,entry,q['exit']) and (not g['parameters']['require_net_profit'] or net>=g['parameters']['min_net_profit_usd']) for g in basket):
                 basket_exit={g['id'] for g in basket}
         for g in opened:

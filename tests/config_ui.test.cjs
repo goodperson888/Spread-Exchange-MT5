@@ -225,8 +225,9 @@ test('pending configuration never disables an already-running pause action',asyn
   const f=await fixture({'/api/trading/reconcile':()=>({connected:true,plan:{lots:.02,qty:2},
     state:{enabled:true,groups:[],orders:[]},config_pending:true,capabilities:{reconciled:true}})});
   f.loadTrading();await f.el('trading-reconcile').onclick();
-  assert.equal(f.el('trading-toggle').disabled,false);
-  assert.equal(f.el('trading-toggle').textContent,'暂停新开仓');
+  assert.equal(f.el('trading-toggle').disabled,true);
+  assert.equal(f.el('trading-pause').disabled,false);
+  assert.equal(f.el('trading-pause').textContent,'暂停新开仓');
 });
 
 test('workspace tabs support keyboard navigation without sending trading requests',async()=>{
@@ -245,11 +246,19 @@ test('pause remains available during a separate read-only connection check',asyn
   const snapshot=enabled=>({connected:true,state:{enabled,groups:[],orders:[]},capabilities:{reconciled:true}});
   const f=await fixture({'/api/trading/reconcile':()=>snapshot(true),'/api/trading/pause':()=>snapshot(false)});
   f.loadTrading();await f.el('trading-reconcile').onclick();f.run('setUiBusy(1)');
-  assert.equal(f.el('trading-toggle').disabled,false);
-  await f.el('trading-toggle').onclick();
+  assert.equal(f.el('trading-pause').disabled,false);
+  await f.el('trading-pause').onclick();
   assert.ok(f.calls.some(x=>x.url==='/api/trading/pause'));
   assert.equal(f.run('window.goldPairUiBusy'),true);
   f.run('setUiBusy(-1)');assert.equal(f.run('window.goldPairUiBusy'),false);
+});
+
+test('editing existing exit rules does not autosave main strategy or mark it pending',async()=>{
+ const f=await fixture();const before=f.run('revision');
+ f.edit('exit-rule-take','1.2');f.edit('exit-rule-loss','15');
+ assert.equal(f.run('revision'),before);
+ assert.equal(f.run('dirtyFields.size'),0);
+ assert.equal(f.storage.has('GoldPairLocal.configDraft.v2'),false);
 });
 
 test('editing while save-and-connect is in flight prevents connecting with old input',async()=>{

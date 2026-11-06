@@ -31,6 +31,7 @@ from trading_engine import Engine
 from trading_store import Store
 from execution_diagnostics import export_report
 import position_adoption
+import exit_rules
 from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, observed_quote
 from entry_preflight import EntryPreflight
 from liquidation_risk import BinanceRiskMonitor, risk_snapshot
@@ -693,6 +694,13 @@ class TradingRuntime:
         with self.lock:
             self.engine.pause()
             return self.snapshot()
+
+    def apply_exit_rules(self, body):
+        with self.lock:
+            if not self.connected:raise ValueError('请先连接双边行情')
+            if not self.reconciled:raise ValueError('请先完成持仓对账')
+            ids=exit_rules.apply(self.engine,self.config,body)
+            return {**self.snapshot(),'message':f'已更新 {len(ids)} 组的退出规则；下一次有效行情检查起生效，满足条件可能立即平仓。'}
 
     def apply_entry_threshold(self, value):
         """Apply only the live opening threshold without reconnecting.
@@ -1495,6 +1503,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == '/api/trading/pause':
                 self.send_json({'ok': True, **TRADING.pause()})
+                return
+            if path == '/api/trading/exit-rules':
+                self.send_json({'ok': True, **TRADING.apply_exit_rules(body)})
                 return
             if path == '/api/trading/apply-entry':
                 self.send_json({'ok': True, **TRADING.apply_entry_threshold(body.get('entry_spread_usd'))})
