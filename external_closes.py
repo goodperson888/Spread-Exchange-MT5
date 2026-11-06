@@ -165,12 +165,12 @@ def mt5_backfill(state, config, group, current, deals):
         raise ValueError('MT5 原持仓标识不符')
     history = [d for d in deals if str(d.get('position_id'))==identifier]
     if len({str(d['ticket']) for d in history})!=len(history): raise ValueError('重复 MT5 成交记录')
-    if any(d.get('entry') not in (0,1,3) or d.get('type') not in (0,1) for d in history):
+    if any(d.get('entry') not in (0,1,2,3) or d.get('type') not in (0,1) for d in history):
         raise ValueError('MT5 成交类型无法安全归属')
     incoming = [d for d in history if d['entry']==0]
     if {str(d['ticket']) for d in incoming}!={str(d['ticket']) for d in starts}:
         raise ValueError('MT5 持仓存在其他加仓成交')
-    exits = [d for d in history if d['entry'] in (1,3)]
+    exits = [d for d in history if d['entry'] in (1,2,3)]
     if any(d['type']!=1 for d in exits): raise ValueError('MT5 平仓方向不符')
     used = set()
     for o in own:
