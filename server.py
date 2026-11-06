@@ -323,15 +323,15 @@ class TradingRuntime:
 
     def _external_capture(self, monitor):
         # A background observer never waits for paired execution or borrows its
-        # terminal/client. Capture only settled ordinary positions.
+        # terminal/client. Recovery groups also need read-only history repair.
         if not self.lock.acquire(blocking=False): return None
         try:
-            if (self.stop_event.is_set() or monitor is not getattr(self,'external_monitor',None)
+            if (self.stop_event.is_set() or monitor.stopped.is_set() or monitor is not getattr(self,'external_monitor',None)
                     or not self.connected or self.config['execution']['mode']!='live'
                     or self.config['mt5']['adapter']!='native'): return None
             active = self.engine.active()
             if not active or any(g.get('imported') or g.get('key')!=pair_key(self.config)
-                    or g.get('status') not in ('open','attention') or self.engine.uncertain(g) for g in active):
+                    or g.get('status') not in ('open','attention','opening','closing','unwinding') for g in active):
                 return None
             state = copy.deepcopy(external_closes.observation_state(self.engine.state))
             return state,copy.deepcopy(self.config),external_closes.fingerprint(state)
@@ -340,11 +340,56 @@ class TradingRuntime:
     def _external_publish(self, monitor, token, phase, proposals, errors, mt5_snapshot=None):
         if not self.lock.acquire(blocking=False): return False
         try:
-            if (self.stop_event.is_set() or monitor is not getattr(self,'external_monitor',None)
+            if (self.stop_event.is_set() or monitor.stopped.is_set() or not self.connected
+                    or monitor is not getattr(self,'external_monitor',None)
                     or token!=external_closes.fingerprint(self.engine.state)): return False
             active = self.engine.active(); at = now_ms()
             waiting = any(g.get('external_attention') for g in active)
+            if phase=='resolved':
+                before=copy.deepcopy(self.engine.state)
+                changed=[]
+                try:
+                    for proposal in proposals:
+                        order=next((o for o in self.engine.state['orders'] if o['id']==proposal['id']),None)
+                        result=proposal.get('result',{})
+                        if (not order or order['result'].get('status')=='done'
+                                or not self.engine.result_valid(result,order['requested']) or result.get('status')!='done'
+                                or result['qty']<order['result'].get('qty',0)): continue
+                        order['result']={**order['result'],**result,'reconcile_time_ms':at}
+                        order['result'].pop('error',None)
+                        changed.append(order['id'])
+                    self.engine._entry_deadlines.clear()
+                    self.engine.state.update(enabled=False,recovery=True,
+                        alarm='正在核对原订单与平台平仓成交；完成前禁止自动处理')
+                    self.reconciled=False
+                    for group in active:group['external_attention']=True
+                    if changed:self.engine.save('external_orders_resolved',{'groups':[g['id'] for g in active],'orders':changed})
+                except Exception:
+                    self.engine.state=before
+                    self.engine.state.update(enabled=False,recovery=True)
+                    raise
+                self.external_close_status=dict(time_ms=at,level='warning',message=(
+                    '已确认原订单成交，下一轮核对平台平仓历史；新开仓保持暂停' if changed else
+                    '原订单成交仍待平台确认；不会按空仓推算成交，请稍后重试或导出执行诊断'))
+                return True
             if phase=='checked':
+                if active and all(not self.engine.uncertain(g) and max(self.engine.amounts(g).values())<1e-8 for g in active):
+                    before=copy.deepcopy(self.engine.state)
+                    try:
+                        for group in active:
+                            group.update(status='closed',closed_ms=at,reason='原订单成交已核对，已确认双边空仓')
+                            group['exit']=self.engine._record_spread(group,'close')
+                            group.pop('external_attention',None)
+                            self.engine._complete_execution(group,'close')
+                            group['valuation']=self.engine.valuation(group,self.quote or dict(binance=dict(ask=0),mt5=dict(bid=0),usdt_usd=group['costs']['usdt_usd']))
+                        self.engine.state.update(enabled=False,recovery=False,alarm='已确认旧组双边平仓；可手动启动自动开仓')
+                        self.engine.save('recovery_flat_confirmed',{'groups':[g['id'] for g in active]})
+                        self.reconciled=True
+                    except Exception:
+                        self.engine.state=before;self.reconciled=False
+                        raise
+                    self.external_close_status=dict(time_ms=at,level='normal',message='已确认旧组双边平仓；新开仓保持暂停，可手动启动')
+                    return True
                 if waiting:
                     message = ('已回补可确认成交；仍有剩余仓位，请核对后处理；不会自动重新开仓'
                                if any(g.get('external_close') for g in active) else
@@ -373,10 +418,16 @@ class TradingRuntime:
             before = copy.deepcopy(self.engine.state)
             previous_status = self.external_close_status
             known = {o['id'] for o in self.engine.state['orders']}
-            new = [o for o in proposals if o['id'] not in known]
+            new = [copy.deepcopy(o) for o in proposals if o['id'] not in known]
             touched = {o['group'] for o in new}
             self.engine.state['orders'].extend(new)
             try:
+                for order in new:
+                    identity=order.pop('_opening_identity',None)
+                    if identity:
+                        opening=next(o for o in self.engine.state['orders'] if o['id']==identity['id'] and o['group']==order['group'] and o['leg']=='mt5' and o['action']=='open')
+                        opening['result']['position_identifier']=identity['position_identifier']
+                        if identity.get('position'):opening['result']['position']=identity['position']
                 for g in active:
                     if g['id'] not in touched: continue
                     g['external_attention'] = True
@@ -555,6 +606,7 @@ class TradingRuntime:
         self._last_auto_reconcile_at = now
         active = self.engine.active()
         if not active or any(g.get('status') not in ('closing','unwinding') for g in active): return False
+        if any(g.get('external_attention') for g in active): return False
         try:
             for group in active: self.engine.resolve(group)
             if any(self.engine.uncertain(group) for group in active):
@@ -1103,6 +1155,14 @@ class TradingRuntime:
             binance_mismatch=(long_qty>0.000001 or other_qty>0.000001 or abs(short_qty-expected_b)>0.000001) if position_mode=='hedge' else abs(signed_bqty + expected_b)>0.000001
             if open_orders or binance_mismatch or abs(lots - expected_m) > .0000001 or bad_mt5:
                 self.engine.pause('账户持仓与本策略日志不一致，禁止自动处理；请人工核对')
+                monitor=getattr(self,'external_monitor',None)
+                if monitor:monitor.wake()
+                if (self.engine.active() and not any(abs(float(p.get('positionAmt',0)))>1e-8 for p in positions)
+                        and not mt5['positions'] and not mt5['orders'] and not open_orders):
+                    self.position_report['status']='平台当前空仓，本机未结束记录等待成交回补'
+                    self.external_close_status=dict(time_ms=now_ms(),level='warning',
+                        message='平台当前空仓；正在核对原订单与平仓历史，确认后结束旧组；不会重新开仓')
+                    raise ValueError('双边平台当前空仓，但本机仍有未结束交易记录；已请求后台核对原订单和平仓成交。请等待状态刷新，回补完成后再启动；若持续等待，请导出执行诊断。')
                 details = []
                 if open_orders: details.append('币安存在未完成委托')
                 if binance_mismatch: details.append('币安持仓模式、空头方向或数量不符')
@@ -1127,10 +1187,14 @@ class TradingRuntime:
             # without invoking strategy decisions or changing durable state.
             st = copy.deepcopy(self.engine.state)
             quote = (self.pump.read()[0] if getattr(self,'pump',None) else None) or self.quote
-            if quote:
-                for group in st['groups']:
-                    if group['status'] != 'closed' and group.get('key') == quote.get('key'):
-                        group['valuation'] = self.engine.valuation(group, quote)
+            for group in st['groups']:
+                if group['status'] != 'closed':
+                    unverified=(not quote or group.get('key')!=quote.get('key') or not self.connected
+                                or group['status']!='open' or self.engine.uncertain(group)
+                                or group.get('external_attention') or st.get('recovery')
+                                or (self.config and self.config['execution']['mode']=='live' and not self.reconciled))
+                    group['valuation_status']='unverified' if unverified else 'estimate'
+                    if not unverified:group['valuation'] = self.engine.valuation(group, quote)
             return {
                 'connected': self.connected, 'last_error': self.last_error,
                 'quote': quote, 'plan': self.plan,

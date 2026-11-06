@@ -627,7 +627,7 @@ def worker_main():
                 if not mt.initialize(*args,timeout=10000): raise ValueError('MT5 初始化失败')
                 identity(); mt.symbol_select(settings['symbol'],True); data=True
             else:
-                if read_only and cmd not in ('snapshot','quote','history','external_history'):
+                if read_only and cmd not in ('snapshot','quote','history','external_history','query'):
                     raise ValueError('持仓核对会话只允许读取行情、持仓和成交')
                 a,t=identity(); s=mt.symbol_info(settings['symbol'])
                 if not s: raise ValueError('MT5 品种不可用')

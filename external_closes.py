@@ -3,14 +3,13 @@
 No position delta is ever converted into a synthetic fill. Binance attribution
 is intentionally limited to an unambiguous single group in the history window.
 """
-import copy
 import hashlib
 import json
 import math
 import threading
 import time
 
-from trading_config import pair_key
+from trading_engine import Engine
 
 
 def number(value):
@@ -44,8 +43,25 @@ def fingerprint(state):
     state = observation_state(state)
     groups = sorted([{k:g.get(k) for k in ('id','key','status','opened_ms','closed_ms','exit_rules_revision')}
                      for g in state['groups']],key=lambda g:g['id'])
-    return hashlib.sha256(json.dumps([groups,state['orders']],sort_keys=True,
+    orders=[]
+    for o in state['orders']:
+        row={k:o.get(k) for k in ('id','group','leg','action','requested','position','opening_id',
+                                 'position_identifier','source','external_deal_ids')}
+        row['result']={k:o.get('result',{}).get(k) for k in
+                       ('status','qty','price','fee','swap','ticket','deal','position','position_identifier','retcode','ack_volume','ack_price')}
+        orders.append(row)
+    return hashlib.sha256(json.dumps([groups,orders],sort_keys=True,
                                     allow_nan=False).encode()).hexdigest()
+
+
+def opening_position(order, current, magic):
+    result=order['result']
+    if result.get('position'): return str(result['position'])
+    matches=[str(p['ticket']) for p in current.values() if p.get('magic')==magic
+             and p.get('comment')==order['id'] and p.get('side')==0
+             and (not result.get('position_identifier') or str(p.get('identifier'))==str(result['position_identifier']))]
+    if len(matches)>1: raise ValueError('MT5 原持仓未唯一确认')
+    return matches[0] if matches else ''
 
 
 def observed(config, mode, positions, mt5):
@@ -92,9 +108,11 @@ def differences(state, config, mode, positions, mt5, open_orders):
             remaining[ticket] = remaining.get(ticket,0)+(1 if o['action']=='open' else -1)*number(o['result'].get('qty',0))
         for o in state['orders']:
             if o['group']!=g['id'] or o['leg']!='mt5' or o['action']!='open' or not o['result'].get('qty'): continue
-            ticket = str(o['result'].get('position') or '')
-            if not ticket or ticket in claimed: raise ValueError('MT5 原持仓归属尚未唯一确认')
-            claimed.add(ticket); p = current.get(ticket); expected = remaining.get(ticket,0)
+            ticket = opening_position(o,current,config['execution']['magic'])
+            if ticket and ticket in claimed: raise ValueError('MT5 原持仓归属尚未唯一确认')
+            if ticket: claimed.add(ticket)
+            p = current.get(ticket)
+            expected = remaining.get(str(o['result'].get('position') or ''),0)
             actual = number(p['lots'])*number(g['contract']) if p else 0.
             if p and (p.get('side')!=0 or p.get('magic')!=config['execution']['magic'] or p.get('comment')!=o['id']):
                 raise ValueError('MT5 原持仓方向或归属变化')
@@ -120,8 +138,10 @@ def external_order(group, leg, rows, qty, price, fee, order_id, at, position=Non
 def mt5_backfill(state, config, group, current, deals):
     own = [o for o in state['orders'] if o['group']==group['id'] and o['leg']=='mt5' and o['result'].get('qty',0)>0]
     openings = [o for o in own if o['action']=='open']
+    if not openings and abs(amounts(state,group)['mt5'])<1e-8: return []
     if len(openings)!=1: raise ValueError('MT5 开仓记录未唯一确认')
-    opening = openings[0]; r = opening['result']; ticket = str(r.get('position') or '')
+    opening = openings[0]; r = opening['result']
+    ticket = opening_position(opening,current,config['execution']['magic'])
     # Prove the immutable position identifier from the original strategy fill.
     starts = [d for d in deals if d.get('comment')==opening['id'] and d.get('magic')==config['execution']['magic']
               and d.get('entry')==0 and d.get('type')==0 and str(d.get('order'))==str(r.get('ticket'))]
@@ -167,8 +187,10 @@ def mt5_backfill(state, config, group, current, deals):
         qty = number(d['volume'])*group['contract']; price = number(d['price']); at = int(number(d['time_msc']))
         if qty<=0 or price<=0 or at<=0 or at<min(int(x['time_msc']) for x in starts):
             raise ValueError('MT5 平仓成交字段无效')
-        result.append(external_order(group,'mt5',[d],qty,price,-number(d['commission'])-number(d['fee']),
-                                     d['order'],at,ticket,identifier,number(d['swap'])))
+        record=external_order(group,'mt5',[d],qty,price,-number(d['commission'])-number(d['fee']),
+                              d['order'],at,ticket,identifier,number(d['swap']))
+        record['_opening_identity']=dict(id=opening['id'],position=ticket,position_identifier=identifier)
+        result.append(record)
     return result
 
 
@@ -240,6 +262,7 @@ class ExternalCloseMonitor:
     def __init__(self, runtime, client, terminal_factory, start=True):
         self.runtime,self.client,self.terminal_factory = runtime,client,terminal_factory
         self.terminal = None; self.stopped = threading.Event()
+        self.wake_event=threading.Event();self.retry_requested=threading.Event()
         self.history_token = None; self.history_retry_at = 0.; self.history_attempts = 0
         if start: self.start()
 
@@ -249,7 +272,11 @@ class ExternalCloseMonitor:
 
     def close(self):
         self.stopped.set()
+        self.wake_event.set()
         if self.terminal: self.terminal.close()
+
+    def wake(self):
+        self.retry_requested.set();self.wake_event.set()
 
     def step(self):
         capture = self.runtime._external_capture(self)
@@ -257,6 +284,21 @@ class ExternalCloseMonitor:
         state,config,token = capture
         try:
             if self.terminal is None: self.terminal = self.terminal_factory()
+            unknown=[o for o in state['orders'] if o.get('result',{}).get('status')!='done']
+            if unknown:
+                # Query original intents first. Never cancel or submit through
+                # this observer, and never treat a vanished position as a fill.
+                resolved=[]
+                for order in unknown:
+                    try:
+                        result=(self.client.query(order) if order['leg']=='binance' else
+                                self.terminal.call('query',order=order))
+                        if (Engine.result_valid(result,order['requested']) and result.get('status')=='done'
+                                and result['qty']>=order['result'].get('qty',0)):
+                            resolved.append(dict(id=order['id'],result=result))
+                    except Exception: pass
+                self.runtime._external_publish(self,token,'resolved',resolved,[])
+                return
             mode = self.client.refresh_position_mode()
             positions = self.client.positions(config['symbol']); orders = self.client.open_orders(config['symbol'])
             mt5 = self.terminal.call('snapshot')
@@ -266,6 +308,8 @@ class ExternalCloseMonitor:
             if not self.runtime._external_publish(self,token,'detected',[],[]): return
             if self.history_token!=token:
                 self.history_token=token;self.history_attempts=0;self.history_retry_at=0.
+            if self.retry_requested.is_set():
+                self.retry_requested.clear();self.history_retry_at=0.
             if time.monotonic()<self.history_retry_at:
                 self.runtime._external_publish(self,token,'pending',[],['成交历史或归属待确认，后台稍后重试；交易保持暂停'])
                 return
@@ -323,6 +367,7 @@ class ExternalCloseMonitor:
         try:
             while not self.stopped.is_set():
                 self.step()
-                self.stopped.wait(self.INTERVAL)
+                self.wake_event.wait(self.INTERVAL)
+                self.wake_event.clear()
         finally:
             if self.terminal: self.terminal.close()

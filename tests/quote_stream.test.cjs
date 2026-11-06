@@ -81,4 +81,6 @@ test('open group mark-to-market moves with the latest quote while closed group s
  assert.equal(rows[0].valuation.gross,-1);
  assert.equal(rows[0].valuation.net,-1);
  assert.deepEqual(rows[1],closed);
+ const unverified={...open,valuation_status:'unverified'};
+ assert.deepEqual(markGroups([unverified],basis,latest)[0],unverified);
 });

@@ -20,6 +20,16 @@ function pageFixture(reconcileFails = false, handlers = {}) {
     if (!elements.has(id)) elements.set(id, {
       tagName:'BUTTON', value:'', textContent:'', innerHTML:'', dataset:{},
       classList:{toggle(){}, add(){}, remove(){}}, querySelectorAll(selector){
+        if(id==='groups'&&selector==='details[data-group-rules]'){
+          if(this.detailsHTML!==this.innerHTML){
+            this.detailsHTML=this.innerHTML;
+            this.details=[...this.innerHTML.matchAll(/<details class="help-details" data-group-rules="([^"]+)"([^>]*)>/g)]
+              .map(m=>{const detail={dataset:{groupRules:m[1]},open:/\bopen\b/.test(m[2])};
+                const summary={closest:()=>detail,focus(){doc.activeElement=summary;}};
+                detail.querySelector=()=>summary;return detail;});
+          }
+          return this.details||[];
+        }
         if(id==='groups'&&selector==='[data-edit-exit]'){
           if(this.editButtonsHTML!==this.innerHTML){
             this.editButtonsHTML=this.innerHTML;
@@ -68,6 +78,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
     }
   });
   return {el, calls, charts, streams, doc, listeners,windowListeners,
+    async refresh(){for(const interval of intervals)if(interval.ms===3000)await interval.fn();await flushUI();},
     ageRisk(ms){testNow+=ms;for(const interval of intervals)if(interval.ms===1000)interval.fn();}};
 }
 
@@ -291,11 +302,11 @@ function unknownSnapshot(status='unwinding') {
 test('unknown exposure and income are labelled as unconfirmed on both views', async()=>{
   const f=pageFixture(false,{'/api/trading/reconcile':()=>unknownSnapshot()});
   await f.el('trading-reconcile').onclick();
-  assert.match(f.el('groups').innerHTML,/MT5 待确认（已确认 0）/);
+  assert.match(f.el('groups').innerHTML,/MT5 日志 0（实际待核对）/);
   assert.match(f.el('groups').innerHTML,/<strong>—<\/strong>.*收益待核对/);
   assert.match(f.el('pnl-stats').innerHTML,/收益待核对/);
   assert.match(f.el('orders').innerHTML,/成交待确认/);
-  assert.match(f.el('live-exposure').textContent,/成交待确认/);
+  assert.match(f.el('live-exposure').textContent,/实际持仓待核对；日志余额不代表平台剩余仓位/);
   assert.equal(f.el('records-feedback').textContent,f.el('trading-result').textContent);
 });
 
@@ -325,6 +336,63 @@ function monitoredSnapshot(now=Date.now()) {
       mt5:{observed_ms:now,bid:100,ask:100.1},binance:{observed_ms:now,bid:103,ask:103.1}},
     state:{groups:[],orders:[]}};
 }
+
+test('recovery masks stale profit even when all journal orders are confirmed',async()=>{
+ const snapshot=monitoredSnapshot();snapshot.state.recovery=true;snapshot.capabilities.reconciled=false;
+ snapshot.state.groups=[{id:'g1',key:'a',status:'open',qty:1,lots:.01,contract:100,parameters:{},
+   valuation:{net:123.45,gross:124,fees:.55,remaining:{binance:1,mt5:1}}}];
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ assert.match(f.el('groups').innerHTML,/<strong>—<\/strong>.*收益待核对/);
+ assert.match(f.el('groups').innerHTML,/币安 日志 1（实际待核对）/);
+ assert.doesNotMatch(f.el('groups').innerHTML,/123\.45/);
+ f.listeners.visibilitychange();await flushUI();
+ f.streams.at(-1).emit({samples:[{...snapshot.quote,time_ms:snapshot.quote.time_ms+1,binance:{ask:999,bid:998}}]});
+ await f.refresh();
+ assert.match(f.el('pnl-stats').innerHTML,/收益待核对.*<strong>—<\/strong>/);
+ assert.doesNotMatch(f.el('groups').innerHTML,/123\.45/);
+});
+
+test('each group rule expansion and keyboard focus survive quote and status refreshes',async()=>{
+ const snapshot=monitoredSnapshot();snapshot.state.groups=['g1','g2'].map(id=>({id,key:'a',status:'open',
+   qty:1,lots:.01,contract:100,parameters:{target_mode:'absolute',exit_spread_usd:2},valuation:{net:1,remaining:{binance:1,mt5:1}}}));
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ const rules=()=>f.el('groups').querySelectorAll('details[data-group-rules]');
+ rules().find(d=>d.dataset.groupRules==='g1').open=true;
+ rules().find(d=>d.dataset.groupRules==='g1').querySelector('summary').focus();
+ await f.refresh();
+ assert.match(f.el('groups').innerHTML,/data-group-rules="g1" open/);
+ assert.doesNotMatch(f.el('groups').innerHTML,/data-group-rules="g2" open/);
+ assert.equal(f.doc.activeElement.closest().dataset.groupRules,'g1');
+ rules().find(d=>d.dataset.groupRules==='g1').open=false;
+ rules().find(d=>d.dataset.groupRules==='g2').open=true;
+ f.listeners.visibilitychange();await flushUI();
+ f.streams.at(-1).emit({samples:[{...snapshot.quote,time_ms:snapshot.quote.time_ms+10}]});
+ await f.refresh();
+ assert.doesNotMatch(f.el('groups').innerHTML,/data-group-rules="g1" open/);
+ assert.match(f.el('groups').innerHTML,/data-group-rules="g2" open/);
+ snapshot.state.groups[1].parameters.exit_spread_usd=1.25;
+ await f.refresh();assert.match(f.el('groups').innerHTML,/止盈：退出价差 ≤ 1\.25/);
+});
+
+test('background confirmation clears obsolete reconciliation failure and enables start',async()=>{
+ let snapshot=unknownSnapshot();snapshot.state.recovery=true;snapshot.capabilities={mode:'live',reconciled:false};
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,'/api/trading/reconcile':()=>{throw Error('旧组成交待回补');}});
+ await flushUI();await f.el('trading-reconcile').onclick();
+ assert.match(f.el('trading-result').textContent,/旧组成交待回补/);
+ snapshot={connected:true,capabilities:{mode:'live',reconciled:true},state:{enabled:false,recovery:false,
+   groups:[{id:'g1',status:'closed',parameters:{},valuation:{net:-2,remaining:{binance:0,mt5:0}}}],orders:[]}};
+ await f.refresh();
+ assert.doesNotMatch(f.el('trading-result').textContent,/旧组成交待回补/);
+ assert.equal(f.el('trading-toggle').disabled,false);
+ assert.match(f.el('groups').innerHTML,/已平仓/);
+});
+
+test('background refresh does not erase unrelated close errors',async()=>{
+ const snapshot=monitoredSnapshot();snapshot.state.groups=[{id:'g1',status:'open',parameters:{},valuation:{remaining:{}}}];
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,'/api/trading/close':()=>{throw Error('平仓请求失败');}});
+ await f.refresh();await f.el('groups').querySelectorAll('[data-close]')[0].onclick();await f.refresh();
+ assert.match(f.el('records-feedback').textContent,/平仓请求失败/);
+});
 
 test('returning to the trading view reloads a reset missed while records were visible',async()=>{
  const snapshot=monitoredSnapshot();

@@ -232,14 +232,142 @@ class ExternalCloseTests(unittest.TestCase):
         self.client.positions.side_effect=[[],[self.b_position(-1)]]
         self.monitor.step();self.assertEqual(self.external(),[]);self.assertIn('仍在变化',self.r.external_close_status['message'])
 
-    def test_execution_lock_and_unknown_orders_skip_all_network_reads(self):
+    def test_execution_lock_skips_all_network_reads(self):
         acquired=threading.Event();release=threading.Event()
         def hold():
             with self.r.lock:acquired.set();release.wait(2)
         thread=threading.Thread(target=hold);thread.start();acquired.wait(1)
         try:self.monitor.step();self.factory.assert_not_called();self.client.positions.assert_not_called()
         finally:release.set();thread.join()
-        self.bo['result']['status']='unknown';self.monitor.step();self.factory.assert_not_called()
+
+    def test_unknown_original_order_uses_only_read_queries_and_keeps_recovery(self):
+        self.bo['result']['status']='unknown'
+        self.monitor.step()
+        self.client.query.assert_called_once();self.client.positions.assert_not_called()
+        self.client.trade_history.assert_not_called();self.terminal.call.assert_not_called()
+        self.assertEqual(self.external(),[]);self.assertFalse(self.r.reconciled)
+        self.assertTrue(self.g['external_attention']);self.assertTrue(self.e.state['recovery'])
+        self.broker.submit.assert_not_called();self.client.submit.assert_not_called();self.client.cancel.assert_not_called()
+
+    def test_restarted_unknown_open_resolves_before_manual_flat_history_backfill(self):
+        self.g['status']='unwinding';self.e.state.update(recovery=True,enabled=False);self.r.reconciled=False
+        known=copy.deepcopy(self.mo['result']);known.pop('position')
+        self.mo['result']=dict(status='unknown',qty=0,price=0,ticket='1001')
+        self.terminal.call.side_effect=lambda command,**kwargs:copy.deepcopy(
+            known if command=='query' else self.mt5 if command=='snapshot' else self.deals)
+        self.monitor.step()
+        self.assertEqual(self.mo['result']['status'],'done');self.assertEqual(self.mo['result']['qty'],2)
+        self.assertEqual(self.external(),[]);self.assertFalse(self.e.state['enabled'])
+        self.monitor.step()
+        self.assertEqual(self.g['status'],'closed');self.assertEqual(len(self.external()),2)
+        self.assertEqual(self.e.amounts(self.g),dict(mt5=0,binance=0))
+        self.assertTrue(self.r.reconciled);self.assertFalse(self.e.state['recovery']);self.assertFalse(self.e.state['enabled'])
+        self.assertEqual(self.mo['result']['position_identifier'],'900');self.assertNotIn('position',self.mo['result'])
+        self.broker.submit.assert_not_called();self.client.submit.assert_not_called();self.client.cancel.assert_not_called()
+        self.assertEqual([x.args[0] for x in self.terminal.call.call_args_list],['query','snapshot','external_history','snapshot'])
+
+    def test_recovery_statuses_include_settled_unwinding_and_closing(self):
+        self.g['status']='closing';self.e.state['recovery']=True;self.r.reconciled=False
+        self.monitor.step()
+        self.assertEqual(self.g['status'],'closed');self.assertTrue(self.r.reconciled)
+        self.broker.submit.assert_not_called()
+
+    def test_closed_original_position_without_ticket_uses_proven_identifier(self):
+        self.mo['result'].pop('position');self.mo['result'].pop('position_identifier')
+        self.g['status']='unwinding';self.monitor.step()
+        self.assertEqual(self.g['status'],'closed');self.assertEqual(self.mo['result']['position_identifier'],'900')
+        self.assertEqual(self.e.amounts(self.g),dict(mt5=0,binance=0))
+
+    def test_missing_original_ticket_can_find_unique_owned_partial_position(self):
+        self.mo['result'].pop('position');self.mo['result'].pop('position_identifier')
+        self.mt5['positions']=[self.mt_position(.01)];self.deals[1]['volume']=.01
+        self.monitor.step()
+        self.assertEqual(self.mo['result']['position'],'800');self.assertEqual(self.g['status'],'attention')
+        self.assertEqual(self.e.mt5_tickets(self.g),{'800':1});self.assertFalse(self.r.reconciled)
+        self.broker.submit.assert_not_called()
+
+    def test_rejected_mt5_leg_does_not_block_binance_only_unwind_backfill(self):
+        self.mo['result'].update(qty=0,price=0);self.deals=[];self.g['status']='unwinding'
+        self.monitor.step()
+        self.assertEqual(self.g['status'],'closed');self.assertEqual([o['leg'] for o in self.external()],['binance'])
+        self.assertEqual(self.e.amounts(self.g),dict(mt5=0,binance=0))
+
+    def test_unknown_original_closes_resolve_flat_without_duplicate_external_fills(self):
+        self.g['status']='closing';self.e.state.update(enabled=False,recovery=True);self.r.reconciled=False
+        for opening in (self.bo,self.mo):
+            self.e.state['orders'].append(dict(id='close-'+opening['id'],group=self.g['id'],leg=opening['leg'],
+                action='close',requested=2,position=opening['result'].get('position'),
+                result=dict(status='unknown',qty=0,price=0)))
+        self.client.query.side_effect=lambda o:dict(status='done',qty=2,price=4303,ticket='102')
+        self.terminal.call.side_effect=lambda command,**kwargs:copy.deepcopy(
+            dict(status='done',qty=2,price=4301,ticket='1002',position='800') if command=='query' else self.mt5)
+        self.monitor.step();self.assertEqual(self.g['status'],'closing')
+        self.monitor.step()
+        self.assertEqual(self.g['status'],'closed');self.assertEqual(self.external(),[])
+        self.assertTrue(self.r.reconciled);self.assertFalse(self.e.state['enabled'])
+        self.client.trade_history.assert_not_called();self.broker.submit.assert_not_called()
+        report=build_report(self.e.state,self.store.events())
+        events=[e for e in report['events'] if e['kind'] in ('external_orders_resolved','recovery_flat_confirmed')]
+        self.assertEqual(len(events),2)
+        self.assertNotIn(self.g['id'],json.dumps(events));self.assertNotIn(self.mo['id'],json.dumps(events))
+
+    def test_retry_bookkeeping_does_not_discard_observation_but_fill_changes_do(self):
+        token=fingerprint(self.e.state)
+        self.mo['reconcile']=dict(attempts=10,next_ms=1234);self.mo['result']['error']='waiting'
+        self.assertEqual(token,fingerprint(self.e.state))
+        self.mo['result']['qty']=1
+        self.assertFalse(self.r._external_publish(self.monitor,token,'checked',[],[]))
+
+    def test_failed_original_query_never_turns_platform_absence_into_a_fill(self):
+        self.bo['result']['status']='unknown';self.client.query.side_effect=ValueError('unavailable')
+        self.monitor.step();self.monitor.step()
+        self.assertEqual(self.bo['result']['status'],'unknown');self.assertEqual(self.external(),[])
+        self.assertNotEqual(self.g['status'],'closed');self.assertFalse(self.r.reconciled)
+        self.client.trade_history.assert_not_called();self.broker.submit.assert_not_called()
+
+    def test_recovery_result_commit_failure_rolls_back_confirmed_order(self):
+        self.bo['result']['status']='unknown';token=fingerprint(self.e.state)
+        result=dict(self.bo['result'],status='done')
+        with patch.object(self.store,'commit',side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                self.r._external_publish(self.monitor,token,'resolved',[dict(id=self.bo['id'],result=result)],[])
+        self.assertEqual(self.e.state['orders'][0]['result']['status'],'unknown')
+        self.assertTrue(self.e.state['recovery']);self.assertFalse(self.e.state['enabled']);self.assertFalse(self.r.reconciled)
+
+    def test_stopped_or_disconnected_observer_rejects_late_results(self):
+        token=fingerprint(self.e.state);self.r.connected=False
+        self.assertFalse(self.r._external_publish(self.monitor,token,'checked',[],[]))
+        self.r.connected=True;self.monitor.close()
+        self.assertFalse(self.r._external_publish(self.monitor,token,'checked',[],[]))
+
+    def test_explicit_reconcile_flat_zero_rows_requests_history_retry(self):
+        self.g['status']='unwinding';self.r.binance=self.client;self.client.position_mode='one_way'
+        self.r.terminal=self.terminal;self.r.snapshot=Mock(return_value={})
+        self.client.positions.return_value=[self.b_position(0)]
+        self.monitor.history_retry_at=time.monotonic()+60
+        with self.assertRaisesRegex(ValueError,'双边平台当前空仓'):
+            self.r.reconcile()
+        self.assertTrue(self.monitor.retry_requested.is_set())
+        self.monitor.step();self.assertEqual(self.g['status'],'closed')
+        self.client.trade_history.assert_called_once();self.broker.submit.assert_not_called()
+
+    def test_snapshot_freezes_unverified_group_but_projects_verified_open_group(self):
+        self.r.store=self.store;self.r.plan=self.plan;self.r.last_error='';self.r.market_meta={}
+        self.r.position_report=None;self.r.entry_preflight=None;self.r.binance=self.client
+        self.g['valuation']=self.e.valuation(self.g,self.q)
+        previous=copy.deepcopy(self.g['valuation']);self.r.quote=quote(self.c,bid=4310,ask=4310.1)
+        self.r.reconciled=False
+        with patch('server.load_config',return_value=copy.deepcopy(self.c)):
+            pending=self.r.snapshot()['state']['groups'][0]
+            self.assertEqual(pending['valuation_status'],'unverified');self.assertEqual(pending['valuation'],previous)
+            self.r.reconciled=True
+            current=self.r.snapshot()['state']['groups'][0]
+            self.assertEqual(current['valuation_status'],'estimate');self.assertNotEqual(current['valuation']['net'],previous['net'])
+            for q in (None,dict(self.q,key='other-market')):
+                self.r.quote=q
+                row=self.r.snapshot()['state']['groups'][0]
+                self.assertEqual(row['valuation_status'],'unverified');self.assertEqual(row['valuation'],previous)
+        self.assertEqual(self.g['valuation'],previous);self.client.positions.assert_not_called();self.broker.submit.assert_not_called()
 
     def test_append_commit_failure_rolls_back_fills_but_keeps_safety_pause(self):
         token=fingerprint(self.e.state);self.r._external_publish(self.monitor,token,'detected',[],[])
@@ -287,15 +415,17 @@ class TradeHistoryTests(unittest.TestCase):
 
     def test_read_only_native_worker_rejects_order_submission_before_native_calls(self):
         mt=SimpleNamespace(initialize=Mock(return_value=True),shutdown=Mock(),symbol_select=Mock(),order_send=Mock(),
+                           symbol_info=Mock(return_value=SimpleNamespace(name='XAUUSD')),
                            account_info=lambda:SimpleNamespace(login=42,server='test'),
                            terminal_info=lambda:SimpleNamespace(connected=True))
         commands=[dict(command='init',settings=dict(account='42',server='test',symbol='XAUUSD'),magic=1,read_only=True),
-                  dict(command='submit',order={})]
+                  dict(command='query',order={'id':'original-intent'}),dict(command='submit',order={}),dict(command='cancel',order={})]
         output=io.StringIO()
-        with patch.dict('sys.modules',MetaTrader5=mt),patch('sys.stdin',io.StringIO('\n'.join(json.dumps(c) for c in commands))),patch('sys.stdout',output):
+        with patch.dict('sys.modules',MetaTrader5=mt),patch('sys.stdin',io.StringIO('\n'.join(json.dumps(c) for c in commands))),patch('sys.stdout',output),patch('trading_brokers.NativeMT5Fills.query',return_value=dict(status='unknown',qty=0,price=0)) as query:
             worker_main()
         results=[json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertTrue(results[0]['ok']);self.assertFalse(results[1]['ok']);self.assertIn('只允许读取',results[1]['error'])
+        self.assertTrue(results[0]['ok']);self.assertTrue(results[1]['ok']);query.assert_called_once_with({'id':'original-intent'})
+        for row in results[2:]:self.assertFalse(row['ok']);self.assertIn('只允许读取',row['error'])
         mt.order_send.assert_not_called()
 
     def test_full_pages_are_split_with_no_truncation(self):

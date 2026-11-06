@@ -74,7 +74,7 @@
     if(!basis||!q||basis.key!==q.key||q.time_ms<basis.time_ms)return groups;
     return groups.map(g=>{
       const v=g.valuation, c=g.costs;
-      if(g.status!=='open'||!v||!c||g.key!==q.key)return g;
+      if(g.status!=='open'||g.valuation_status==='unverified'||!v||!c||g.key!==q.key)return g;
       const b=Number(v.remaining?.binance||0),m=Number(v.remaining?.mt5||0);
       const fx=q.usdt_usd??c.usdt_usd, oldFx=basis.usdt_usd??c.usdt_usd;
       const gross=v.gross-b*(q.binance.ask*fx-basis.binance.ask*oldFx)+m*(q.mt5.bid-basis.mt5.bid);

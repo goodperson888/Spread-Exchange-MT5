@@ -84,7 +84,7 @@ def build_report(state, events):
            'group_opening','group_opened','group_closed','exit_signal','entry_skipped'}
     for event in events:
         data=event.get('data',{})
-        if event.get('kind') in ('external_position_changed','external_close_backfilled'):
+        if event.get('kind') in ('external_position_changed','external_close_backfilled','external_orders_resolved','recovery_flat_confirmed'):
             related=[group_ids[x] for x in data.get('groups',[]) if x in group_ids]
             if related: report['events'].append({'kind':event['kind'],**numbers(event,'time'),'data':{'groups':related}})
             continue
