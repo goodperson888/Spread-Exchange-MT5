@@ -438,6 +438,122 @@ class Terminal:
             except subprocess.TimeoutExpired: self.process.kill()
 
 
+class NativeMT5Fills:
+    """Resolve only this strategy's exact order; an empty history is not a rejection."""
+    def __init__(self, mt, symbol, magic):
+        self.mt, self.symbol, self.magic = mt, symbol, magic
+
+    def positions(self, order):
+        rows = self.mt.positions_get(symbol=self.symbol)
+        if rows is None: raise ValueError('MT5 持仓读取失败')
+        return [p for p in rows if p.magic == self.magic and p.type == 0
+                and p.comment == order['id']]
+
+    def matches(self, rows, order, ticket=None):
+        side = 0 if order['action'] == 'open' else 1
+        entry = (0,) if side == 0 else (1, 3)
+        return [d for d in rows or () if d.symbol == self.symbol and d.magic == self.magic
+                and d.type == side and d.entry in entry
+                and (str(d.order) == str(ticket) if ticket else d.comment == order['id'])]
+
+    def aggregate(self, rows, order, positions=()):
+        if not rows: return dict(status='unknown', qty=0, price=0)
+        if len({str(d.order) for d in rows}) != 1 or len({str(d.position_id) for d in rows}) != 1:
+            return dict(status='unknown', qty=0, price=0)
+        # Never mix duplicate, zero-volume, or malformed native deal records.
+        if len({d.ticket for d in rows}) != len(rows):
+            return dict(status='unknown', qty=0, price=0)
+        if any(not math.isfinite(d.volume) or d.volume <= 0 or not math.isfinite(d.price)
+               or d.price <= 0 for d in rows):
+            return dict(status='unknown', qty=0, price=0)
+        lots = sum(d.volume for d in rows)
+        position_id = str(rows[0].position_id)
+        current = [p for p in positions if str(p.identifier) == position_id]
+        position = (str(current[0].ticket) if len(current) == 1 else None) if order['action']=='open' else order.get('position')
+        data = dict(status='done', qty=lots*self.mt.symbol_info(self.symbol).trade_contract_size,
+                    price=sum(d.volume*d.price for d in rows)/lots, ticket=str(rows[0].order),
+                    position_identifier=position_id,
+                    fee=-sum(d.commission+d.fee for d in rows), swap=sum(d.swap for d in rows))
+        if position: data['position'] = position
+        return data
+
+    def query(self, order):
+        from datetime import datetime, timezone
+        saved = order.get('result') or {}
+        ticket = saved.get('ticket') or order.get('ticket')
+        try: ticket = str(int(ticket)) if int(ticket)>0 else None
+        except (TypeError,ValueError): ticket = None
+        current = self.positions(order) if order['action']=='open' else ()
+        rows = self.mt.history_deals_get(ticket=int(ticket)) if ticket else None
+        if ticket:
+            matches = self.matches(rows, order, ticket)
+        else:
+            # Older journals discarded the acknowledgement ticket. The exact
+            # unique opening comment can recover its position without dates.
+            matches = []
+            if len(current)==1:
+                rows = self.mt.history_deals_get(position=current[0].identifier)
+                matches = self.matches(rows, order)
+            if not matches:
+                # Broker history clocks can differ from UTC. Widen only this
+                # read, keeping exact comment/magic/symbol/direction matching.
+                start = order['created_ms']/1000-86400
+                end = order['created_ms']/1000+86400
+                rows = self.mt.history_deals_get(datetime.fromtimestamp(start,timezone.utc),
+                                                datetime.fromtimestamp(end,timezone.utc))
+                matches = self.matches(rows, order)
+            if len({str(d.order) for d in matches}) != 1:
+                return dict(status='unknown',qty=0,price=0)
+            ticket = str(matches[0].order)
+        unknown = dict(status='unknown',qty=0,price=0,ticket=str(ticket))
+        # A visible deal can be only part of an IOC fill or a still-live order.
+        pending = self.mt.orders_get(ticket=int(ticket))
+        terminal = self.mt.history_orders_get(ticket=int(ticket))
+        if pending is None or pending or not terminal: return unknown
+        terminal = [x for x in terminal if str(x.ticket)==str(ticket) and x.symbol==self.symbol
+                    and x.magic==self.magic and x.type==(0 if order['action']=='open' else 1)]
+        if len(terminal)!=1: return unknown
+        item = terminal[0]
+        if item.state not in (self.mt.ORDER_STATE_FILLED,self.mt.ORDER_STATE_CANCELED,
+                              self.mt.ORDER_STATE_REJECTED,self.mt.ORDER_STATE_EXPIRED): return unknown
+        filled = item.volume_initial-item.volume_current
+        if not math.isfinite(filled) or filled<0: return unknown
+        if abs(sum(d.volume for d in matches)-filled)>1e-9: return unknown
+        if filled==0: return dict(status='done',qty=0,price=0,ticket=str(ticket))
+        return {**unknown,**self.aggregate(matches,order,current)}
+
+    def submitted(self, order, result, contract):
+        ticket = str(result.order or '')
+        data = dict(status='unknown',qty=0,price=0,retcode=result.retcode)
+        if result.order: data['ticket'] = ticket
+        if result.deal: data['deal'] = str(result.deal)
+        for key, value in (('ack_volume',result.volume),('ack_price',result.price)):
+            if isinstance(value,(int,float)) and math.isfinite(value): data[key] = value
+        volume, price = result.volume, result.price
+        qty = volume*contract if isinstance(volume,(int,float)) else float('nan')
+        if not (math.isfinite(qty) and 0<qty<=order['requested']+1e-7
+                and isinstance(price,(int,float)) and math.isfinite(price) and price>0):
+            # Unusual acknowledgements use verified terminal order + deal data.
+            if result.order:
+                try: data.update(self.query({**order,'result':data}))
+                except Exception: data['error']='MT5 成交回报待核对，保留订单编号继续查询'
+            if data['status']!='done':
+                data.setdefault('error','MT5 成交数量或价格待核对，正在查询订单及成交历史')
+            return data
+        # Keep the normal path to one position read; fees are verified later.
+        # Do not assume that an order ticket or position identifier is its ticket.
+        position = order.get('position')
+        if order['action']=='open':
+            try: current = self.positions(order)
+            except Exception: current = ()  # Fill acknowledgement remains known.
+            if len(current)==1:
+                position = str(current[0].ticket)
+                data['position_identifier'] = str(current[0].identifier)
+        data.update(status='done',qty=qty,price=price)
+        if position: data['position'] = position
+        return data
+
+
 def worker_main():
     import MetaTrader5 as mt
     from datetime import datetime, timezone
@@ -453,14 +569,7 @@ def worker_main():
             raise ValueError('MT5 账户发生变化，已阻止交易')
         return a,t
     def query_order(o):
-        matches=[d for d in history(o['created_ms']-60000) if d.symbol==settings['symbol'] and d.magic==magic
-                 and (d.comment==o['id'] or (o.get('ticket') and str(d.order)==str(o['ticket'])))]
-        if not matches: return dict(status='unknown',qty=0,price=0)
-        lots=sum(d.volume for d in matches); spec=mt.symbol_info(settings['symbol'])
-        return dict(status='done',qty=lots*spec.trade_contract_size,
-                    price=sum(d.volume*d.price for d in matches)/lots,
-                    ticket=str(matches[0].order),position=str(matches[0].position_id),
-                    fee=-sum(d.commission+d.fee for d in matches),swap=sum(d.swap for d in matches))
+        return NativeMT5Fills(mt,settings['symbol'],magic).query(o)
     for line in sys.stdin:
         try:
             r=json.loads(line); cmd=r['command']
@@ -521,7 +630,16 @@ def worker_main():
                             deviation=max(1,math.floor(o['slippage']/s.point)),magic=magic,comment=o['id'],
                             type_time=mt.ORDER_TIME_GTC,type_filling=filling)
                         if not opening:
-                            pos=mt.positions_get(ticket=int(o['position']))
+                            if not o.get('position') and o.get('opening_id'):
+                                current=mt.positions_get(symbol=s.name)
+                                if current is None: raise ValueError('MT5 持仓读取失败')
+                                pos=[p for p in current if p.comment==o['opening_id'] and p.magic==magic
+                                     and p.type==0 and (not o.get('position_identifier') or
+                                         str(p.identifier)==str(o['position_identifier']))]
+                                if len(pos)!=1: raise ValueError('MT5 持仓票据未唯一确认，请先对账')
+                                o['position']=str(pos[0].ticket)
+                            else:
+                                pos=mt.positions_get(ticket=int(o['position']))
                             if not pos or not owned_close_position(pos[0],o,s.name,magic):
                                 raise ValueError('MT5 待平仓位不属于本策略，已拒绝操作')
                             if req['volume']>pos[0].volume+1e-9: raise ValueError('MT5 平仓量大于实际持仓')
@@ -533,26 +651,11 @@ def worker_main():
                             result=mt.order_send(req)
                             if result is None: data=dict(status='unknown',qty=0,price=0)
                             elif result.retcode in (mt.TRADE_RETCODE_DONE,mt.TRADE_RETCODE_DONE_PARTIAL):
-                                position=o.get('position')
-                                deal_rows=mt.history_deals_get(ticket=result.deal) if result.deal else ()
-                                if opening:
-                                    # In hedging accounts an order ticket is not
-                                    # a reliable position ticket. Resolve the
-                                    # position created with our unique comment.
-                                    if deal_rows:
-                                        position=str(deal_rows[0].position_id)
-                                    else:
-                                        current=mt.positions_get(symbol=s.name) or ()
-                                        owned=[p for p in current if p.magic==magic and p.comment==o['id']
-                                               and p.type==mt.POSITION_TYPE_BUY]
-                                        position=str(owned[0].ticket) if len(owned)==1 else str(result.order or '')
-                                data=dict(status='done',qty=result.volume*s.trade_contract_size,price=result.price,
-                                          ticket=str(result.order),position=position)
-                                if deal_rows:
-                                    data['fee']=-sum(d.commission+d.fee for d in deal_rows)
-                                    data['swap']=sum(d.swap for d in deal_rows)
+                                data=NativeMT5Fills(mt,s.name,magic).submitted(o,result,s.trade_contract_size)
                             elif result.retcode in (mt.TRADE_RETCODE_TIMEOUT,mt.TRADE_RETCODE_CONNECTION,mt.TRADE_RETCODE_PLACED):
-                                data=dict(status='unknown',qty=0,price=0,ticket=str(result.order))
+                                data=dict(status='unknown',qty=0,price=0,retcode=result.retcode)
+                                if result.order: data['ticket']=str(result.order)
+                                if result.deal: data['deal']=str(result.deal)
                             else: data=dict(status='done',qty=0,price=0,error=f'MT5 拒单 {result.retcode}')
                 else: raise ValueError('未知 MT5 指令')
             print(json.dumps(dict(ok=True,data=data),allow_nan=False),flush=True)
@@ -566,7 +669,9 @@ def owned_close_position(position, order, symbol, magic):
         return False
     adopted = order.get('adopted_position')
     if not adopted:
-        return position.magic == magic
+        return (position.magic == magic and
+                (not order.get('opening_id') or position.comment == order['opening_id']) and
+                (not order.get('position_identifier') or str(position.identifier)==str(order['position_identifier'])))
     return (str(position.ticket) == str(adopted['ticket']) == str(order.get('position'))
             and str(position.identifier) == str(adopted['identifier'])
             and position.magic == adopted['magic'] and position.time_msc == adopted['time_ms']

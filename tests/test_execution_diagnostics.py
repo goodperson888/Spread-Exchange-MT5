@@ -17,7 +17,9 @@ class DiagnosticsTests(unittest.TestCase):
              'costs':{'usdt_usd':1,'account':secret},'reason':secret}],
             'orders':[{'id':secret,'group':secret,'leg':'binance','action':'open',
                 'requested':1,'quote_spread':5.5,'actual_spread':5.2,'spread_slippage':-.5,
-                'result':{'status':'done','qty':1,'price':4305.5,'ticket':secret,'error':secret,'request_ms':20},
+                'result':{'status':'done','qty':1,'price':4305.5,'ticket':secret,'deal':secret,
+                          'position_identifier':secret,'error':secret,'request_ms':20,
+                          'retcode':10009,'ack_volume':0,'ack_price':0},
                 'quote_context':{'binance':{'bid':4305.5,'api_key':secret,'observed_ms':1000}}}]}
         events=[{'kind':'order_reconciled','time':1200,'data':{'id':secret,'query_ms':15,'error':secret}},
                 {'kind':'arbitrary_private_event','data':{'group':secret,'error':secret}}]
@@ -26,6 +28,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(report['orders'][0]['group'],'G1')
         self.assertEqual(report['orders'][0]['spread_slippage'],-.5)
         self.assertEqual(report['orders'][0]['result']['request_ms'],20)
+        self.assertEqual(report['orders'][0]['result']['retcode'],10009)
+        self.assertEqual(report['orders'][0]['result']['ack_volume'],0)
         self.assertEqual(report['events'][0]['data'],{'order':'O1','query_ms':15})
         self.assertEqual(len(report['events']),1)
 

@@ -380,6 +380,8 @@ class TradingRuntime:
     def _poll(self):
         c = self.config
         q, version, error = self.pump.read()
+        if error or q is None:
+            self.engine.reconcile_pending(c)
         if error: raise ValueError(error)
         if q is None: return
         self.quote = q
@@ -389,6 +391,7 @@ class TradingRuntime:
         if self.entry_preflight:
             self.market_meta['entry_preflight'] = self.entry_preflight.status()
         if c['execution']['mode']=='live' and not self.reconciled:
+            self.engine.reconcile_pending(c)
             self._auto_reconcile_flat()
         if c['execution']['mode']=='paper' or self.reconciled:
             if any(g.get('imported') for g in self.engine.active()) and time.monotonic()-getattr(self,'_last_import_check',0)>=2:
@@ -443,11 +446,9 @@ class TradingRuntime:
             if any(self.engine.uncertain(group) for group in active):
                 return False
             if any(max(self.engine.amounts(group).values())>=1e-8 for group in active):
-                # Older builds put an interrupted adopted close in recovery.
-                # Revalidate the confirmed residual exposure before allowing
-                # its closing workflow to continue; never rearm entries.
-                if not any(group.get('imported') for group in active): return False
-                self.engine.pause('接管平仓回报已确认，正在核验剩余持仓')
+                # Revalidate both accounts and exact MT5 ownership before
+                # continuing an interrupted close; never rearm entries.
+                self.engine.pause('平仓回报已确认，正在核验剩余持仓')
                 self.reconcile()
                 self.engine.save('auto_reconciled_close')
                 return True
@@ -732,7 +733,17 @@ class TradingRuntime:
             self.engine.request_close(group, reason)
             # One immediate attempt; the background loop performs retries.
             self.engine.tick(self.config, self.plan, self.quote)
-            return self.snapshot()
+            result=self.snapshot()
+            targets=[g for g in self.engine.state['groups'] if group is None or g['id']==group]
+            if any(self.engine.uncertain(g) for g in targets):
+                result['message']='平仓请求已记录；正在核对未确认成交，确认后才继续双边平仓。当前尚未双平，请勿把未知数量当作零。'
+            elif any(g['status']=='attention' for g in targets):
+                result['message']='平仓未完成：重试已达上限，请核对平台仓位后重试。'
+            elif any(g['status']!='closed' for g in targets):
+                result['message']='平仓请求已记录，尚未双平；请查看行情有效性、对账状态及交易组原因。'
+            else:
+                result['message']='本次请求涉及的交易组已确认双边平仓。'
+            return result
 
     def _validate_import_exposure(self, mt5, positions, pending):
         """Compare account quantities to the journal, including each adopted MT5 identity."""

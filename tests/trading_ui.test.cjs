@@ -19,7 +19,15 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   const el = id => {
     if (!elements.has(id)) elements.set(id, {
       tagName:'BUTTON', value:'', textContent:'', innerHTML:'', dataset:{},
-      classList:{toggle(){}, add(){}, remove(){}}, querySelectorAll(){return [];}, addEventListener(name,fn){this['on'+name]=fn;}
+      classList:{toggle(){}, add(){}, remove(){}}, querySelectorAll(selector){
+        if(id!=='groups'||selector!=='[data-close]')return [];
+        if(this.buttonsHTML!==this.innerHTML){
+          this.buttonsHTML=this.innerHTML;
+          this.buttons=[...this.innerHTML.matchAll(/<button data-close="([^"]+)"([^>]*)>/g)]
+            .map(m=>({dataset:{close:m[1]},disabled:m[2].includes('disabled')}));
+        }
+        return this.buttons||[];
+      }, addEventListener(name,fn){this['on'+name]=fn;}
     });
     return elements.get(id);
   };
@@ -249,4 +257,49 @@ test('execution timing names local stages and missing paired spread stays unknow
   assert.match(html,/非实际成交延迟/);
   assert.match(html,/等待双边成交/);
   assert.doesNotMatch(html,/偏移 \+0/);
+});
+
+
+test('unfinished groups and unknown fills disable start even if connection was reconciled', async()=>{
+  for(const status of ['opening','unwinding','closing','attention']) {
+    const fixture=pageFixture(false,{'/api/trading/reconcile':()=>({connected:true,
+      capabilities:{reconciled:true},state:{enabled:false,groups:[{id:'g1',status,parameters:{}}],orders:[]}})});
+    await fixture.el('trading-reconcile').onclick();
+    assert.equal(fixture.el('trading-toggle').disabled,true);
+    assert.match(fixture.el('workflow-status').textContent,/尚未完成/);
+  }
+});
+
+function unknownSnapshot(status='unwinding') {
+  return {connected:true,capabilities:{reconciled:true},state:{enabled:false,groups:[{
+    id:'g1',status,qty:1,lots:.01,contract:100,parameters:{},valuation:{net:3.04,remaining:{binance:1,mt5:0}}}],
+    orders:[{id:'m1',group:'g1',leg:'mt5',action:'open',requested:1,result:{status:'unknown',qty:0,price:0}}]}};
+}
+
+test('unknown exposure and income are labelled as unconfirmed on both views', async()=>{
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>unknownSnapshot()});
+  await f.el('trading-reconcile').onclick();
+  assert.match(f.el('groups').innerHTML,/MT5 待确认（已确认 0）/);
+  assert.match(f.el('groups').innerHTML,/<strong>—<\/strong>.*收益待核对/);
+  assert.match(f.el('pnl-stats').innerHTML,/收益待核对/);
+  assert.match(f.el('orders').innerHTML,/成交待确认/);
+  assert.match(f.el('live-exposure').textContent,/成交待确认/);
+  assert.equal(f.el('records-feedback').textContent,f.el('trading-result').textContent);
+});
+
+test('record close button shows pending response in the records view', async()=>{
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>unknownSnapshot(),
+    '/api/trading/close':body=>{assert.equal(body.group,'g1');return {...unknownSnapshot('closing'),message:'平仓请求已记录；尚未双平'};}});
+  await f.el('trading-reconcile').onclick();
+  await f.el('groups').querySelectorAll('[data-close]')[0].onclick();
+  assert.match(f.el('records-feedback').textContent,/平仓请求已记录；尚未双平/);
+  assert.match(f.el('groups').innerHTML,/核对成交后继续平仓/);
+});
+
+test('record close errors remain visible where the user pressed the button', async()=>{
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>unknownSnapshot(),
+    '/api/trading/close':()=>{throw Error('请先完成持仓对账');}});
+  await f.el('trading-reconcile').onclick();
+  await f.el('groups').querySelectorAll('[data-close]')[0].onclick();
+  assert.match(f.el('records-feedback').textContent,/本次操作未完成：请先完成持仓对账/);
 });

@@ -59,7 +59,7 @@ def build_report(state, events):
              'symbol':symbol(o.get('symbol')),'imported':bool(o.get('imported')),
              **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage')}
         row['result']={'status':choice(result,'status',('done','pending','unknown')),
-                       **numbers(result,'qty price fee request_ms response_received_ms fill_time_ms reconcile_time_ms')}
+                       **numbers(result,'qty price fee request_ms response_received_ms fill_time_ms reconcile_time_ms retcode ack_volume ack_price')}
         code=result.get('error_code')
         if isinstance(code,int) or code in ('DEPTH_INSUFFICIENT','DEPTH_CHECK_FAILED'):
             row['result']['error_code']=code

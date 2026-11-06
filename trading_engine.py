@@ -8,9 +8,9 @@ from trading_config import pair_key
 def stamp(): return int(time.time()*1000)
 
 
-def valid_quote(q, c, now=None):
-    now=now or stamp(); s=c['strategy']
-    if q.get('key')!=pair_key(c): return False
+def valid_group_quote(q, key, s, now=None):
+    now=now or stamp()
+    if not q or q.get('key')!=key: return False
     for side in ('binance','mt5'):
         x=q.get(side,{})
         if not 0<float(x.get('bid',0))<=float(x.get('ask',0)): return False
@@ -19,6 +19,10 @@ def valid_quote(q, c, now=None):
     binance_observed=int(q['binance'].get('observed_ms',q['binance'].get('time_ms',0)))
     mt5_observed=int(q['mt5'].get('observed_ms',q['mt5'].get('time_ms',0)))
     return abs(binance_observed-mt5_observed)<=s['max_clock_skew_ms']
+
+
+def valid_quote(q, c, now=None):
+    return valid_group_quote(q,pair_key(c),c['strategy'],now)
 
 
 class Engine:
@@ -110,9 +114,9 @@ class Engine:
                 o['adopted_position']=copy.deepcopy(opened['original_position'])
             else:
                 opened=candidates[0]
-            o['position']=opened['result'].get('position') or opened['result'].get('ticket')
-            if not o['position']:
-                raise ValueError('MT5 持仓票据未确定，必须先完成对账')
+            o['position']=opened['result'].get('position')
+            o['opening_id']=opened['id']
+            o['position_identifier']=opened['result'].get('position_identifier')
         journal_started=time.monotonic()
         self.state['orders'].append(o);self.save('order_intent',{'id':o['id'],'group':g['id'],'leg':leg,'action':action,'qty':qty})
         request_started=time.monotonic()
@@ -121,7 +125,12 @@ class Engine:
         try: result=self.broker.submit(copy.deepcopy(o))
         except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
         # Never let an invalid result look like a completed zero-volume fill.
-        if not self.result_valid(result,qty): result=dict(status='unknown',qty=0,price=0,error='成交回报无效，等待对账')
+        if not self.result_valid(result,qty):
+            # Keep broker identity for subsequent reads even when its fill
+            # fields are unusable. Never treat a malformed acknowledgement as flat.
+            metadata={k:result[k] for k in ('ticket','deal','position','position_identifier','retcode','ack_volume','ack_price')
+                      if isinstance(result,dict) and k in result}
+            result=dict(metadata,status='unknown',qty=0,price=0,error='成交回报无效，等待对账')
         result['request_ms']=round((time.monotonic()-request_started)*1000)
         result['response_received_ms']=stamp()
         if result.get('status')=='done' and float(result.get('qty',0))>0:
@@ -179,6 +188,7 @@ class Engine:
     @staticmethod
     def result_valid(r, requested):
         import math
+        if not isinstance(r,dict): return False
         try:
             qty=float(r.get('qty',0));price=float(r.get('price',0))
             return (isinstance(r,dict) and r.get('status') in ('done','pending','unknown') and
@@ -408,7 +418,10 @@ class Engine:
             if group_id is None or g['id']==group_id:
                 self._begin_execution(g,'close')
                 if g['status']=='attention': g['attempts']=0
-                g['status']='closing';g['reason']=reason;found=True
+                # A manual close must not downgrade an ongoing protective
+                # unwind to the tighter normal slippage budget.
+                if g['status']!='unwinding': g.update(status='closing',reason=reason)
+                found=True
         if group_id and not found: raise ValueError('未找到活动交易组')
         self.save('close_requested',{'group':group_id,'reason':reason})
 
@@ -433,6 +446,9 @@ class Engine:
         # Status reads must precede account ownership checks: a delayed fill
         # changes the expected exposure that those checks compare against.
         if not self.resolve(g): return
+        if not valid_group_quote(q,g['key'],g['parameters']):
+            self.state['alarm']='平仓等待有效新报价；成交查询继续，当前尚未双平'
+            return
         if g.get('imported') and hasattr(self,'before_import_close'):
             if self.before_import_close() is False: return
             # Account reads can take longer than the quote budget. Wait for another tick.
@@ -474,7 +490,14 @@ class Engine:
         if not self.uncertain(g) and max(self.amounts(g).values())<1e-8:
             self.finalize_flat(g,q)
 
+    def reconcile_pending(self, c):
+        # Read-only confirmation must continue even while quotes are stale or
+        # restart recovery blocks all writes. resolve() already applies backoff.
+        for g in self.active():
+            if g['key']==pair_key(c) and self.uncertain(g): self.resolve(g)
+
     def tick(self, c, p, q):
+        self.reconcile_pending(c)
         if self.state['recovery']: return
         if not valid_quote(q,c):
             if self.active(): self.state['alarm']='报价过期、时钟偏差或品种不符，等待有效行情；已有仓位仍未平仓'
