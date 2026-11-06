@@ -11,12 +11,25 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 from urllib.error import HTTPError
 from liquidation_risk import mt5_risk_fields
+
+
+def _utc_datetime_from_timestamp(seconds):
+    """Build a UTC datetime without platform-specific timestamp limits.
+
+    ``datetime.fromtimestamp`` delegates to the C runtime. On Windows it
+    rejects timestamps before the Unix epoch, while Linux accepts them. The
+    history fallback probes a day on either side of a journaled opening time,
+    so old records can legitimately produce a pre-epoch lower bound. Pure
+    datetime arithmetic is consistent everywhere.
+    """
+    return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=float(seconds))
 
 try:
     import websocket
@@ -521,8 +534,8 @@ class NativeMT5Fills:
                 # read, keeping exact comment/magic/symbol/direction matching.
                 start = order['created_ms']/1000-86400
                 end = order['created_ms']/1000+86400
-                rows = self.mt.history_deals_get(datetime.fromtimestamp(start,timezone.utc),
-                                                datetime.fromtimestamp(end,timezone.utc))
+                rows = self.mt.history_deals_get(_utc_datetime_from_timestamp(start),
+                                                _utc_datetime_from_timestamp(end))
                 matches = self.matches(rows, order)
             if len({str(d.order) for d in matches}) != 1:
                 return dict(status='unknown',qty=0,price=0)
@@ -624,8 +637,8 @@ def native_external_history(mt, symbol, openings):
             try: created=float(opening.get('created_ms'))/1000
             except (TypeError,ValueError): created=0
             if created<=0: raise ValueError('MT5 原开仓编号未确认')
-            rows=read_history(datetime.fromtimestamp(created-86400,timezone.utc),
-                              datetime.fromtimestamp(created+86400,timezone.utc))
+            rows=read_history(_utc_datetime_from_timestamp(created-86400),
+                              _utc_datetime_from_timestamp(created+86400))
             if rows is None: raise ValueError('MT5 原开仓历史读取失败')
             comment=str(opening.get('comment') or '').strip()
             try: magic=int(opening.get('magic'))
@@ -689,8 +702,8 @@ def native_external_history_probe(mt, symbol, openings):
         try: created=float(opening.get('created_ms'))/1000
         except (TypeError,ValueError): created=0
         if created>0:
-            rows.extend(read('range',datetime.fromtimestamp(created-86400,timezone.utc),
-                             datetime.fromtimestamp(created+86400,timezone.utc)))
+            rows.extend(read('range',_utc_datetime_from_timestamp(created-86400),
+                             _utc_datetime_from_timestamp(created+86400)))
     unique={}
     for row in rows:
         data={}
@@ -720,7 +733,7 @@ def worker_main():
     from datetime import datetime, timezone
     settings={}; magic=0; read_only=False
     def history(start):
-        rows=mt.history_deals_get(datetime.fromtimestamp(start/1000,timezone.utc),datetime.now(timezone.utc))
+        rows=mt.history_deals_get(_utc_datetime_from_timestamp(start/1000),datetime.now(timezone.utc))
         if rows is None: raise ValueError('MT5 成交历史读取失败')
         return rows
     def identity():
