@@ -193,6 +193,18 @@ test('observation window still reloads while a trading connection check is in fl
  release({state:{groups:[],orders:[]}});await pending;
 });
 
+test('healthy live stream still refreshes local archives once a minute',async()=>{
+ const f=pageFixture();
+ f.listeners.visibilitychange();await flushUI();
+ f.streams.at(-1).onopen();await f.refresh();
+ const count=f.calls.filter(c=>c.url.includes('/chart?')).length;
+ await f.refresh();assert.equal(f.calls.filter(c=>c.url.includes('/chart?')).length,count);
+ f.ageRisk(60001);await f.refresh();
+ assert.equal(f.calls.filter(c=>c.url.includes('/chart?')).length,count+1);
+ await f.refresh();assert.equal(f.calls.filter(c=>c.url.includes('/chart?')).length,count+1);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
 test('entry threshold can be applied while connected without reconnecting', async () => {
   const {el, calls} = pageFixture(false, {
     '/api/trading/apply-entry': body => {

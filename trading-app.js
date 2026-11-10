@@ -693,7 +693,10 @@
       render(r);
       // Keep the last chart visible when disconnected, but do not keep
       // re-fetching it as if live monitoring were still running.
-      if(withChart && !plotController && (historyDirty || !chart || (!streamReady && r.connected))) await plot();
+      // Refill archived display samples as the bounded live cache rolls over.
+      // This is a read-only local snapshot, independent of platform requests.
+      if(withChart && !plotController && (historyDirty || !chart ||
+          (r.connected && (!streamReady || Date.now()-historyLoadedAt>=60000)))) await plot();
     } finally { statusBusy=false; }
   }
   async function saveBeforeTrading() {
