@@ -102,6 +102,17 @@ test('open group mark-to-market moves with the latest quote while closed group s
  const unverified={...open,valuation_status:'unverified'};
  assert.deepEqual(markGroups([unverified],basis,latest)[0],unverified);
 });
+test('minute archives remain continuous when recent live ticks dominate the window',()=>{
+ const archive=Array.from({length:101},(_,i)=>({...q(i*60000),sample_interval_ms:60000}));
+ const live=Array.from({length:1000},(_,i)=>q(6000000+(i+1)*1000));
+ assert.equal(chartSeries([...archive,...live],7*86400000).gaps.length,0);
+ const interrupted=archive.filter((_,i)=>i<20||i>30);
+ const series=chartSeries([...interrupted,...live],7*86400000);
+ assert.equal(series.gaps.length,1);
+ assert.equal(series.lines.filter(x=>x.entry===null).length,1);
+ const month=archive.map(row=>({...row,time_ms:row.time_ms*4,sample_interval_ms:180000}));
+ assert.equal(chartSeries([...month,...live.map(row=>({...row,time_ms:row.time_ms+18000000}))],30*86400000).gaps.length,0);
+});
 
 test('live projected profit preserves incurred rebates and reprices future fee rebates',()=>{
  const basis={key:'a',time_ms:1000,usdt_usd:1,binance:{ask:100},mt5:{bid:99}};

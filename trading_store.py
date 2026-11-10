@@ -115,9 +115,17 @@ class Store:
         old_duration=max(0,old_end-since); new_duration=max(0,end-new_start)
         total=max(1,old_duration+new_duration)
         old_limit=int(limit*old_duration/total) if old_duration else 0
-        rows=self._bucketed(db,'quote_minutes',keys,since-since%60000,old_end,old_limit)
-        rows+=self._bucketed(db,'quotes',keys,new_start,end,limit-old_limit)
-        samples=(json.loads(x[0]) for x in rows)
+        def display_samples(table,start,stop,budget,minimum_interval):
+            interval=max(minimum_interval,(stop-start+max(1,budget)-1)//max(1,budget))
+            for row in self._bucketed(db,table,keys,start,stop,budget):
+                sample=json.loads(row[0])
+                # Display sampling cadence, not quote age or an execution
+                # timestamp. Sparse archives must not look like disconnections
+                # merely because recent ticks have a much shorter interval.
+                sample['sample_interval_ms']=interval
+                yield sample
+        samples=list(display_samples('quote_minutes',since-since%60000,old_end,old_limit,60000))
+        samples+=list(display_samples('quotes',new_start,end,limit-old_limit,1))
         return sorted((row for row in samples if since<=row.get('time_ms',0)<end),key=lambda row:row.get('time_ms',0))
 
     def events(self, limit=100):

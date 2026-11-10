@@ -69,6 +69,8 @@ class ChartHistoryTests(unittest.TestCase):
             with self.subTest(days=days):
                 rows=self.store.read_samples(self.key,self.at-days*day)
                 self.assertEqual([x['entry'] for x in rows],expected)
+                self.assertTrue(all(x['sample_interval_ms']>=60000 for x in rows if x['entry']>1))
+                self.assertTrue(all(x['sample_interval_ms']>=1 for x in rows))
 
     def test_runtime_does_not_hold_execution_lock_during_chart_database_read(self):
         r=TradingRuntime.__new__(TradingRuntime);r.lock=threading.RLock();r.config=self.c

@@ -74,10 +74,11 @@
     intervals.sort((a,b)=>a-b);
     const tolerance=Math.max(10000,Math.min(60000,intervals[Math.floor(intervals.length/2)]||0)*3);
     const gaps=[],valid=[];let previous=null,invalidStart=null;
+    const cadence=row=>Number.isFinite(row?.sample_interval_ms)?Math.max(0,row.sample_interval_ms):0;
     for(const row of rows) {
       if(row.valid===false) {invalidStart??=previous?.time_ms??row.time_ms;continue;}
       if(invalidStart!==null) {gaps.push({start:invalidStart,end:row.time_ms,reason:'报价无效或过期'});invalidStart=null;}
-      else if(previous&&row.time_ms-previous.time_ms>tolerance)gaps.push({start:previous.time_ms,end:row.time_ms,reason:'本机采样缺失'});
+      else if(previous&&row.time_ms-previous.time_ms>Math.max(tolerance,3*cadence(previous),3*cadence(row)))gaps.push({start:previous.time_ms,end:row.time_ms,reason:'本机采样缺失'});
       valid.push(row);previous=row;
     }
     if(invalidStart!==null)gaps.push({start:invalidStart,end:rows.at(-1).time_ms,reason:'报价无效或过期'});
