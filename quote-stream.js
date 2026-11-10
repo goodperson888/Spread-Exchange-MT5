@@ -37,6 +37,29 @@
       const rows=fresh.merge(samples,since,key);this.points=fresh.points;this.rows=fresh.rows;this.key=fresh.key;return rows;
     }
   }
+  // Historical display points have their own budget. A busy live stream must
+  // not evict a week/month of archived minutes from the selected window.
+  class ChartBuffer {
+    constructor(liveCapacity=30000,historyCapacity=20000) {
+      this.live=new QuoteBuffer(liveCapacity);this.historyCapacity=historyCapacity;
+      this.history=new QuoteBuffer(historyCapacity);this.rows=[];
+    }
+    merge(samples,since=0,key=null) {
+      const live=this.live.merge(samples,since,key),history=this.history.merge([],since,key);
+      const rows=[];let i=0,j=0;
+      while(i<history.length||j<live.length) {
+        if(i===history.length)rows.push(live[j++]);
+        else if(j===live.length||history[i].time_ms<live[j].time_ms)rows.push(history[i++]);
+        else {if(history[i].time_ms===live[j].time_ms)i++;rows.push(live[j++]);}
+      }
+      this.rows=rows;return rows;
+    }
+    replaceHistory(samples,since,key) {
+      this.history=new QuoteBuffer(this.historyCapacity);
+      this.history.merge(samples,since,key);
+      return this.merge([],since,key);
+    }
+  }
   // Fixed UTC buckets keep past representatives stable as the right edge grows.
   function renderPoints(rows,windowMs,view=null) {
     if(rows.length<=6000)return rows;
@@ -90,7 +113,7 @@
         net_before_rebate:before,net:before+rebateBinance+rebateMt5}};
     });
   }
-  const api={QuoteBuffer,renderPoints,chartSeries,sameChartMarket,markGroups};
+  const api={QuoteBuffer,ChartBuffer,renderPoints,chartSeries,sameChartMarket,markGroups};
   if(typeof module!=='undefined')module.exports=api;
   else root.GoldPairQuotes=api;
 })(typeof window!=='undefined'?window:globalThis);

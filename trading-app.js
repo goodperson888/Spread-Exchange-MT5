@@ -49,7 +49,7 @@
   function invalidateHistory(){historyDirty=true;historyRevision++;}
   // Keep the browser-side high-frequency window bounded; longer history comes
   // from the local SQLite chart endpoint and is already downsampled for display.
-  const quoteBuffer=window.GoldPairQuotes?new window.GoldPairQuotes.QuoteBuffer(30000):null;
+  const quoteBuffer=window.GoldPairQuotes?new window.GoldPairQuotes.ChartBuffer(30000,20000):null;
   function windowStart(){return Date.now()-Math.max(1,Number(el('chart-window').value)||1440)*60000;}
   function paintSoon(){
     if(el('view-trading')?.hidden) {
@@ -631,7 +631,7 @@
     try {
       const minutes=Number(el('chart-window').value);
       const r=await request('/api/trading/chart?minutes='+minutes,undefined,controller);
-      if(document.hidden||generation!==plotGeneration||requestedKey!==last?.quote?.key)return;
+      if(document.hidden||generation!==plotGeneration||requestedKey!==last?.quote?.key||minutes!==Number(el('chart-window').value))return;
       // Keep ticks received during the history request; merge only once per paint.
       chartSamples=quoteBuffer?quoteBuffer.replaceHistory(r.samples||[],windowStart(),last?.quote?.key):(r.samples||[]);
       historyDirty=revision!==historyRevision;historyLoadedAt=Date.now();
@@ -641,13 +641,16 @@
     } finally {if(plotController===controller)plotController=null;}
   }
   function drawChart(rawSamples) {
-    const series=window.GoldPairQuotes?.chartSeries?window.GoldPairQuotes.chartSeries(rawSamples,Math.max(1,Number(el('chart-window').value)||1440)*60000,chartView):{samples:rawSamples,lines:rawSamples,gaps:[]};
+    const windowMinutes=Math.max(1,Number(el('chart-window').value)||1440);
+    const rangeEnd=Date.now(),rangeStart=rangeEnd-windowMinutes*60000;
+    const series=window.GoldPairQuotes?.chartSeries?window.GoldPairQuotes.chartSeries(rawSamples,windowMinutes*60000,chartView):{samples:rawSamples,lines:rawSamples,gaps:[]};
     const {samples,lines,gaps}=series;
     if(!chart) {
       chart=echarts.init(el('spread-chart'));
       if(chart.on)chart.on('datazoom',()=>{
         const zoom=chart.getOption()?.dataZoom?.[0];
-        const first=chartSamples[0]?.time_ms||0,lastTime=chartSamples.at(-1)?.time_ms||first;
+        const axis=chart.getOption()?.xAxis?.[0];
+        const first=axis?.min??rangeStart,lastTime=axis?.max??rangeEnd;
         chartView={start:first+(lastTime-first)*(zoom?.start||0)/100,end:first+(lastTime-first)*(zoom?.end??100)/100};
         paintSoon();
       });
@@ -668,10 +671,13 @@
     el('spread-stats').innerHTML=[['当前入场',latest?.entry],['当前退出',latest?.exit],['开仓阈值',threshold],['窗口入场均值',average(entries)],['价差范围',all.length?`${Math.min(...all).toFixed(3)} ～ ${Math.max(...all).toFixed(3)}`:null]].map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${typeof value==='number'?value.toFixed(3):value||'—'}</strong></div>`).join('');
     el('chart-empty').classList.toggle('is-hidden',samples.length>0);
     el('chart-coverage').textContent=samples.length?`本机可成交价差 ${samples.length.toLocaleString('zh-CN')} 个采样 · ${new Date(samples[0].time_ms).toLocaleString()} 至 ${new Date(samples.at(-1).time_ms).toLocaleString()} · 高频记录保留 24 小时，更早按分钟归档保留 30 天；历史保存在本机数据目录。`:'尚无本机历史；连接后开始记录真实 Bid/Ask 可成交价差，历史会保存到本机数据目录。';
+    const windowLabel=windowMinutes>=1440?`${windowMinutes/1440} 天`:`${windowMinutes/60} 小时`;
+    el('chart-coverage').textContent=`观察窗口：最近 ${windowLabel} · `+el('chart-coverage').textContent+
+      (samples.length&&samples[0].time_ms-rangeStart>Math.max(60000,windowMinutes*60000/100)?' 所选窗口前段暂无本机记录，已留空显示；切换窗口不会补造停机前或断线期间的行情。':'');
     const oldZoom=chart.getOption()?.dataZoom?.[0];
     const start=resetChartZoom?0:(oldZoom?.start??0),end=resetChartZoom?100:(oldZoom?.end??100);resetChartZoom=false;
     const thresholdLine=threshold===null?[]:[{name:`开仓阈值 ${threshold.toFixed(2)}`,yAxis:threshold,lineStyle:{color:'#b75e24',width:2,type:'dashed'},label:{show:true,color:'#8a461e',formatter:`开仓阈值 ${threshold.toFixed(2)}`}}];
-    chart.setOption({animation:false,legend:{top:5,type:'scroll'},tooltip:{trigger:'axis',confine:true,valueFormatter:v=>Number.isFinite(v)?v.toFixed(3):'—'},grid:{left:75,right:120,top:70,bottom:80},xAxis:{type:'time',minInterval:1000,axisPointer:{label:{formatter:params=>dateTime(params.value)}}},yAxis:{type:'value',scale:true,name:'价差 USD/盎司'},dataZoom:[{type:'inside',filterMode:'none',minValueSpan:1000,start,end},{type:'slider',filterMode:'none',minValueSpan:1000,bottom:15,start,end}],series:[
+    chart.setOption({animation:false,legend:{top:5,type:'scroll'},tooltip:{trigger:'axis',confine:true,valueFormatter:v=>Number.isFinite(v)?v.toFixed(3):'—'},grid:{left:75,right:120,top:70,bottom:80},xAxis:{type:'time',min:rangeStart,max:rangeEnd,minInterval:1000,axisPointer:{label:{formatter:params=>dateTime(params.value)}}},yAxis:{type:'value',scale:true,name:'价差 USD/盎司'},dataZoom:[{type:'inside',filterMode:'none',minValueSpan:1000,start,end},{type:'slider',filterMode:'none',minValueSpan:1000,bottom:15,start,end}],series:[
       {id:'entry',name:'入场（卖币安Bid / 买MT5Ask）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.entry]),itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:[...(threshold===null?[]:[[{name:'开仓触发区',yAxis:threshold},{yAxis:'max'}]]),...missing]},markLine:{symbol:'none',silent:true,data:[...thresholdLine,...marks],label:{formatter:'{b}: {c}'}}},
       {id:'exit',name:'退出（买回币安Ask / 卖MT5Bid）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.exit]),itemStyle:{color:'#247b68'},lineStyle:{width:2,type:'dashed'}},
       {id:'open',name:'策略开仓',type:'scatter',symbol:'triangle',symbolSize:12,itemStyle:{color:'#b75e24'},data:opened},
@@ -724,8 +730,15 @@
     paintSoon();
   },'apply-entry','正在应用开仓阈值…');
   el('trading-close').onclick=()=>action(async()=>{render(await request('/api/trading/close',{reason:'用户请求全部平仓'}));},'trading-close','正在处理平仓请求…');
-  el('chart-window').onchange=()=>{resetChartZoom=true;chartView=null;action(plot,'chart-window','正在加载图表数据…');};
-  el('chart-latest').onclick=()=>{resetChartZoom=true;chartView=null;action(plot,'chart-latest','正在加载最新图表…');};
+  async function reloadChart(){
+    resetChartZoom=true;chartView=null;invalidateHistory();
+    try {await plot();}
+    catch(error){text('chart-gaps','图表历史加载失败：'+error.message,true);}
+  }
+  // Chart reads do not take the trading action lock; a new selection replaces
+  // an older in-flight chart request even while a connection check is running.
+  el('chart-window').onchange=reloadChart;
+  el('chart-latest').onclick=reloadChart;
   el('push-setup').onclick=()=>action(async()=>{
     const r=await request('/api/mt5/push/setup',{});
     const settings=`LocalPort=${r.port}\r\nLocalToken=${r.token}\r\n`;

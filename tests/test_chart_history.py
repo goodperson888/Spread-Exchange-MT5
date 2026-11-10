@@ -59,6 +59,17 @@ class ChartHistoryTests(unittest.TestCase):
             self.assertFalse(thread.is_alive());self.assertFalse(errors)
             self.assertEqual([x['entry'] for x in rows],[2])
 
+    def test_week_and_month_windows_read_archives_after_raw_quotes_expire(self):
+        day=86400000
+        for days,value in ((29,29),(6,6),(2,2),(0,1)):
+            self.store.last_cleanup=0
+            self.sample(self.key,self.at-days*day,value)
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM quotes').fetchone()[0],1)
+        for days,expected in ((1,[1]),(7,[6,2,1]),(30,[29,6,2,1])):
+            with self.subTest(days=days):
+                rows=self.store.read_samples(self.key,self.at-days*day)
+                self.assertEqual([x['entry'] for x in rows],expected)
+
     def test_runtime_does_not_hold_execution_lock_during_chart_database_read(self):
         r=TradingRuntime.__new__(TradingRuntime);r.lock=threading.RLock();r.config=self.c
         entered=threading.Event();release=threading.Event();r.store=Mock()

@@ -152,6 +152,47 @@ test('reconcile, start and pause buttons send POST; chart remains GET', async ()
   assert.ok(calls.some(x=>x.url.includes('chart?') && x.method==='GET'));
 });
 
+test('observation window sets the full axis even when only one day has records',async()=>{
+ const now=Date.now(),day=86400000;
+ const f=pageFixture(false,{
+  '/api/trading/chart?minutes=10080':()=>({samples:[{time_ms:now-day/2,entry:2,exit:3},{time_ms:now-1000,entry:3,exit:4}]})
+ });
+ f.el('chart-window').value='10080';await f.el('chart-window').onchange();
+ const chart=f.charts.at(-1);
+ assert.equal(chart.xAxis.max-chart.xAxis.min,7*day);
+ assert.equal(chart.dataZoom[0].start,0);assert.equal(chart.dataZoom[0].end,100);
+ assert.match(f.el('chart-coverage').textContent,/最近 7 天/);
+ assert.match(f.el('chart-coverage').textContent,/前段暂无本机记录/);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+test('changing observation windows supersedes old chart requests without blocking pause',async()=>{
+ let release;
+ const f=pageFixture(false,{
+  '/api/trading/reconcile':()=>({connected:true,state:{enabled:true,groups:[],orders:[]}}),
+  '/api/trading/chart?minutes=10080':()=>new Promise(resolve=>{release=resolve;}),
+  '/api/trading/chart?minutes=60':()=>({samples:[]})
+ });
+ await f.el('trading-reconcile').onclick();
+ f.el('chart-window').value='10080';const first=f.el('chart-window').onchange();
+ const signal=f.calls.at(-1).signal;
+ f.el('chart-window').value='60';await f.el('chart-window').onchange();
+ assert.equal(signal.aborted,true);
+ assert.equal(f.charts.at(-1).xAxis.max-f.charts.at(-1).xAxis.min,3600000);
+ const count=f.charts.length;release({samples:[]});await first;
+ assert.equal(f.charts.length,count);
+ await f.el('trading-pause').onclick();
+ assert.ok(f.calls.some(c=>c.url==='/api/trading/pause'&&c.method==='POST'));
+});
+test('observation window still reloads while a trading connection check is in flight',async()=>{
+ let release;
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>new Promise(resolve=>{release=resolve;})});
+ const pending=f.el('trading-reconcile').onclick();
+ f.el('chart-window').value='43200';await f.el('chart-window').onchange();
+ assert.ok(f.calls.some(c=>c.url==='/api/trading/chart?minutes=43200'));
+ assert.equal(f.charts.at(-1).xAxis.max-f.charts.at(-1).xAxis.min,30*86400000);
+ release({state:{groups:[],orders:[]}});await pending;
+});
+
 test('entry threshold can be applied while connected without reconnecting', async () => {
   const {el, calls} = pageFixture(false, {
     '/api/trading/apply-entry': body => {

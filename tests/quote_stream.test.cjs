@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {QuoteBuffer,renderPoints,chartSeries,sameChartMarket,markGroups}=require('../quote-stream.js');
+const {QuoteBuffer,ChartBuffer,renderPoints,chartSeries,sameChartMarket,markGroups}=require('../quote-stream.js');
 const q=(t,entry=1,key='a')=>({time_ms:t,entry,exit:entry+.2,key});
 test('duplicate timestamps never rewrite history; resync retains received live points',()=>{
  const b=new QuoteBuffer();b.merge([q(100),q(102,2)]);
@@ -10,6 +10,24 @@ test('duplicate timestamps never rewrite history; resync retains received live p
 test('buffer bounds and account switch discard unrelated samples',()=>{
  const b=new QuoteBuffer(2);assert.equal(b.merge([q(1),q(2),q(3)]).length,2);
  const rows=b.merge([q(4,2,'b')],0,'b');assert.deepEqual(rows.map(x=>x.key),['b']);
+});
+test('live capacity never evicts selected archived history and total memory stays bounded',()=>{
+ const b=new ChartBuffer(3,4);
+ b.merge([q(100,7)],0,'a');
+ b.replaceHistory([q(1),q(2),q(3),q(4),q(100,99)],0,'a');
+ for(let t=101;t<120;t++)b.merge([q(t)],0,'a');
+ assert.deepEqual(b.rows.map(x=>x.time_ms),[2,3,4,100,117,118,119]);
+ assert.ok(b.rows.length<=7);
+ assert.equal(b.merge([],118,'a').length,2);
+ assert.deepEqual(b.merge([q(121,1,'b')],0,'b').map(x=>x.time_ms),[121]);
+});
+test('chart history merges without duplicates, keeps live values and expands again after narrowing',()=>{
+ const b=new ChartBuffer(3,4);
+ b.merge([q(100,7)],0,'a');
+ assert.equal(b.replaceHistory([q(1),q(100,99)],0,'a').at(-1).entry,7);
+ assert.deepEqual(b.merge([],50,'a').map(x=>x.time_ms),[100]);
+ assert.deepEqual(b.replaceHistory([q(1),q(2),q(100,99)],0,'a').map(x=>x.time_ms),[1,2,100]);
+ assert.equal(b.rows.at(-1).entry,7);
 });
 test('every new live tick is rendered; closed UTC buckets remain stable',()=>{
  const rows=Array.from({length:7000},(_,i)=>q(i*1000));
