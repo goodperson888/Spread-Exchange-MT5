@@ -5,6 +5,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from execution_evidence import reason_code, REASON_LABELS, result_evidence
 
 
 def numbers(row, fields):
@@ -28,15 +29,28 @@ def exit_parameters(row):
     return result
 
 
+def safe_reason(row, key='reason'):
+    code=row.get('reason_code')
+    if not isinstance(code,str) or code not in REASON_LABELS: code=reason_code(row.get(key))
+    return {'reason_code':code,'reason_label':REASON_LABELS[code]}
+
+
+def pause_evidence(row):
+    data={**numbers(row,'time_ms'),**safe_reason(row)}
+    for key in ('enabled_before','keep_entry'):
+        if type(row.get(key)) is bool: data[key]=row[key]
+    return data
+
+
 def build_report(state, events):
     groups=state.get('groups',[])[-200:]
     group_ids={g['id']:'G'+str(i+1) for i,g in enumerate(groups)}
     orders=[o for o in state.get('orders',[]) if o.get('group') in group_ids]
     order_ids={o['id']:'O'+str(i+1) for i,o in enumerate(orders)}
-    report={'schema_version':1,'exported_ms':int(time.time()*1000),
+    report={'schema_version':2,'exported_ms':int(time.time()*1000),
         'scope':{'group_limit':200,'event_limit':2000,'groups':len(groups),'orders':len(orders)},
         'notes':[
-            '仅含最近200组已持久化执行记录和最近2000条中关联订单的白名单事件；导出时正在执行的记录可能尚未完成。',
+            '仅含最近200组已持久化执行记录及最近2000条中的执行、启动、暂停白名单事件；导出时正在执行的记录可能尚未完成。',
             '组和订单ID已替换；不含API凭据、账户、服务器、票据、路径或原始错误文本。仍包含价格、数量和交易时间。',
             'signal_spread为组触发价差；quote_spread及quote_context为各腿调用前报价；actual_spread为双边成交均价差，非同时市场报价。',
             'actual_spread=币安成交均价×记录汇率−MT5成交均价；spread_slippage=实际−触发，平仓正偏移通常更不利。',
@@ -48,6 +62,16 @@ def build_report(state, events):
             'source=external 表示平台外部平仓回补；platform_time_ms是未经时区推算的平台原始时间，reconcile_time_ms是本机发现时间，组closed_ms为本机确认完成时间；两者差不代表程序下单耗时。',
             'estimated_rebate为用户按手续费比例预计的返佣，非实际到账；net_before_rebate不含该项，net含该项并参与退出判断。'
         ],'groups':[],'orders':[],'events':[]}
+    report['runtime']={**numbers(state,'boot_ms last_start_ms'),**safe_reason(state,'alarm')}
+    for key in ('enabled','recovery'):
+        if type(state.get(key)) is bool: report['runtime'][key]=state[key]
+    if state.get('mode') in ('live','paper'): report['runtime']['mode']=state['mode']
+    if isinstance(state.get('last_pause'),dict): report['runtime']['last_pause']=pause_evidence(state['last_pause'])
+    report['notes'].extend([
+        'runtime为本机最后已提交状态，不代表导出时实时持仓；启动/暂停历史受最近2000条事件上限约束。',
+        'initial_result保留下单直接回报，valid仅指通过本机字段校验，不代表已确认成交；reconcile.last_query及事件保留查询预算、耗时、固定错误分类和平台数字错误码，不导出原始错误或账号标识。',
+        'query_timeout_ms是适配器请求超时参数，并非严格总耗时上限；多阶段网络请求可能超出该值。1.5秒等敞口配置仍单独决定能否开第二腿。',
+    ])
     probe=state.get('mt5_history_probe')
     if isinstance(probe,dict):
         report['mt5_history_probe']=probe
@@ -61,6 +85,7 @@ def build_report(state, events):
              'first_leg':choice(g,'first_leg',('binance','mt5')),
              'second_leg':choice(g,'second_leg',('binance','mt5')),
              **numbers(g,'opened_ms closed_ms qty lots contract entry entry_signal exit exit_signal entry_threshold grid_index')}
+        if g.get('reason'): row.update(safe_reason(g))
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
         row.update(numbers(g,'exit_rules_revision'))
@@ -79,17 +104,31 @@ def build_report(state, events):
              **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage')}
         row['result']={'status':choice(result,'status',('done','pending','unknown')),
                        **numbers(result,'qty price fee swap request_ms response_received_ms fill_time_ms reconcile_time_ms platform_time_ms retcode ack_volume ack_price')}
-        code=result.get('error_code')
-        if isinstance(code,int) or code in ('DEPTH_INSUFFICIENT','DEPTH_CHECK_FAILED'):
-            row['result']['error_code']=code
+        row['result'].update(result_evidence(result))
+        if isinstance(o.get('initial_result'),dict): row['initial_result']=result_evidence(o['initial_result'])
         row['quote_context']={leg:numbers(o.get('quote_context',{}).get(leg,{}),
             'bid ask bid_qty ask_qty time_ms observed_ms source_time_ms') for leg in ('binance','mt5')}
         row['reconcile']=numbers(o.get('reconcile',{}),'attempts started_ms next_ms')
+        rec=o.get('reconcile',{})
+        if type(rec.get('exhausted')) is bool: row['reconcile']['exhausted']=rec['exhausted']
+        if isinstance(rec.get('last_query'),dict):
+            row['reconcile']['last_query']={**result_evidence(rec['last_query']),
+                                          **numbers(rec['last_query'],'query_ms query_timeout_ms')}
         report['orders'].append(row)
     kinds={'order_intent','order_result','order_reconciled','order_reconcile_retry','order_reconcile_exhausted',
-           'group_opening','group_opened','group_closed','exit_signal','entry_skipped'}
+           'group_opening','group_opened','group_closed','exit_signal','entry_skipped','close_attempt','entry_recovered'}
     for event in events:
-        data=event.get('data',{})
+        data=event.get('data') or {}
+        if event.get('kind') in ('boot','start','pause','reconciled','paper_reconciled','auto_reconciled_flat','close_requested'):
+            row={'kind':event['kind'],**numbers(event,'time'),'data':{}}
+            if event['kind']=='pause': row['data'].update(pause_evidence(data))
+            elif event['kind']=='boot': row['data'].update(safe_reason({'reason':'程序重启'}))
+            elif data.get('reason'): row['data'].update(safe_reason(data))
+            if data.get('mode') in ('live','paper'): row['data']['mode']=data['mode']
+            gid=group_ids.get(data.get('group'))
+            if gid: row['data']['group']=gid
+            report['events'].append(row)
+            continue
         if event.get('kind') in ('external_position_changed','external_close_backfilled','external_orders_resolved','recovery_flat_confirmed'):
             related=[group_ids[x] for x in data.get('groups',[]) if x in group_ids]
             if related: report['events'].append({'kind':event['kind'],**numbers(event,'time'),'data':{'groups':related}})
@@ -109,7 +148,9 @@ def build_report(state, events):
         oid=order_ids.get(data.get('id'));gid=group_ids.get(data.get('group'))
         if oid is None and gid is None: continue
         row={'kind':event['kind'],**numbers(event,'time'),
-             'data':numbers(data,'attempt query_ms signal_spread entry qty net_estimate')}
+             'data':numbers(data,'attempt query_ms query_timeout_ms signal_spread entry qty net_estimate')}
+        if isinstance(data.get('result'),dict): row['data']['result']=result_evidence(data['result'])
+        if data.get('reason'): row['data'].update(safe_reason(data))
         if oid: row['data']['order']=oid
         if gid: row['data']['group']=gid
         report['events'].append(row)

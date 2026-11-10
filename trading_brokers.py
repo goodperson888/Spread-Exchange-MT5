@@ -16,7 +16,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from liquidation_risk import mt5_risk_fields
 
 
@@ -38,9 +38,14 @@ except ImportError:  # REST fallback remains available for source deployments.
 
 
 class ApiError(Exception):
-    def __init__(self, code, message, uncertain=False):
+    def __init__(self, code, message, uncertain=False, kind=None):
         super().__init__(message)
         self.code, self.uncertain = code, uncertain
+        self.kind=kind or ('timeout' if code=='TIMEOUT' else 'network' if code=='NETWORK' else
+                           'invalid_response' if code=='INVALID_RESPONSE' else 'exchange')
+
+    def evidence(self):
+        return {'error':str(self),'error_code':self.code,'error_kind':self.kind}
 
 
 class Binance:
@@ -110,6 +115,12 @@ class Binance:
                             '3. 返回本程序等待下一次预检；仍失败时重新连接并对账。\n'
                             '若没有协议入口或签署后仍报错，请联系币安客服确认该账户的合约资格。')
             raise ApiError(code, message, exc.code >= 500 or code in (-1006, -1007)) from None
+        except (TimeoutError, URLError) as exc:
+            timed_out=isinstance(exc,TimeoutError) or isinstance(getattr(exc,'reason',None),TimeoutError)
+            raise ApiError('TIMEOUT' if timed_out else 'NETWORK',
+                           '币安请求超时或网络不可用，交易结果需要查询确认', True) from None
+        except (ValueError, TypeError):
+            raise ApiError('INVALID_RESPONSE', '币安返回数据无法解析，交易结果需要查询确认', True) from None
         except Exception:
             raise ApiError('NETWORK', '币安请求超时或网络不可用，交易结果需要查询确认', True) from None
 
@@ -302,8 +313,10 @@ class Binance:
                             'depth_available':available}
             return self.normalize(self.request('/fapi/v1/order', args, 'POST', True))
         except ApiError as exc:
-            if exc.uncertain: return {'status':'unknown','qty':0,'price':0,'error':str(exc)}
-            return {'status':'done','qty':0,'price':0,'error':str(exc)}
+            return {'status':'unknown' if exc.uncertain else 'done','qty':0,'price':0,**exc.evidence()}
+        except (ValueError, TypeError, KeyError):
+            return {'status':'unknown','qty':0,'price':0,'error':'币安成交回报无效，等待查询确认',
+                    'error_code':'INVALID_RESPONSE','error_kind':'invalid_response'}
 
     def query(self, order):
         try:
@@ -313,7 +326,10 @@ class Binance:
             return self.normalize(self.request('/fapi/v1/order',dict(symbol=order['symbol'],origClientOrderId=order['id']),signed=True,**options))
         except ApiError as exc:
             # "Not found" immediately after a timeout is not proof of rejection.
-            return {'status':'unknown','qty':0,'price':0,'error':str(exc)}
+            return {'status':'unknown','qty':0,'price':0,**exc.evidence()}
+        except (ValueError, TypeError, KeyError):
+            return {'status':'unknown','qty':0,'price':0,'error':'币安订单查询回报无效，继续核对',
+                    'error_code':'INVALID_RESPONSE','error_kind':'invalid_response'}
 
     def cancel(self, order):
         self.request('/fapi/v1/order', dict(symbol=order['symbol'],origClientOrderId=order['id']), 'DELETE', True)

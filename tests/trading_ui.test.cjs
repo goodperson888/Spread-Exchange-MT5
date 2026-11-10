@@ -691,3 +691,46 @@ test('external fills show actual platform time and source without fabricated exe
  assert.match(tables,/平台成交时间 · 后台回补/);
  assert.doesNotMatch(tables,/查询确认 8000|适配器调用|意图→本机回报/);
 });
+
+
+test('completed protective unwind stays visibly paused and requires manual start',async()=>{
+ const now=Date.now();
+ const snapshot={connected:true,capabilities:{mode:'live',live_orders:true,reconciled:true},
+  state:{enabled:false,recovery:false,boot_ms:now-10000,last_start_ms:now-5000,
+   alarm:'开仓确认窗口已结束，正在保护性平仓',
+   last_pause:{time_ms:now-3000,reason_code:'ENTRY_WINDOW_EXPIRED'},
+   groups:[{id:'g1',status:'closed',parameters:{},valuation:{remaining:{binance:0,mt5:0}}}],orders:[]}};
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ const text=f.el('trading-result').textContent;
+ assert.match(text,/自动开仓已暂停/);
+ assert.match(text,/已完成保护性处理/);
+ assert.match(text,/手动恢复/);
+ assert.doesNotMatch(text,/尚未启动自动开仓|正在保护性平仓/);
+ assert.equal(f.el('trading-toggle').disabled,false);
+ assert.equal(f.calls.filter(c=>c.url==='/api/trading/start').length,0);
+});
+
+test('fresh idle, manual pause, and resumed running remain distinct',async()=>{
+ const now=Date.now();
+ let snapshot={connected:true,capabilities:{mode:'live',reconciled:true},
+  state:{enabled:false,recovery:false,groups:[],orders:[]}};
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ assert.match(f.el('trading-result').textContent,/尚未启动自动开仓/);
+ snapshot.state.last_pause={time_ms:now,reason_code:'USER_PAUSE'};
+ await f.refresh();assert.match(f.el('trading-result').textContent,/已手动暂停新开仓/);
+ snapshot.state.enabled=true;
+ await f.refresh();assert.match(f.el('trading-result').textContent,/自动开仓运行中/);
+ assert.doesNotMatch(f.el('trading-result').textContent,/已手动暂停新开仓/);
+});
+
+
+test('unresolved attention group never claims protective handling is complete',async()=>{
+ const f=pageFixture(false,{'/api/trading/status':()=>({connected:true,
+  capabilities:{mode:'live',reconciled:false},state:{enabled:false,recovery:true,
+   alarm:'第二腿状态未知，正在保护性平仓',
+   groups:[{id:'g1',status:'attention',parameters:{}}],orders:[]}})});
+ await f.refresh();
+ assert.doesNotMatch(f.el('trading-result').textContent,/已完成保护性处理/);
+ assert.match(f.el('trading-result').textContent,/等待持仓对账/);
+ assert.equal(f.el('trading-toggle').disabled,true);
+});

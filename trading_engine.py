@@ -3,6 +3,7 @@ import copy
 import time
 import uuid
 from trading_config import pair_key
+from execution_evidence import reason_code, REASON_LABELS, result_evidence
 
 
 def stamp(): return int(time.time()*1000)
@@ -31,6 +32,8 @@ class Engine:
     # every quote tick (which can both waste REST quota and still race the
     # exchange's order index).
     RECONCILE_DELAYS_MS = (100, 300, 700, 1200)
+    QUERY_TIMEOUT_MS = 1000
+    RECENT_RECONCILE_MS = 10000
 
     def __init__(self, store, broker):
         self.store,self.broker=store,broker
@@ -40,6 +43,7 @@ class Engine:
         self._execution_timers={}
         self.state=store.load() or dict(groups=[],orders=[],last_open_ms=0,enabled=False,mode='paper',key=None,alarm='',recovery=False)
         self.state['enabled']=False
+        self.state['boot_ms']=stamp()
         for g in self.state['groups']:
             if g.get('imported'): g['management_enabled']=False
         self.state['recovery']=any(g['status']!='closed' for g in self.state['groups'])
@@ -52,13 +56,18 @@ class Engine:
 
     def pause(self, reason='已暂停新开仓；已有仓位继续管理', keep_entry=False):
         if not keep_entry: self._entry_deadlines.clear()
-        self.state['enabled']=False;self.state['alarm']=reason;self.save('pause',{'reason':reason})
+        code=reason_code(reason)
+        evidence={'time_ms':stamp(),'reason_code':code,'reason_label':REASON_LABELS[code],
+                  'enabled_before':bool(self.state.get('enabled')),'keep_entry':bool(keep_entry)}
+        self.state.update(enabled=False,alarm=reason,last_pause=evidence)
+        self.save('pause',{'reason':reason,**evidence})
 
     def start(self, c):
         if self.state['recovery']: raise ValueError('请先完成持仓对账')
         if any(g['status'] in ('opening','unwinding','closing','attention') for g in self.active()):
             raise ValueError('尚有未完成或异常交易组')
         self.state.update(enabled=True,key=pair_key(c),mode=c['execution']['mode'],alarm='')
+        self.state['last_start_ms']=stamp()
         self.save('start',{'mode':self.state['mode']})
 
     def amounts(self, g):
@@ -124,13 +133,17 @@ class Engine:
         o['dispatch_ms']=stamp()
         try: result=self.broker.submit(copy.deepcopy(o))
         except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
+        initial_evidence=result_evidence(result)
+        valid=self.result_valid(result,qty)
         # Never let an invalid result look like a completed zero-volume fill.
-        if not self.result_valid(result,qty):
+        if not valid:
             # Keep broker identity for subsequent reads even when its fill
             # fields are unusable. Never treat a malformed acknowledgement as flat.
             metadata={k:result[k] for k in ('ticket','deal','position','position_identifier','retcode','ack_volume','ack_price')
                       if isinstance(result,dict) and k in result}
-            result=dict(metadata,status='unknown',qty=0,price=0,error='成交回报无效，等待对账')
+            result=dict(metadata,status='unknown',qty=0,price=0,error='成交回报无效，等待对账',
+                        error_code='INVALID_RESPONSE',error_kind='invalid_response')
+            initial_evidence.update(error_code='INVALID_RESPONSE',error_kind='invalid_response')
         result['request_ms']=round((time.monotonic()-request_started)*1000)
         result['response_received_ms']=stamp()
         if result.get('status')=='done' and float(result.get('qty',0))>0:
@@ -139,6 +152,8 @@ class Engine:
             now_ms=stamp()
             o['reconcile']={'attempts':0,'next_ms':now_ms+100,'started_ms':now_ms,
                             'cancel_sent':False}
+        o['initial_result']={**initial_evidence,'request_ms':result['request_ms'],
+                             'response_received_ms':result['response_received_ms'],'valid':valid}
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
         return o
 
@@ -216,21 +231,29 @@ class Engine:
             reconcile['attempts']=int(reconcile.get('attempts',0))+1
             query_order=copy.deepcopy(o)
             deadline=self._entry_deadlines.get(g['id'])
+            query_order['query_timeout_ms']=self.QUERY_TIMEOUT_MS
             if deadline is not None:
                 remaining=deadline-time.monotonic()
                 if remaining>0:
-                    query_order['query_timeout_ms']=max(1,min(250,int(remaining*1000)))
+                    query_order['query_timeout_ms']=max(1,min(self.QUERY_TIMEOUT_MS,int(remaining*1000)))
+            query_budget=query_order['query_timeout_ms']
             query_started=time.monotonic()
             try:
                 r=self.broker.query(query_order)
             except Exception as exc:
                 r={'status':'unknown','qty':0,'price':0,'error':str(exc)}
-            valid=(isinstance(r,dict) and self.result_valid(r,o['requested'])
-                   and r.get('qty',0)>=o['result'].get('qty',0))
+            shape_valid=self.result_valid(r,o['requested'])
+            valid=shape_valid and r.get('qty',0)>=o['result'].get('qty',0)
             query_ms=round((time.monotonic()-query_started)*1000)
+            evidence=result_evidence(r)
+            evidence['valid']=valid
+            if not shape_valid:
+                evidence.update(error_code='INVALID_RESPONSE',error_kind='invalid_response')
+            reconcile['last_query']={**evidence,'query_ms':query_ms,'query_timeout_ms':query_budget}
             if valid:
                 merged={**o['result'],**r}
-                if r.get('status')=='done': merged.pop('error',None)
+                if r.get('status')=='done' and not r.get('error'):
+                    for key in ('error','error_code','error_kind'): merged.pop(key,None)
                 # A later query confirms the fill but cannot reconstruct the
                 # broker's original execution timestamp. Keep this separate
                 # from fill_time_ms so the UI never presents it as latency.
@@ -239,21 +262,23 @@ class Engine:
                 o['result']=merged
                 if r.get('status')=='done':
                     self.save('order_reconciled',{'id':o['id'],'result':merged,
-                              'attempt':reconcile['attempts'],'query_ms':query_ms})
+                              'attempt':reconcile['attempts'],'query_ms':query_ms,'query_timeout_ms':query_budget})
                     continue
             # Keep pending/unknown results unresolved.  In particular, a
             # transient "order not found" immediately after a timed-out POST
             # is not proof that the order was rejected.
             data={'id':o['id'],'attempt':reconcile['attempts'],
                   'query_ms':query_ms,
+                  'query_timeout_ms':query_budget,'result':evidence,
                   'status':r.get('status','unknown') if isinstance(r,dict) else 'unknown'}
             if isinstance(r,dict) and r.get('error'): data['error']=str(r['error'])
             if reconcile['attempts']>=len(self.RECONCILE_DELAYS_MS):
                 reconcile['exhausted']=True
-                # Only the fast confirmation phase is finite. Continue slow
-                # status reads so a late fill is still flattened automatically.
-                self._entry_deadlines.pop(g['id'],None)
-                reconcile['next_ms']=stamp()+2000
+                # Attempt count must never invalidate an unexpired entry
+                # deadline. Late confirmation still requires a protective
+                # unwind; recent unknown orders need prompt bounded reads.
+                recent=stamp()-reconcile['started_ms']<self.RECENT_RECONCILE_MS
+                reconcile['next_ms']=stamp()+(500 if recent else 2000)
                 self.save('order_reconcile_exhausted',data)
             else:
                 reconcile['next_ms']=max(stamp()+100,reconcile['started_ms']+
@@ -424,6 +449,9 @@ class Engine:
 
     def request_close(self, group_id=None, reason='用户平仓'):
         self._entry_deadlines.clear()
+        code=reason_code(reason)
+        self.state['last_pause']={'time_ms':stamp(),'reason_code':code,'reason_label':REASON_LABELS[code],
+                                  'enabled_before':bool(self.state.get('enabled')),'keep_entry':False}
         self.state['enabled']=False
         found=False
         for g in self.active():

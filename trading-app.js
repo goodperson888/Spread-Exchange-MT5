@@ -16,7 +16,7 @@
   const usd = x => Number.isFinite(Number(x)) ? `${Number(x)>=0?'+':''}${Number(x).toFixed(2)} USD` : '—';
   const escape = value => String(value ?? '').replace(/[&<>'"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
   const eventLabels={boot:'程序启动',start:'启动自动开仓',pause:'暂停自动开仓',entry_preflight_blocked:'开仓预检暂未通过',entry_skipped:'跳过本次开仓',group_opening:'准备开仓',group_opened:'双边开仓完成',group_closed:'交易组已结束',order_intent:'准备发送订单',order_result:'订单回报',order_reconciled:'订单对账完成',entry_recovered:'延迟回报已确认，双边开仓完成',order_reconcile_retry:'订单对账重试',order_reconcile_exhausted:'快速确认结束，继续低频对账',close_requested:'请求平仓',close_attempt:'尝试平仓',exit_signal:'触发退出条件',entry_threshold_applied:'开仓阈值已更新',reconciled:'持仓对账通过',paper_reconciled:'纸面持仓对账通过',auto_reconciled_flat:'空仓自动对账通过',costs_verified:'费用已核验',cost_verification_pending:'等待费用核验',exit_rules_updated:'已有组退出规则已修改',external_orders_resolved:'原订单成交已核对',recovery_flat_confirmed:'已确认旧组双边平仓',external_position_changed:'发现平台持仓变化，已暂停交易',external_close_backfilled:'平台外部平仓记录已回补',adoption_management:'已有仓位管理状态变更',adoption_closing_costs_checked:'接管仓位平仓费用已核验'};
-  const eventFields={request_ms:'下单回报耗时（毫秒）',query_ms:'订单查询耗时（毫秒）',threshold:'开仓阈值',reason:'原因',state:'状态',group:'交易组',id:'订单标识',leg:'平台',action:'操作',qty:'数量',price:'价格',status:'回报状态',error:'说明',result:'回报',mode:'模式',entry:'开仓价差',value:'数值',attempt:'尝试次数',net:'净收益',net_estimate:'预估净收益',signal_spread:'触发价差',binance_qty:'币安数量',mt5_lots:'MT5手数',position_mode:'持仓模式',enabled:'启用',code:'原因代码',ticket:'订单号',submitted:'已发送',raw_status:'交易所状态',error_code:'错误码',fee:'手续费',changes:'修改项',before:'原规则',after:'新规则',revision:'规则版本',target_mode:'止盈方式',take_contraction_usd:'收窄量',exit_spread_usd:'退出价差',require_net_profit:'要求最低净收益',min_net_profit_usd:'最低净收益',group_loss_enabled:'单组亏损限制启用',group_max_loss_usd:'单组最大亏损',max_hold_minutes:'从原开仓计持仓时限（分钟）'};
+  const eventFields={request_ms:'下单回报耗时（毫秒）',query_ms:'订单查询耗时（毫秒）',query_timeout_ms:'查询超时预算（毫秒）',error_kind:'错误分类',reason_code:'暂停原因代码',reason_label:'暂停原因',time_ms:'记录时间（毫秒）',enabled_before:'暂停前开仓已启用',keep_entry:'保留原确认时限',threshold:'开仓阈值',reason:'原因',state:'状态',group:'交易组',id:'订单标识',leg:'平台',action:'操作',qty:'数量',price:'价格',status:'回报状态',error:'说明',result:'回报',mode:'模式',entry:'开仓价差',value:'数值',attempt:'尝试次数',net:'净收益',net_estimate:'预估净收益',signal_spread:'触发价差',binance_qty:'币安数量',mt5_lots:'MT5手数',position_mode:'持仓模式',enabled:'启用',code:'原因代码',ticket:'订单号',submitted:'已发送',raw_status:'交易所状态',error_code:'错误码',fee:'手续费',changes:'修改项',before:'原规则',after:'新规则',revision:'规则版本',target_mode:'止盈方式',take_contraction_usd:'收窄量',exit_spread_usd:'退出价差',require_net_profit:'要求最低净收益',min_net_profit_usd:'最低净收益',group_loss_enabled:'单组亏损限制启用',group_max_loss_usd:'单组最大亏损',max_hold_minutes:'从原开仓计持仓时限（分钟）'};
   const eventValues={waiting:'等待检查',checking:'检查中',expired:'已过期',failed:'失败',ready:'通过',done:'已结束',pending:'待确认',unknown:'未知',binance:'币安',mt5:'MT5',open:'开仓',close:'平仓',paper:'纸面',live:'实盘',hedge:'双向持仓',one_way:'单向持仓',contraction:'价差收窄',absolute:'绝对退出价差'};
   function eventDetails(value,key='') {
     if(value&&typeof value==='object') return Object.entries(value).map(([k,v])=>`${eventFields[k]||k}：${eventDetails(v,k)}`).join('；');
@@ -357,24 +357,32 @@
     if(reconcileError&&reconciled&&!state.recovery&&!groups.some(g=>g.status!=='closed'&&valuationPending(g,state.orders||[]))) {
       actionError='';reconcileError=false;
     }
-    const rawAlarm=state.alarm||result.last_error;
+    const pause=state.last_pause;
+    const currentPause=pause&&Number(pause.time_ms)>=Math.max(Number(state.boot_ms)||0,Number(state.last_start_ms)||0);
+    const rawAlarm=state.alarm||result.last_error||(currentPause?pause.reason_label:'');
     // A rollback can finish after the pause alarm was written. Keep the
     // durable group reason in the history, but do not present the old
     // "正在保护性平仓" text as if an exposure were still open.
-    const staleProtectionAlarm=!protectionPending&&/正在保护性平仓/.test(String(rawAlarm||''));
+    const staleProtectionAlarm=groups.every(g=>g.status==='closed')&&/正在保护性平仓/.test(String(rawAlarm||''));
     const alarm=staleProtectionAlarm
       ? '上一笔异常已完成保护性处理，当前等待手动恢复自动开仓'
       : rawAlarm;
+    const paused=!state.enabled&&(currentPause||Boolean(state.alarm));
+    const manualPause=currentPause&&pause.reason_code==='USER_PAUSE';
+    const pausedAt=currentPause&&Number.isFinite(Number(pause.time_ms))
+      ? `（${new Date(Number(pause.time_ms)).toLocaleTimeString('zh-CN',{hour12:false})}）` : '';
     const stateText = !result.connected ? '未连接，不能开仓'
       : (!reconciled || state.recovery) ? '已连接，等待持仓对账'
       : protectionPending ? `已连接，自动开仓已暂停：${closeLabel}处理中（尚未确认双平）`
       : state.enabled ? '自动开仓运行中'+(oldManaging?' · 旧仓管理运行中':'')
+      : paused ? `已连接，${manualPause?'已手动暂停新开仓':'自动开仓已暂停'}${pausedAt}`+(oldManaging?' · 旧仓管理运行中':'')
       : oldManaging ? '旧仓管理运行中 · 新开仓未启动'
       : '已连接，尚未启动自动开仓';
     const message=result.message ? `\n${result.message}` : '';
     const next=(!result.connected ? '请先连接行情。'
       : ((!reconciled||state.recovery) ? (result.external_close_status?.message||'请先点击“持仓对账”，对账通过后才能启动自动开仓。')
       : protectionPending ? '平仓完成前不能启动自动开仓；若有成交待确认，先核对再处理已有敞口。'
+      : paused ? '已有仓位继续按规则管理。核对平台持仓和暂停原因后，点击“启动自动开仓”手动恢复；程序不会自动恢复开新仓。'
       : result.capabilities?.live_orders ? '实盘通道已连接、持仓已对账；启动时仍会检查配置和策略状态。'
       : '纸面模式不会发送真实订单。'));
     text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${message}\n${next}${result.plan?`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError));
