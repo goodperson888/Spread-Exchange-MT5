@@ -102,6 +102,35 @@ test('risk cards show both platforms and expire even when status polling stops',
   assert.equal(f.calls.length,calls);
 });
 
+test('opening margin warning keeps connection, reconciliation and close actions usable',async()=>{
+  const snapshot={connected:true,capabilities:{mode:'live',live_orders:true,reconciled:false},
+    auto_values:{mt5_margin_check:{ready:false,state:'insufficient',lots:.08,required:100,available:1,
+      message:'MT5 新开仓保证金不足；已有仓位仍可连接、对账和管理'}},
+    state:{enabled:false,recovery:true,groups:[{id:'old',status:'open',contract:100,lots:.02,parameters:{},valuation:{}}],orders:[]}};
+  const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+  assert.match(f.el('trading-mode').textContent,/已连接/);
+  assert.match(f.el('trading-result').textContent,/连接已建立/);
+  assert.match(f.el('trading-result').textContent,/先完成持仓对账/);
+  assert.match(f.el('cost-source').textContent,/剩余开仓额度.*仅限制新开仓/);
+  assert.equal(Boolean(f.el('trading-reconcile').disabled),false);
+  assert.equal(f.el('trading-close').disabled,false);
+  assert.equal(f.el('trading-toggle').disabled,true);
+  snapshot.capabilities.reconciled=true;snapshot.state.recovery=false;await f.refresh();
+  assert.match(f.el('workflow-status').textContent,/保证金受限/);
+  assert.equal(f.el('trading-toggle').disabled,false); // Click rechecks fresh funds.
+  assert.equal(f.calls.filter(x=>x.url.endsWith('/start')).length,0);
+});
+
+test('unknown opening margin shows an actionable warning without NaN balances',async()=>{
+  const f=pageFixture(false,{'/api/trading/status':()=>({connected:true,capabilities:{mode:'live',reconciled:true},
+    auto_values:{mt5_margin_check:{ready:false,state:'unavailable',message:'MT5 新开仓保证金未能核验；已有仓位仍可管理'}},
+    state:{enabled:false,groups:[],orders:[]}})});
+  await f.refresh();
+  assert.match(f.el('cost-source').textContent,/未能核验/);
+  assert.doesNotMatch(f.el('cost-source').textContent,/NaN/);
+  assert.equal(Boolean(f.el('trading-reconcile').disabled),false);
+});
+
 test('unknown risk does not render missing metrics as zero and escapes upstream text',async()=>{
   const f=pageFixture(false,{'/api/trading/reconcile':()=>({state:{groups:[],orders:[]},
     liquidation_risk:{binance:{level:'unknown',equity:null,positions:[]},

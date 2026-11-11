@@ -886,8 +886,13 @@ def worker_main():
                     data=[dict(t=int(x['time'])*1000,close=float(x['close'])) for x in rates]
                 elif cmd=='query': data=NativeMT5Fills(mt,s.name,magic).query(r['order'])
                 elif cmd=='margin':
-                    value=mt.order_calc_margin(mt.ORDER_TYPE_BUY,s.name,r['lots'],mt.symbol_info_tick(s.name).ask)
-                    if value is None: raise ValueError('无法核验 MT5 保证金')
+                    # Account/session validation above still fails normally.
+                    # An unavailable opening estimate must not strand existing
+                    # positions by making an otherwise healthy session unusable.
+                    try:
+                        value=mt.order_calc_margin(mt.ORDER_TYPE_BUY,s.name,r['lots'],mt.symbol_info_tick(s.name).ask)
+                        if not isinstance(value,(int,float)) or not math.isfinite(value): value=None
+                    except Exception: value=None
                     data=dict(required=value,available=a.margin_free)
                 elif cmd=='submit':
                     o=r['order']; opening=o['action']=='open'

@@ -244,7 +244,7 @@
     const pending=connected&&(last?.config_pending===true || typeof dirtyFields!=='undefined'&&[...dirtyFields].some(id=>!id.startsWith('risk-')));
     if(!connected)el('trading-mode').textContent=(el('exec-mode').value==='live'?'实盘配置':'纸面配置')+' · 未连接';
     const status=el('workflow-status');
-    if(status)status.textContent=!connected?'下一步：连接双边行情（首次使用先完成连接设置）':pending?'参数有变更：当前引擎继续使用连接时配置；暂停新开仓后重新连接生效。':!reconciled?'下一步：持仓对账，通过后可启动自动开仓。':state.recovery?'等待持仓对账，通过前不能启动自动开仓':blocked?'成交或平仓尚未完成，暂不能启动自动开仓':state.enabled?'自动开仓运行中 · 暂停只停止新开仓，已有仓位继续管理。':'准备就绪 · 可启动自动开仓';
+    if(status)status.textContent=!connected?'下一步：连接双边行情（首次使用先完成连接设置）':pending?'参数有变更：当前引擎继续使用连接时配置；暂停新开仓后重新连接生效。':!reconciled?'下一步：持仓对账，通过后可启动自动开仓。':state.recovery?'等待持仓对账，通过前不能启动自动开仓':blocked?'成交或平仓尚未完成，暂不能启动自动开仓':state.enabled?'自动开仓运行中 · 暂停只停止新开仓，已有仓位继续管理。':last?.auto_values?.mt5_margin_check?.ready===false?'已连接 · 新开仓保证金受限；已有仓位可管理，点击启动时重新核验':'准备就绪 · 可启动自动开仓';
     if(!busy) {
       el('trading-connect').disabled=Boolean(state.enabled||window.goldPairUiBusy);
       el('trading-toggle').disabled=Boolean(state.enabled||pauseBusy||!connected||!reconciled||state.recovery||blocked||pending||window.goldPairUiBusy);
@@ -405,7 +405,9 @@
       : paused ? '已有仓位继续按规则管理。核对平台持仓和暂停原因后，点击“启动自动开仓”手动恢复；程序不会自动恢复开新仓。'
       : result.capabilities?.live_orders ? '实盘通道已连接、持仓已对账；启动时仍会检查配置和策略状态。'
       : '纸面模式不会发送真实订单。'));
-    text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${result.plan?`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError));
+    const marginNotice=result.connected&&result.auto_values?.mt5_margin_check?.ready===false
+      ? '\n'+result.auto_values.mt5_margin_check.message+'。连接已建立；先完成持仓对账，原程序仓位按原规则管理，外部仓位按接管流程登记。启动新开仓时会重新检查。' : '';
+    text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${marginNotice}${result.plan?`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError||marginNotice));
     const auto=result.auto_values||{}, details=[];
     if(auto.fx?.value) {
       if(loaded && el('auto-fx').checked && !dirtyFields.has('usdt-fx')) el('usdt-fx').value=Number(auto.fx.value).toFixed(6);
@@ -417,13 +419,16 @@
     }
     if(auto.mt5_margin_check) {
       const m=auto.mt5_margin_check;
-      details.push(`MT5 最大总手数 ${n(m.lots)} 手保证金 ${Number(m.required).toFixed(2)} / 可用 ${Number(m.available).toFixed(2)} USD`);
+      if(m.state==='capacity_full') details.push('MT5 已达总手数上限；已有仓位继续管理');
+      else if(Number.isFinite(m.required)&&Number.isFinite(m.available))
+        details.push(`MT5 剩余开仓额度 ${n(m.lots)} 手：需 ${Number(m.required).toFixed(2)} / 可用 ${Number(m.available).toFixed(2)} USD${m.ready===false?'（仅限制新开仓）':''}`);
+      else details.push(m.message||'MT5 新开仓保证金待核验；不影响连接和持仓对账');
     }
     if(auto.binance_permission_warning) details.push(`币安权限明细读取待复核：${auto.binance_permission_warning}`);
     if(auto.binance_transport) details.push('币安行情 '+auto.binance_transport);
     if(auto.mt5_transport) details.push('MT5 '+auto.mt5_transport);
     for(const key of ['fx_warning','carry_warning']) if(auto[key]) details.push(auto[key]);
-    if(details.length) text('cost-source',details.join(' · '),Boolean(auto.fx_warning||auto.carry_warning));
+    if(details.length) text('cost-source',details.join(' · '),Boolean(auto.fx_warning||auto.carry_warning||auto.mt5_margin_check?.ready===false));
     
     el('trading-toggle').textContent='启动自动开仓';
     

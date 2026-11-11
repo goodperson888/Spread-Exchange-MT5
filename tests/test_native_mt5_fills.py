@@ -191,12 +191,12 @@ class NativeMT5FillTests(unittest.TestCase):
         self.mt.ORDER_FILLING_IOC=1;self.mt.ORDER_FILLING_FOK=0
         self.mt.ORDER_TYPE_BUY=0;self.mt.ORDER_TYPE_SELL=1
         self.mt.TRADE_ACTION_DEAL=1;self.mt.ORDER_TIME_GTC=0
-        self.mt.account_info.return_value=NS(login=123,server='TEST',trade_allowed=True,trade_expert=True)
+        self.mt.account_info.return_value=NS(login=123,server='TEST',trade_allowed=True,trade_expert=True,margin_free=1000)
         self.mt.terminal_info.return_value=NS(connected=True,trade_allowed=True,tradeapi_disabled=False)
         self.mt.symbol_info_tick.return_value=NS(ask=4000,bid=3999.9)
         self.mt.order_check.return_value=NS(retcode=0);self.mt.order_send.return_value=self.ack
         messages=[dict(command='init',settings=dict(account='123',server='TEST',symbol='XAUUSD'),magic=42),
-                  dict(command=command,order=order)]
+                  dict(command=command,order=order,**({'lots':.01} if command=='margin' else {}))]
         output=io.StringIO()
         with patch.dict(sys.modules,{'MetaTrader5':self.mt}),patch('sys.stdin',io.StringIO(
                 '\n'.join(json.dumps(x) for x in messages))),patch('sys.stdout',output):
@@ -208,6 +208,16 @@ class NativeMT5FillTests(unittest.TestCase):
         self.assertTrue(r['ok']);self.assertEqual(r['data']['qty'],1)
         self.mt.history_deals_get.assert_called_once_with(ticket=500)
         self.mt.order_send.assert_called_once()
+
+    def test_native_unavailable_margin_is_a_readable_response_without_any_trade(self):
+        for value in (None,float('nan')):
+            self.mt.order_calc_margin.return_value=value
+            r=self.run_worker(self.o,command='margin')
+            self.assertTrue(r['ok'])
+            self.assertIsNone(r['data']['required'])
+            self.assertEqual(r['data']['available'],1000)
+            self.mt.order_send.assert_not_called()
+            self.mt.order_check.assert_not_called()
 
     def test_original_zero_ack_and_precheck_survive_history_recovery(self):
         self.ack.retcode_external=7;self.ack.bid=3999.9;self.ack.ask=4000

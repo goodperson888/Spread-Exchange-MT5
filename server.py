@@ -219,18 +219,10 @@ class TradingRuntime:
                             fees = new_binance.commission_rate(config['symbol'])
                             config['costs']['binance_taker_percent'] = fees['taker']
                             meta['binance_fee'] = {**fees, 'source':'Binance account commission rate'}
-                        # Check the configured worst-case MT5 exposure, not just
-                        # the first group.  This covers repeated entries and
-                        # grid additions before any live order is sent.
-                        max_live_lots = float(config['strategy']['max_total_lots'])
-                        margin = new_terminal.call('margin', lots=max_live_lots)
-                        meta['mt5_margin_check'] = {
-                            'lots': max_live_lots,
-                            'required': float(margin['required']),
-                            'available': float(margin['available']),
-                        }
-                        if margin['required'] > margin['available']:
-                            raise ValueError(f'按最大总持仓 {max_live_lots:g} 手核算，MT5 可用保证金不足，不能启动')
+                        # Opening capacity must not prevent connecting to recover,
+                        # reconcile, adopt, or close positions already on-platform.
+                        # Recheck with fresh funds when the user starts new entries.
+                        meta['mt5_margin_check'] = self._mt5_entry_margin_check(config,new_terminal)
 
                 new_stream = BinanceBookTicker(config['symbol'], production=True,
                                                proxy_url=config['binance'].get('proxy_url', '')).start()
@@ -288,6 +280,9 @@ class TradingRuntime:
             self._last_rest_market = market
             self._last_rest_market_at = time.monotonic()
             self.reconciled = mode == 'paper'
+            self.engine.state.pop('entry_margin',None)
+            if meta.get('mt5_margin_check'):
+                self.engine.state['entry_margin']={**meta['mt5_margin_check'],'phase':'connect'}
             if mode == 'live':
                 self.engine.pause('实盘连接已建立，启动前必须完成持仓对账')
             self.store.sample(self.quote)
@@ -892,6 +887,46 @@ class TradingRuntime:
             incoming['costs']['binance_taker_percent']=effective['costs']['binance_taker_percent']
         return incoming != effective
 
+    def _mt5_entry_margin_check(self, config, terminal):
+        """Read-only opening budget; never a connection or closing gate.
+
+        Match the engine's total-lots cap. Existing journaled/adopted groups
+        already occupy that capacity and must not be charged for it twice.
+        Unadopted platform positions do not grant any additional strategy room.
+        """
+        report={'ready':False,'state':'unavailable','checked_ms':now_ms(),
+                'message':'MT5 新开仓保证金未能核验；已有仓位仍可连接、对账和管理'}
+        try:
+            limit=float(config['strategy']['max_total_lots'])
+            amounts=[float(g['lots']) for g in self.engine.active()]
+            if (not math.isfinite(limit) or limit<=0 or
+                    any(not math.isfinite(n) or n<0 for n in amounts)):
+                return report
+            managed=sum(amounts)
+            lots=max(0.,limit-managed)
+            report.update(lots=lots,total_lots=limit,managed_lots=managed)
+            if lots<=1e-9:
+                report.update(lots=0.,required=0.,ready=True,state='capacity_full',
+                              message='已达到总手数上限；已有仓位继续管理，不增加开仓额度')
+                return report
+        except (ValueError,TypeError,KeyError,OverflowError):
+            return report
+        # Transport and account-identity errors remain connection failures.
+        # A successful native reply with an unavailable margin is advisory.
+        margin=terminal.call('margin',lots=lots)
+        try:
+            if not isinstance(margin,dict): return report
+            if any(isinstance(margin.get(k),bool) for k in ('required','available')): return report
+            required,available=float(margin['required']),float(margin['available'])
+            if not math.isfinite(required) or required<=0 or not math.isfinite(available): return report
+            ready=required<=available
+            report.update(required=required,available=available,ready=ready,state='ready' if ready else 'insufficient',
+                message=(f'按剩余开仓额度 {lots:g} 手核算，MT5 保证金检查通过' if ready else
+                         f'MT5 新开仓保证金不足：剩余额度 {lots:g} 手需 {required:.2f} USD，可用 {available:.2f} USD；已有仓位仍可连接、对账和管理'))
+        except (ValueError,TypeError,KeyError,OverflowError):
+            pass
+        return report
+
     def start(self, current_config=None):
         with self.lock:
             if not self.connected:
@@ -908,6 +943,12 @@ class TradingRuntime:
                     self.reconciled=False
                     self.engine.pause('币安持仓模式在连接后发生变化，请重新持仓对账')
                     raise ValueError('币安持仓模式在连接后发生变化，请重新连接并完成持仓对账')
+                margin=self._mt5_entry_margin_check(self.config,self.terminal)
+                self.market_meta['mt5_margin_check']=margin
+                self.engine.state['entry_margin']={**margin,'phase':'start'}
+                if not margin['ready']:
+                    self.engine.pause(margin['message'])
+                    raise ValueError(margin['message'])
             self.engine.start(self.config)
             self.external_close_status = None
             return self.snapshot()

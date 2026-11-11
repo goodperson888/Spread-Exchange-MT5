@@ -3,6 +3,10 @@ name: Build Windows package
 on:
   workflow_dispatch:
 
+concurrency:
+  group: windows-package-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -42,12 +46,13 @@ jobs:
           gh release create "$tag" dist/GoldPairLocal-Windows.zip \
             --title "GoldPairLocal Windows build ${GITHUB_RUN_NUMBER}" \
             --notes "Built from ${GITHUB_SHA}. Test with a logged-in MT5 terminal before live use." \
-            --target "${GITHUB_SHA}"
+            --target "${GITHUB_SHA}" --latest
           link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${tag}/GoldPairLocal-Windows.zip"
+          latest_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/latest/download/GoldPairLocal-Windows.zip"
           {
             echo "## Windows package"
             echo
-            echo "[Download GoldPairLocal-Windows.zip](${link})"
+            echo "[Download latest Windows package (stable link)](${latest_link})"
             echo
-            echo "This link is the release asset for this build."
+            echo "[Download this exact build](${link})"
           } >> "$GITHUB_STEP_SUMMARY"

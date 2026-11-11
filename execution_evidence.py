@@ -18,6 +18,7 @@ REASON_LABELS = {
     'RISK_LIMIT': '策略亏损上限触发',
     'RECOVERED_PAUSED': '异常或延迟回报已确认，新开仓仍暂停',
     'PERMISSION_DENIED': '平台交易权限不可用',
+    'ENTRY_MARGIN': '新开仓保证金不足或未能核验；已有仓位仍可管理',
     'MANUAL_CLOSE': '用户请求平仓，新开仓暂停',
     'OTHER': '其他原因；原始文本未导出',
 }
@@ -40,6 +41,7 @@ def reason_code(reason):
         ('减仓重试达到上限', 'CLOSE_RETRIES_EXHAUSTED'),
         ('亏损上限', 'RISK_LIMIT'),
         ('自动交易权限已关闭', 'PERMISSION_DENIED'),
+        ('新开仓保证金', 'ENTRY_MARGIN'),
         ('外部平仓记录已回补', 'RECOVERED_PAUSED'),
         ('新开仓仍暂停', 'RECOVERED_PAUSED'),
         ('持仓变化', 'POSITION_MISMATCH'),

@@ -67,6 +67,13 @@ def build_report(state, events):
         if type(state.get(key)) is bool: report['runtime'][key]=state[key]
     if state.get('mode') in ('live','paper'): report['runtime']['mode']=state['mode']
     if isinstance(state.get('last_pause'),dict): report['runtime']['last_pause']=pause_evidence(state['last_pause'])
+    margin=state.get('entry_margin')
+    if isinstance(margin,dict):
+        clean=numbers(margin,'checked_ms lots total_lots managed_lots required available')
+        if type(margin.get('ready')) is bool: clean['ready']=margin['ready']
+        if margin.get('state') in ('ready','insufficient','unavailable','capacity_full'): clean['state']=margin['state']
+        if margin.get('phase') in ('connect','start'): clean['phase']=margin['phase']
+        report['runtime']['entry_margin']=clean
     report['notes'].extend([
         'runtime为本机最后已提交状态，不代表导出时实时持仓；启动/暂停历史受最近2000条事件上限约束。',
         'initial_result保留下单直接回报，valid仅指通过本机字段校验，不代表已确认成交；reconcile.last_query及事件保留查询预算、耗时、固定错误分类和平台数字错误码，不导出原始错误或账号标识。',
