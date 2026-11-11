@@ -84,10 +84,93 @@ class ExternalCloseTests(unittest.TestCase):
 
     def test_matching_positions_do_not_fetch_histories_or_pause_trading(self):
         self.client.positions.return_value=[self.b_position()];self.mt5['positions']=[self.mt_position()]
+        for order in self.e.state['orders']: order['result']['fee_verified']=True
         self.monitor.step()
         self.client.trade_history.assert_not_called();self.client.query.assert_not_called()
         self.assertTrue(self.e.state['enabled']);self.assertFalse(self.e.state['recovery'])
         self.assertEqual(self.terminal.call.call_args.args,('snapshot',))
+
+    def test_stable_opening_fees_are_verified_read_only_one_order_per_pass(self):
+        self.client.positions.return_value=[self.b_position()];self.mt5['positions']=[self.mt_position()]
+        self.client.trades.return_value=[self.fills[0]]
+        self.terminal.call.side_effect=lambda command,**kwargs:copy.deepcopy(
+            self.mt5 if command=='snapshot' else {**self.mo['result'],'fee':.12})
+        self.monitor.step()
+        self.assertTrue(self.bo['result']['fee_verified']);self.assertFalse(self.mo['result'].get('fee_verified',False))
+        self.monitor.step()
+        self.assertTrue(self.mo['result']['fee_verified']);self.assertTrue(self.g['valuation']['fees_verified'])
+        self.assertAlmostEqual(self.g['valuation']['fees'],.22)
+        self.assertTrue(self.e.state['enabled']);self.assertFalse(self.e.state['recovery'])
+        self.assertTrue(self.store.load()['orders'][0]['result']['fee_verified'])
+        self.assertFalse(self.g.get('costs_verified',False))  # Exit and funding remain separate.
+        self.broker.submit.assert_not_called();self.client.submit.assert_not_called();self.client.cancel.assert_not_called()
+        self.r.terminal=Mock();self.r.binance=Mock()
+        self.monitor.step();self.r.terminal.call.assert_not_called();self.r.binance.trades.assert_not_called()
+        self.client.trades.assert_called_once()
+
+    def test_fee_history_failure_keeps_estimate_and_does_not_pause_or_retry_each_scan(self):
+        self.client.positions.return_value=[self.b_position()];self.mt5['positions']=[self.mt_position()]
+        self.mo['result']['fee_verified']=True
+        self.client.trades.return_value=[]
+        previous=copy.deepcopy(self.bo['result'])
+        self.monitor.step();self.monitor.step()
+        self.assertEqual(self.bo['result'],previous);self.client.trades.assert_called_once()
+        self.assertTrue(self.e.state['enabled']);self.assertFalse(self.e.state['recovery'])
+
+    def test_fee_result_discarded_if_close_requested_during_network_read(self):
+        self.client.positions.return_value=[self.b_position()];self.mt5['positions']=[self.mt_position()]
+        def trades(*args):
+            self.e.request_close(self.g['id'])
+            return [self.fills[0]]
+        self.client.trades.side_effect=trades
+        self.monitor.step()
+        self.assertEqual(self.g['status'],'closing')
+        self.assertNotIn('fee_verified',self.bo['result'])
+        self.broker.submit.assert_not_called()
+
+    def test_fee_read_does_not_hold_the_execution_lock(self):
+        self.client.positions.return_value=[self.b_position()];self.mt5['positions']=[self.mt_position()]
+        acquired=[]
+        def trades(*args):
+            def probe():
+                ok=self.r.lock.acquire(timeout=.1);acquired.append(ok)
+                if ok: self.r.lock.release()
+            thread=threading.Thread(target=probe);thread.start();thread.join()
+            return [self.fills[0]]
+        self.client.trades.side_effect=trades
+        self.monitor.step();self.assertEqual(acquired,[True])
+
+    def test_fee_publish_never_waits_for_execution_lock(self):
+        token=fingerprint(self.e.state);held=threading.Event();release=threading.Event()
+        def holder():
+            with self.r.lock: held.set();release.wait(1)
+        thread=threading.Thread(target=holder);thread.start();held.wait(1)
+        try: self.assertFalse(self.r._opening_fee_publish(self.monitor,token,self.bo['id'],.1))
+        finally: release.set();thread.join()
+        self.assertNotIn('fee_verified',self.bo['result'])
+
+    def test_verified_opening_costs_update_the_net_profit_exit_decision(self):
+        self.g['costs']['binance_taker_percent']=.05
+        self.g['parameters'].update(require_net_profit=True,min_net_profit_usd=0,exit_mode='group')
+        q=quote(self.c,bid=4302.6,ask=4302.7)
+        self.r.quote=q
+        self.e.tick(self.c,self.plan,q)
+        self.assertEqual(self.g['status'],'open');self.assertLess(self.g['valuation']['net'],0)
+        self.client.positions.return_value=[self.b_position()];self.mt5['positions']=[self.mt_position()]
+        self.client.trades.return_value=[self.fills[0]]
+        self.terminal.call.side_effect=lambda command,**kwargs:copy.deepcopy(
+            self.mt5 if command=='snapshot' else {**self.mo['result'],'fee':.12})
+        self.monitor.step();self.monitor.step()
+        self.assertGreater(self.g['valuation']['net'],0)
+        self.broker.submit.assert_not_called()  # Observer only updated fees.
+        self.e.tick(self.c,self.plan,q)
+        self.assertEqual(self.g['status'],'closed')
+
+    def test_failed_fee_commit_restores_previous_values(self):
+        previous=copy.deepcopy(self.bo['result']);valuation=copy.deepcopy(self.g.get('valuation'))
+        with patch.object(self.e,'save',side_effect=OSError('disk unavailable')):
+            self.assertFalse(self.r._opening_fee_publish(self.monitor,fingerprint(self.e.state),self.bo['id'],.1))
+        self.assertEqual(self.bo['result'],previous);self.assertEqual(self.g.get('valuation'),valuation)
 
     def test_hedge_short_manual_close_and_split_fills_preserve_actual_price_and_fee(self):
         self.client.refresh_position_mode.return_value='hedge'

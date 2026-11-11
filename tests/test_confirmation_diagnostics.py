@@ -153,6 +153,52 @@ class ConfirmationTests(unittest.TestCase):
         self.assertEqual(len(self.b.submitted),1)
 
 
+class FilledPriceConfirmationTests(unittest.TestCase):
+    def setUp(self):
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+        self.store=Store(Path(temp.name)/'state.db');self.addCleanup(self.store.close)
+        self.clock=Clock();self.c=config();self.c['strategy']['max_unhedged_ms']=1500
+        self.p=dict(lots=.02,qty=2,contract=100)
+        self.addCleanup(patch.stopall)
+        patch('trading_engine.time.monotonic',lambda:self.clock.now).start()
+        patch('trading_engine.stamp',self.clock.wall).start()
+        self.b=DelayedBroker(self.clock)
+        def submit(order):
+            self.b.submitted.append(copy.deepcopy(order))
+            if order['leg']=='binance' and order['action']=='open':
+                self.clock.advance(.375)
+                return dict(status='done',qty=order['requested'],price=0,ticket='500',raw_status='FILLED')
+            self.clock.advance(.328)
+            return PaperBroker.submit(self.b,order)
+        self.b.submit=submit
+        self.e=Engine(self.store,self.b);self.e.start(self.c)
+
+    def test_one_bounded_read_confirms_filled_price_before_pausing(self):
+        self.e.tick(self.c,self.p,quote(self.c))
+        self.assertEqual(self.e.active()[0]['status'],'open')
+        self.assertTrue(self.e.state['enabled'])
+        self.assertEqual(self.b.budgets,[1000])
+        self.assertEqual([(o['leg'],o['action']) for o in self.b.submitted],[('binance','open'),('mt5','open')])
+        self.assertFalse(any(e['kind']=='pause' for e in self.store.events(30)))
+
+    def test_failed_confirmation_still_pauses_without_hedging_or_resubmitting(self):
+        self.b.unknown=True
+        self.e.tick(self.c,self.p,quote(self.c))
+        self.assertFalse(self.e.state['enabled']);self.assertEqual(self.e.active()[0]['status'],'opening')
+        self.assertEqual(len(self.b.submitted),1)
+        self.assertEqual(self.e.state['last_pause']['reason_code'],'ORDER_UNCONFIRMED')
+
+    def test_confirmation_past_original_deadline_never_opens_second_leg(self):
+        def query(order):
+            self.clock.advance(1.2)
+            return dict(status='done',qty=2,price=4306,ticket='500')
+        self.b.query=query
+        self.e.tick(self.c,self.p,quote(self.c))
+        self.assertFalse(self.e.state['enabled'])
+        self.assertFalse(any(o['leg']=='mt5' and o['action']=='open' for o in self.b.submitted))
+        self.assertEqual(sum(o['leg']=='binance' and o['action']=='open' for o in self.b.submitted),1)
+
+
 class EvidenceTests(unittest.TestCase):
     def test_confirmation_filters_private_nested_fields_and_keeps_first_failure(self):
         secret='PRIVATE-DO-NOT-EXPORT'

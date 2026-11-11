@@ -337,6 +337,34 @@ class TradingRuntime:
             return state,copy.deepcopy(self.config),external_closes.fingerprint(state)
         finally: self.lock.release()
 
+    def _opening_fee_publish(self, monitor, token, order_id, fee):
+        if not self.lock.acquire(blocking=False): return False
+        try:
+            if (self.stop_event.is_set() or monitor.stopped.is_set() or not self.connected
+                    or monitor is not getattr(self,'external_monitor',None)
+                    or self.config['execution']['mode']!='live'
+                    or token!=external_closes.fingerprint(self.engine.state)
+                    or not isinstance(fee,(int,float)) or isinstance(fee,bool) or not math.isfinite(fee)):
+                return False
+            active=self.engine.active()
+            if any(g['status']!='open' or g.get('external_attention') or self.engine.uncertain(g) for g in active): return False
+            order=next((o for o in self.engine.state['orders'] if o['id']==order_id),None)
+            group=next((g for g in active if order and g['id']==order['group']),None)
+            if (not group or group.get('imported') or group.get('key')!=pair_key(self.config)
+                    or order['action']!='open' or order['result'].get('fee_verified')): return False
+            previous=copy.deepcopy(order['result']);valuation=copy.deepcopy(group.get('valuation'))
+            try:
+                order['result'].update(fee=fee,fee_verified=True,fee_verified_ms=now_ms())
+                group['valuation']=self.engine.valuation(group,self.quote)
+                self.engine.save('opening_fee_verified',{'group':group['id'],'id':order_id,'leg':order['leg'],'fee':fee})
+            except Exception:
+                order['result']=previous
+                if valuation is None: group.pop('valuation',None)
+                else: group['valuation']=valuation
+                return False
+            return True
+        finally: self.lock.release()
+
     def _external_publish(self, monitor, token, phase, proposals, errors, mt5_snapshot=None, history_probe=None):
         if not self.lock.acquire(blocking=False): return False
         try:
@@ -785,6 +813,7 @@ class TradingRuntime:
                 # must not partially overwrite already known commissions.
                 for order_id, fee in fees.items():
                     by_id[order_id]['result']['fee'] = fee
+                    by_id[order_id]['result']['fee_verified'] = True
                 group['mt5_swap_usd'] = mt_swap
                 group['binance_funding_usd'] = funding * group['costs']['usdt_usd']
                 group['carry_usd'] = group['mt5_swap_usd'] + group['binance_funding_usd']

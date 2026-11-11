@@ -10,6 +10,7 @@ import threading
 import time
 
 from trading_engine import Engine
+import opening_costs
 
 
 def number(value):
@@ -283,6 +284,7 @@ class ExternalCloseMonitor:
         self.terminal = None; self.stopped = threading.Event()
         self.wake_event=threading.Event();self.retry_requested=threading.Event()
         self.history_token = None; self.history_retry_at = 0.; self.history_attempts = 0
+        self.fee_retry_at = {}
         if start: self.start()
 
     def start(self):
@@ -296,6 +298,26 @@ class ExternalCloseMonitor:
 
     def wake(self):
         self.retry_requested.set();self.wake_event.set()
+
+    def verify_opening_fee(self, state, config, token):
+        # One order per stable observation. History/network calls use only
+        # this observer's clients, never the trading terminal or runtime lock.
+        if (self.stopped.is_set() or any(g.get('status')!='open' or g.get('imported')
+                or g.get('external_attention') for g in state['groups'] if g.get('status')!='closed')): return
+        pending=[o for o in state['orders'] if o['action']=='open' and o['result'].get('status')=='done'
+                 and o['result'].get('qty',0)>0 and not o['result'].get('fee_verified')]
+        self.fee_retry_at={k:v for k,v in self.fee_retry_at.items() if any(o['id']==k for o in pending)}
+        for order in pending:
+            if time.monotonic()<self.fee_retry_at.get(order['id'],0): continue
+            self.fee_retry_at[order['id']]=time.monotonic()+30
+            try:
+                fee=opening_costs.verify(order,self.client,self.terminal)
+                if not self.stopped.is_set(): self.runtime._opening_fee_publish(self,token,order['id'],fee)
+            except Exception:
+                # Fees stay estimated. A history outage must not pause trading,
+                # claim a zero commission, or enter position recovery.
+                pass
+            break
 
     def step(self):
         capture = self.runtime._external_capture(self)
@@ -322,7 +344,8 @@ class ExternalCloseMonitor:
             positions = self.client.positions(config['symbol']); orders = self.client.open_orders(config['symbol'])
             mt5 = self.terminal.call('snapshot')
             if not differences(state,config,mode,positions,mt5,orders):
-                self.runtime._external_publish(self,token,'checked',[],[])
+                if self.runtime._external_publish(self,token,'checked',[],[]):
+                    self.verify_opening_fee(state,config,token)
                 return
             if not self.runtime._external_publish(self,token,'detected',[],[]): return
             if self.history_token!=token:

@@ -235,6 +235,11 @@ class NativeMT5FillTests(unittest.TestCase):
         self.assertEqual(r['confirmation']['stage'],'confirmed')
         self.mt.order_send.assert_not_called()
 
+    def test_invalid_native_commission_is_not_marked_verified(self):
+        self.d.commission=float('nan')
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual(r['status'],'unknown');self.assertFalse(r.get('fee_verified',False))
+
     def test_actual_worker_resolves_close_ticket_by_exact_opening_identity(self):
         self.ack.volume=.01;self.ack.price=3999.9
         o={**self.o,'id':'gptest-close','action':'close','position':None,'opening_id':self.o['id'],

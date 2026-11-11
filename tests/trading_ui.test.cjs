@@ -665,6 +665,29 @@ test('fees label estimates, platform-verified costs and paper results accurately
  }
 });
 
+test('opening fee verification is distinct from closing estimates and cumulative historical fees',async()=>{
+ const snapshot=editableSnapshot();const g=snapshot.state.groups[0];
+ g.mode='live';g.valuation={gross:1,net:-1,fees:1.66,fees_verified:true,costs_verified:false,
+  estimated_exit_fee:1.62,estimated_exit_fee_binance:1.62,remaining:{binance:1,mt5:1}};
+ snapshot.state.groups.push({id:'closed-history',status:'closed',mode:'live',parameters:{},
+  valuation:{fees:3.28,costs_verified:true,remaining:{binance:0,mt5:0}}});
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});await f.el('trading-reconcile').onclick();
+ assert.match(f.el('groups').innerHTML,/已核验成交手续费 -1.66 USD/);
+ assert.match(f.el('groups').innerHTML,/预计平仓费 -1.62 USD/);
+ assert.match(f.el('pnl-stats').innerHTML,/累计成交手续费（已核验）<\/span><strong>-4.94 USD/);
+ assert.match(f.el('pnl-stats').innerHTML,/当前持仓预计平仓费<\/span><strong>-1.62 USD/);
+});
+
+test('recovered fill explicitly says positions are managed while new entries stay paused',async()=>{
+ const now=Date.now();const snapshot=editableSnapshot();
+ snapshot.state.enabled=false;snapshot.state.recovery=false;snapshot.state.boot_ms=now-10000;
+ snapshot.state.last_pause={time_ms:now,reason_code:'ORDER_UNCONFIRMED'};
+ snapshot.state.alarm='双边开仓已确认；新开仓仍暂停，核对后可手动启动';
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot});await f.el('trading-reconcile').onclick();
+ assert.match(f.el('trading-result').textContent,/已有仓位继续按退出规则管理/);
+ assert.equal(f.calls.filter(c=>c.url==='/api/trading/start').length,0);
+});
+
 test('background external-close checks are distinguished from complete reconciliation and expire',async()=>{
  const snapshot=monitoredSnapshot();
  snapshot.state.groups=[{id:'external',status:'attention',external_attention:true,parameters:{},valuation:{remaining:{binance:1,mt5:0}}}];

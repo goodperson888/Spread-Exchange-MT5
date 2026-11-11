@@ -91,6 +91,7 @@ def result_evidence(result):
     if not isinstance(result,dict): return {'error_kind':'invalid_response'}
     data={}
     if type(result.get('valid')) is bool: data['valid']=result['valid']
+    if type(result.get('fee_verified')) is bool: data['fee_verified']=result['fee_verified']
     for key in ('ticket','deal','position','position_identifier'):
         if key in result: data['has_'+key]=result[key] not in (None,'',0,'0')
         elif type(result.get('has_'+key)) is bool: data['has_'+key]=result['has_'+key]

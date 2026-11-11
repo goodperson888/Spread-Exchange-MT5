@@ -518,6 +518,9 @@ class NativeMT5Fills:
         if any(not math.isfinite(d.volume) or d.volume <= 0 or not math.isfinite(d.price)
                or d.price <= 0 for d in rows):
             return dict(status='unknown', qty=0, price=0)
+        if any(not isinstance(v,(int,float)) or isinstance(v,bool) or not math.isfinite(v)
+               for d in rows for v in (d.commission,d.fee,d.swap)):
+            return dict(status='unknown',qty=0,price=0)
         lots = sum(d.volume for d in rows)
         position_id = str(rows[0].position_id)
         current = [p for p in positions if str(p.identifier) == position_id]
@@ -525,7 +528,7 @@ class NativeMT5Fills:
         data = dict(status='done', qty=lots*self.mt.symbol_info(self.symbol).trade_contract_size,
                     price=sum(d.volume*d.price for d in rows)/lots, ticket=str(rows[0].order),
                     position_identifier=position_id,
-                    fee=-sum(d.commission+d.fee for d in rows), swap=sum(d.swap for d in rows))
+                    fee=-sum(d.commission+d.fee for d in rows), fee_verified=True, swap=sum(d.swap for d in rows))
         if position: data['position'] = position
         return data
 

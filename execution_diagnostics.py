@@ -104,7 +104,7 @@ def build_report(state, events):
              'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
              **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage')}
         row['result']={'status':choice(result,'status',('done','pending','unknown')),
-                       **numbers(result,'qty price fee swap request_ms response_received_ms fill_time_ms reconcile_time_ms platform_time_ms retcode ack_volume ack_price')}
+                       **numbers(result,'qty price fee fee_verified_ms swap request_ms response_received_ms fill_time_ms reconcile_time_ms platform_time_ms retcode ack_volume ack_price')}
         row['result'].update(result_evidence(result))
         if isinstance(o.get('initial_result'),dict): row['initial_result']=result_evidence(o['initial_result'])
         row['quote_context']={leg:numbers(o.get('quote_context',{}).get(leg,{}),
@@ -121,7 +121,7 @@ def build_report(state, events):
                                                         **numbers(first,'time_ms query_ms query_timeout_ms')}
         report['orders'].append(row)
     kinds={'order_intent','order_result','order_reconciled','order_reconcile_retry','order_reconcile_exhausted',
-           'group_opening','group_opened','group_closed','exit_signal','entry_skipped','close_attempt','entry_recovered'}
+           'group_opening','group_opened','group_closed','exit_signal','entry_skipped','close_attempt','entry_recovered','opening_fee_verified'}
     for event in events:
         data=event.get('data') or {}
         if event.get('kind') in ('boot','start','pause','reconciled','paper_reconciled','auto_reconciled_flat','close_requested'):
@@ -153,7 +153,7 @@ def build_report(state, events):
         oid=order_ids.get(data.get('id'));gid=group_ids.get(data.get('group'))
         if oid is None and gid is None: continue
         row={'kind':event['kind'],**numbers(event,'time'),
-             'data':numbers(data,'attempt query_ms query_timeout_ms signal_spread entry qty net_estimate')}
+             'data':numbers(data,'attempt query_ms query_timeout_ms signal_spread entry qty net_estimate fee')}
         if isinstance(data.get('result'),dict): row['data']['result']=result_evidence(data['result'])
         if data.get('reason'): row['data'].update(safe_reason(data))
         if oid: row['data']['order']=oid

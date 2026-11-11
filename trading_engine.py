@@ -310,7 +310,7 @@ class Engine:
 
     def valuation(self, g, q):
         fx=q.get('usdt_usd',g['costs']['usdt_usd']);c=g['costs'];gross=0;fees=0
-        fee_base=dict(binance=0.,mt5=0.)
+        fee_base=dict(binance=0.,mt5=0.);fee_flags=[]
         owned=self.amounts(g)
         for o in self.state['orders']:
             if o['group']!=g['id']: continue
@@ -321,6 +321,7 @@ class Engine:
             fee=r.get('fee', qty*price*c['binance_taker_percent']/100 if o['leg']=='binance' else qty/g['contract']*c['mt5_commission_per_lot_side'])*(order_fx if o['leg']=='binance' else 1)
             fees+=fee
             fee_base[o['leg']]+=max(0,fee)
+            if qty>0: fee_flags.append(r.get('fee_verified') is True)
         gross-=owned['binance']*q['binance']['ask']*fx
         gross+=owned['mt5']*q['mt5']['bid']
         exit_fee_binance=owned['binance']*q['binance']['ask']*fx*c['binance_taker_percent']/100
@@ -354,7 +355,9 @@ class Engine:
                     estimated_rebate_binance=round(rebate_binance,8),estimated_rebate_mt5=round(rebate_mt5,8),
                     rebate_fee_base_binance=round(fee_base['binance'],8),rebate_fee_base_mt5=round(fee_base['mt5'],8),
                     net=round(before_rebate+rebate,8),remaining=owned,
-                    costs_verified=verified,estimated=not flat or rebate>0 or (g['mode']!='paper' and not verified))
+                    costs_verified=verified,
+                    fees_verified=verified or (g['mode']=='live' and not g.get('imported') and bool(fee_flags) and all(fee_flags)),
+                    estimated=not flat or rebate>0 or (g['mode']!='paper' and not verified))
 
     def _finish_open(self, c, p, g, q, threshold=None):
         """Continue the second leg after the first leg is confirmed.
@@ -461,6 +464,18 @@ class Engine:
             self._entry_deadlines.pop(g['id'],None)
             self._execution_timers.pop((g['id'],'open'),None)
             return
+        initial=first.get('initial_result',{})
+        if (result.get('status')!='done' and first_leg=='binance' and self.state['enabled']
+                and initial.get('raw_status')=='FILLED' and initial.get('status')=='done'
+                and initial.get('valid') is False and result.get('ticket')
+                and initial.get('qty')==p['qty'] and initial.get('price')==0
+                and time.monotonic()<self._entry_deadlines[g['id']]):
+            # A terminal FILLED acknowledgement without a price is incomplete,
+            # not permission to hedge. Try one read within the original entry
+            # budget before pausing; never re-arm an already paused engine.
+            first['reconcile']['next_ms']=stamp()
+            if not self.resolve(g): return
+            result=first['result']
         if result.get('status')!='done':
             self.pause(f'{"币安" if first_leg=="binance" else "MT5"} 开仓状态未知，进入分层对账',keep_entry=True);return
         self._finish_open(c,p,g,q,threshold)
