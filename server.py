@@ -27,7 +27,7 @@ from mt5_paper import inspect_paper_terminal
 from paper_engine import default_state, step as paper_step
 from trading_brokers import Binance, BinanceBookTicker, Terminal, LiveBroker, PaperBroker
 from trading_config import validate as validate_trading, plan as executable_plan, pair_key
-from trading_engine import Engine
+from trading_engine import Engine, valid_group_quote
 from trading_store import Store
 from execution_diagnostics import export_report
 import position_adoption
@@ -544,8 +544,25 @@ class TradingRuntime:
                         binary='/GoldPairQuotes.ex5' if (ROOT/'mt5/GoldPairQuotes.ex5').exists() else None)
 
     def _execution_quote(self):
-        """Use the latest push tick between legs, falling back to a fresh native read."""
+        """Prefer a very recent background pair before synchronous quote reads."""
         c=self.config
+        if getattr(self,'pump',None):
+            try:
+                _,_,error=self.pump.read()
+                if not error:
+                    cached=self._cached_close_quote()
+                    # This fast path is stricter than the normal quote-age gate.
+                    # A cache read never makes an old tick fresh or extends entry's
+                    # original exposure deadline; stale data uses the existing read.
+                    limits={**c['strategy'],'max_quote_age_ms':min(250,c['strategy']['max_quote_age_ms'])}
+                    checked=now_ms()
+                    if (valid_group_quote(cached,pair_key(c),limits,now=checked) and
+                            all(int(cached[leg].get('observed_ms',cached[leg].get('time_ms',0)))<=checked for leg in ('binance','mt5'))):
+                        return cached
+            except (KeyError,TypeError,ValueError,OverflowError):
+                # A malformed/missing cached sample is never a reason to trust
+                # it or skip the original native quote validation path.
+                pass
         mt5=self.push_bridge.quote(c['mt5'], c['strategy']['max_quote_age_ms']) if self.push_bridge else None
         if c['mt5']['adapter']=='paper': mt5=None
         if mt5 is None:
@@ -555,7 +572,7 @@ class TradingRuntime:
         mt5=self.mt5_freshness.observe(mt5,c['mt5'])
         market=self.market_stream.quote(max_age_ms=c['strategy']['max_quote_age_ms']) if self.market_stream else None
         if market is None: market=self.binance.quote(c['symbol'])
-        return self._quote(mt5,market,c)
+        return {**self._quote(mt5,market,c),'execution_quote_source':'refresh'}
 
     def _cached_close_quote(self):
         """Nonblocking cache reads only: no terminal or REST calls between legs."""
@@ -571,7 +588,7 @@ class TradingRuntime:
         market=observed_quote(market,market.get('time_ms',0)) if market else latest['binance']
         fx=c['costs']['usdt_usd']
         # Preserve original receipt times: reading a cache never refreshes age.
-        return dict(key=latest['key'],time_ms=now_ms(),mt5=dict(mt5),binance=dict(market),
+        return dict(key=latest['key'],time_ms=now_ms(),mt5=dict(mt5),binance=dict(market),execution_quote_source='cache',
                     usdt_usd=fx,entry=market['bid']*fx-mt5['ask'],exit=market['ask']*fx-mt5['bid'])
 
     def _entry_preflight_guard(self, q, threshold):

@@ -107,6 +107,7 @@ class Engine:
             # REST depth when the top level cannot cover this order.
             top_key='bid_qty' if sell else 'ask_qty'
             o['top_qty']=q.get('binance',{}).get(top_key)
+        if q.get('execution_quote_source') in ('cache','refresh'): o['quote_source']=q['execution_quote_source']
         o['signal_spread']=q.get('entry' if action=='open' else 'exit')
         o['signal_time_ms']=q.get('time_ms')
         # Preserve each leg's quote even when the paired signal is filled in later.
