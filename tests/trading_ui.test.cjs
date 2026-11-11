@@ -8,8 +8,9 @@ const vm = require('node:vm');
 function pageFixture(reconcileFails = false, handlers = {}) {
   const elements = new Map(), calls = [], charts=[], streams=[], listeners={}, windowListeners={};
   const intervals=[];let testNow=Date.now();
+  const addListener=(handlers,name,fn)=>{const previous=handlers[name];handlers[name]=previous?event=>{previous(event);fn(event);}:fn;};
   class TestDate extends Date {static now(){return testNow;}}
-  const doc={hidden:false, getElementById:id=>el(id),addEventListener:(name,fn)=>{listeners[name]=fn;}};
+  const doc={hidden:false, getElementById:id=>el(id),addEventListener:(name,fn)=>addListener(listeners,name,fn)};
   class FakeStream {
     constructor(){this.handlers={};this.closed=false;streams.push(this);}
     addEventListener(name,fn){this.handlers[name]=fn;}
@@ -18,7 +19,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   }
   const el = id => {
     if (!elements.has(id)) elements.set(id, {
-      tagName:'BUTTON', value:'', textContent:'', innerHTML:'', dataset:{},
+      tagName:'BUTTON', value:'', textContent:'', innerHTML:'', dataset:{},style:{},offsetWidth:320,offsetHeight:80,
       classList:{toggle(){}, add(){}, remove(){}}, querySelectorAll(selector){
         if(id==='groups'&&selector==='details[data-group-rules]'){
           if(this.detailsHTML!==this.innerHTML){
@@ -53,7 +54,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   const snapshot = () => ({connected:true, state:{enabled, groups:[], orders:[]},
     capabilities:{mode:'live', reconciled}});
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../trading-app.js'), 'utf8'), {
-    document:doc, window:{addEventListener(name,fn){windowListeners[name]=fn;},EventSource:FakeStream,GoldPairQuotes:require('../quote-stream.js')},
+    document:doc, window:{innerWidth:1280,innerHeight:900,addEventListener(name,fn){addListener(windowListeners,name,fn);},EventSource:FakeStream,GoldPairQuotes:require('../quote-stream.js')},
     loaded:false, saveConfig:async()=>{}, AbortController,
     Date:TestDate,setTimeout(){}, clearTimeout(){}, setInterval(fn,ms){intervals.push({fn,ms});},
     echarts:{init:()=>({getOption:()=>({}), resize(){},setOption(option){charts.push(option);}})},
@@ -799,4 +800,70 @@ test('MT5 confirmation stage is visible only for an active group and never start
  assert.equal(f.calls.filter(c=>c.url==='/api/trading/start'||c.url==='/api/trading/close').length,0);
  snapshot.state.groups[0].status='closed';await f.refresh();
  assert.doesNotMatch(f.el('trading-result').textContent,/MT5 成交仍未确认/);
+});
+
+function changeRecordPage(f,key,page) {
+  f.el('view-records').onclick({target:{closest:()=>({disabled:false,dataset:{recordTable:key,recordPage:String(page)}})}});
+}
+const recordBodies=html=>[...html.matchAll(/<tbody>([\s\S]*?)<\/tbody>/g)].map(m=>m[1]);
+
+test('record pagination is independent, survives refresh, clamps after removal, and leaves totals global',async()=>{
+  const snapshot=monitoredSnapshot();
+  snapshot.state.groups=Array.from({length:25},(_,i)=>({id:'g'+(i+1),status:'closed',parameters:{},valuation:{net:1,remaining:{}}}));
+  snapshot.state.orders=Array.from({length:125},(_,i)=>({id:'o'+(i+1),group:'g1',leg:'binance',action:'open',result:{status:'done',qty:1,price:100}}));
+  const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+  assert.equal((recordBodies(f.el('groups').innerHTML)[0].match(/<tr>/g)||[]).length,10);
+  assert.match(f.el('groups').innerHTML,/#g25/);assert.doesNotMatch(f.el('groups').innerHTML,/#g15</);
+  assert.match(f.el('pnl-stats').innerHTML,/已平仓净收益.*\+25\.00 USD/);
+  const calls=f.calls.length;
+  changeRecordPage(f,'groups',2);
+  assert.match(f.el('groups').innerHTML,/第 2 \/ 3 页/);assert.match(f.el('groups').innerHTML,/#g15</);
+  assert.match(f.el('orders').innerHTML,/第 1 \/ 13 页/);
+  changeRecordPage(f,'orders',13);
+  assert.equal(f.calls.length,calls,'paging must not request any platform or trading endpoint');
+  assert.match(f.el('orders').innerHTML,/>o1</);assert.match(f.el('orders').innerHTML,/当前 121–125 条/);
+  await f.refresh();
+  assert.match(f.el('groups').innerHTML,/第 2 \/ 3 页/);assert.match(f.el('orders').innerHTML,/第 13 \/ 13 页/);
+  snapshot.state.groups=snapshot.state.groups.slice(0,3);await f.refresh();
+  assert.match(f.el('groups').innerHTML,/第 1 \/ 1 页/);assert.match(f.el('groups').innerHTML,/#g1</);
+});
+
+test('all three platform snapshot tables have independent read-only pagination',async()=>{
+  const snapshot=monitoredSnapshot(),report=snapshot.position_report;
+  report.binance=Array.from({length:12},(_,i)=>({positionSide:'SHORT',positionAmt:-1,entryPrice:4100+i}));
+  report.mt5=Array.from({length:24},(_,i)=>({ticket:'ticket-'+(i+1),side:0,lots:.01,price_open:4000,managed:true}));
+  report.binance_orders=Array.from({length:21},(_,i)=>({orderId:'pending-'+(i+1),side:'SELL',type:'LIMIT',origQty:1,executedQty:0,price:4200,status:'NEW'}));
+  const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+  assert.deepEqual(recordBodies(f.el('platform-positions').innerHTML).map(body=>(body.match(/<tr>/g)||[]).length),[10,10,10]);
+  const calls=f.calls.length;changeRecordPage(f,'mt5-positions',3);
+  let bodies=recordBodies(f.el('platform-positions').innerHTML);
+  assert.match(bodies[1],/ticket-21/);assert.doesNotMatch(bodies[1],/ticket-1</);assert.match(bodies[2],/pending-1</);
+  changeRecordPage(f,'binance-orders',3);changeRecordPage(f,'binance-positions',2);
+  bodies=recordBodies(f.el('platform-positions').innerHTML);
+  assert.deepEqual(bodies.map(body=>(body.match(/<tr>/g)||[]).length),[2,4,1]);
+  assert.match(bodies[1],/ticket-21/);assert.match(bodies[2],/pending-21/);
+  assert.equal(f.calls.length,calls);
+  await f.refresh();assert.match(recordBodies(f.el('platform-positions').innerHTML)[1],/ticket-21/);
+});
+
+test('group details are escaped hover hints while unresolved exposure remains visibly unknown',async()=>{
+  const snapshot=unknownSnapshot('attention');
+  snapshot.state.groups[0].reason='拒单 <script>bad()</script> "原因"';
+  snapshot.state.groups[0].execution_warning='等待平台成交回执';
+  const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+  const html=f.el('groups').innerHTML,visible=recordBodies(html)[0].replace(/<[^>]+>/g,'');
+  assert.match(visible,/成交待确认/);assert.match(visible,/币安 待核对MT5 待核对/);
+  assert.doesNotMatch(visible,/等待平台成交回执|拒单|实际待核对|实盘估算/);
+  assert.match(html,/data-record-hint="[^"]*等待平台成交回执/);
+  assert.match(html,/data-record-hint="[^"]*原因：拒单 &lt;script&gt;/);
+  assert.doesNotMatch(html,/<script>bad/);assert.match(html,/tabindex="0"[^>]*aria-label=/);
+});
+
+test('record hints appear on hover or keyboard focus and dismiss on Escape and workspace change',async()=>{
+  const f=pageFixture();const target={dataset:{recordHint:'订单尚未确认，请核对平台持仓',recordHintKey:'g1-status'},getBoundingClientRect:()=>({left:20,bottom:60,top:40})};
+  f.el('view-records').onpointerover({target:{closest:()=>target}});
+  assert.equal(f.el('record-tooltip').hidden,false);assert.match(f.el('record-tooltip').textContent,/订单尚未确认/);
+  f.listeners.keydown({key:'Escape'});assert.equal(f.el('record-tooltip').hidden,true);
+  f.el('view-records').onfocusin({target:{closest:()=>target}});assert.equal(f.el('record-tooltip').hidden,false);
+  f.windowListeners['gold-workspace-changed']();assert.equal(f.el('record-tooltip').hidden,true);
 });
