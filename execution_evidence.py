@@ -65,6 +65,107 @@ MT5_STAGES = {'positions_unavailable','identity_unresolved','deals_missing','pen
               'confirmed','query_exception'}
 MT5_READS = {'deals_ticket','deals_position','deals_range','pending_ticket','orders_ticket','orders_range'}
 
+# Capture only fixed fields from an already received reply. Never retain the
+# arbitrary payload, native request echo, broker comment, or platform IDs.
+RECEIPT_NUMBERS = {
+    'binance': ('executedQty','avgPrice','cumQuote','origQty','price','stopPrice','time','updateTime'),
+    'mt5': ('retcode','retcode_external','volume','price','bid','ask'),
+}
+RECEIPT_ENUMS = {
+    'status': PLATFORM_STATUSES,
+    'side': {'BUY','SELL'}, 'positionSide': {'BOTH','LONG','SHORT'},
+    'type': {'LIMIT','MARKET','STOP','STOP_MARKET','TAKE_PROFIT','TAKE_PROFIT_MARKET','TRAILING_STOP_MARKET'},
+    'timeInForce': {'GTC','IOC','FOK','GTX','GTD'},
+}
+RECEIPT_BOOLS = ('reduceOnly','closePosition','priceProtect')
+RECEIPT_IDS = {'binance': ('orderId','clientOrderId'), 'mt5': ('order','deal','request_id')}
+FIELD_TYPES = {'missing','null','boolean','number','string','object','array','other'}
+
+
+def field_type(value):
+    if value is None: return 'null'
+    if isinstance(value,bool): return 'boolean'
+    if isinstance(value,(int,float)): return 'number'
+    if isinstance(value,str): return 'string'
+    if isinstance(value,dict): return 'object'
+    if isinstance(value,(list,tuple)): return 'array'
+    return 'other'
+
+
+def finite_number(value):
+    if isinstance(value,bool) or not isinstance(value,(int,float,str)): return None
+    if isinstance(value,str) and len(value)>80: return None
+    try:
+        n=float(value)
+        return n if math.isfinite(n) else None
+    except (ValueError,TypeError,OverflowError): return None
+
+
+def receipt_evidence(value):
+    """Re-apply the allowlist at export, including to persisted nested data."""
+    if not isinstance(value,dict) or value.get('platform') not in ('binance','mt5'): return {}
+    platform=value['platform']; data={'platform':platform}
+    if isinstance(value.get('payload_type'),str) and value['payload_type'] in FIELD_TYPES: data['payload_type']=value['payload_type']
+    keys=RECEIPT_NUMBERS[platform]+(tuple(RECEIPT_ENUMS)+RECEIPT_BOOLS if platform=='binance' else ())
+    shapes=value.get('field_types'); values=value.get('values')
+    if isinstance(shapes,dict):
+        data['field_types']={k:shapes[k] for k in keys if isinstance(shapes.get(k),str) and shapes[k] in FIELD_TYPES}
+    if isinstance(values,dict):
+        clean={}
+        for k in RECEIPT_NUMBERS[platform]:
+            n=values.get(k)
+            if isinstance(n,(int,float)) and not isinstance(n,bool) and math.isfinite(n): clean[k]=n
+        if platform=='binance':
+            for k,allowed in RECEIPT_ENUMS.items():
+                if isinstance(values.get(k),str) and values[k] in allowed: clean[k]=values[k]
+            for k in RECEIPT_BOOLS:
+                if type(values.get(k)) is bool: clean[k]=values[k]
+        data['values']=clean
+    for k in RECEIPT_IDS[platform]:
+        if type(value.get('has_'+k)) is bool: data['has_'+k]=value['has_'+k]
+    if value.get('price_source') in ('avgPrice','cumQuote','unavailable'): data['price_source']=value['price_source']
+    return data
+
+
+def capture_receipt(platform, payload):
+    """Small bounded snapshot; no I/O and no recursive payload serialization."""
+    if platform not in RECEIPT_NUMBERS: return {}
+    if platform=='mt5' and payload is not None and not isinstance(payload,dict):
+        keys=RECEIPT_NUMBERS[platform]+RECEIPT_IDS[platform]
+        payload={k:getattr(payload,k) for k in keys if hasattr(payload,k)}
+    data={'platform':platform,'payload_type':field_type(payload),'field_types':{},'values':{}}
+    if not isinstance(payload,dict): return data
+    keys=RECEIPT_NUMBERS[platform]+(tuple(RECEIPT_ENUMS)+RECEIPT_BOOLS if platform=='binance' else ())
+    for k in keys:
+        data['field_types'][k]=field_type(payload[k]) if k in payload else 'missing'
+        if k in RECEIPT_NUMBERS[platform]:
+            n=finite_number(payload.get(k))
+            if n is not None: data['values'][k]=n
+        elif k in RECEIPT_ENUMS:
+            v=payload.get(k)
+            if isinstance(v,str) and v in RECEIPT_ENUMS[k]: data['values'][k]=v
+        elif type(payload.get(k)) is bool: data['values'][k]=payload[k]
+    for k in RECEIPT_IDS[platform]:
+        if k in payload: data['has_'+k]=payload[k] not in (None,'',0,'0')
+    return data
+
+
+VALIDATION_ISSUES = ('not_object','invalid_status','invalid_quantity','quantity_exceeds_request',
+                     'invalid_price','nonpositive_fill_price','quantity_regressed')
+
+
+def validation_issues(result, requested):
+    """Explain the existing fill-shape check without changing its decisions."""
+    if not isinstance(result,dict): return ['not_object']
+    issues=[]
+    if result.get('status') not in ('done','pending','unknown'): issues.append('invalid_status')
+    qty=finite_number(result.get('qty',0));price=finite_number(result.get('price',0))
+    if qty is None or qty<0: issues.append('invalid_quantity')
+    elif qty>requested+1e-7: issues.append('quantity_exceeds_request')
+    if price is None: issues.append('invalid_price')
+    elif qty is not None and qty!=0 and price<=0: issues.append('nonpositive_fill_price')
+    return issues
+
 
 def confirmation_evidence(value):
     if not isinstance(value,dict): return {}
@@ -95,7 +196,7 @@ def result_evidence(result):
     for key in ('ticket','deal','position','position_identifier'):
         if key in result: data['has_'+key]=result[key] not in (None,'',0,'0')
         elif type(result.get('has_'+key)) is bool: data['has_'+key]=result['has_'+key]
-    for key in ('qty','price','request_ms','response_received_ms','retcode','ack_volume','ack_price'):
+    for key in ('qty','price','request_ms','response_received_ms','ack_received_ms','retcode','ack_volume','ack_price','http_status','native_error_code'):
         value=result.get(key)
         if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value): data[key]=value
     if result.get('status') in ('done','pending','unknown'): data['status']=result['status']
@@ -106,4 +207,10 @@ def result_evidence(result):
     elif result.get('error'): data['error_kind']='unknown'
     confirmation=confirmation_evidence(result.get('confirmation'))
     if confirmation: data['confirmation']=confirmation
+    if type(result.get('submitted')) is bool: data['submitted']=result['submitted']
+    for key in ('receipt','precheck_receipt'):
+        receipt=receipt_evidence(result.get(key))
+        if receipt: data[key]=receipt
+    if isinstance(result.get('validation_issues'),list):
+        data['validation_issues']=[key for key in VALIDATION_ISSUES if key in result['validation_issues']]
     return data

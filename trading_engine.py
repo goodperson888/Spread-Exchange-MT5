@@ -3,7 +3,7 @@ import copy
 import time
 import uuid
 from trading_config import pair_key
-from execution_evidence import reason_code, REASON_LABELS, result_evidence
+from execution_evidence import reason_code, REASON_LABELS, result_evidence, validation_issues
 
 
 def stamp(): return int(time.time()*1000)
@@ -139,10 +139,12 @@ class Engine:
         valid=self.result_valid(result,qty)
         # Never let an invalid result look like a completed zero-volume fill.
         if not valid:
+            initial_evidence['validation_issues']=validation_issues(result,qty)
             # Keep broker identity for subsequent reads even when its fill
             # fields are unusable. Never treat a malformed acknowledgement as flat.
             metadata={k:result[k] for k in ('ticket','deal','position','position_identifier','retcode','ack_volume','ack_price')
                       if isinstance(result,dict) and k in result}
+            metadata.update({k:initial_evidence[k] for k in ('receipt','precheck_receipt','http_status','native_error_code','ack_received_ms') if k in initial_evidence})
             result=dict(metadata,status='unknown',qty=0,price=0,error='成交回报无效，等待对账',
                         error_code='INVALID_RESPONSE',error_kind='invalid_response')
             initial_evidence.update(error_code='INVALID_RESPONSE',error_kind='invalid_response')
@@ -226,10 +228,20 @@ class Engine:
                 continue
             if o['result'].get('status')=='pending':
                 if not reconcile.get('cancel_sent'):
+                    cancel_started=time.monotonic()
+                    cancel={'time_ms':stamp()}
+                    reconcile['cancel_attempts']=int(reconcile.get('cancel_attempts',0))+1
                     try:
-                        self.broker.cancel(o)
+                        reply=self.broker.cancel(o)
+                        cancel.update(returned=True,result=result_evidence(reply) if isinstance(reply,dict) else {})
                         reconcile['cancel_sent']=True
-                    except Exception: pass
+                    except Exception as exc:
+                        cancel.update(returned=False,result=result_evidence(dict(error=True,
+                            error_code=getattr(exc,'code',None),error_kind=getattr(exc,'kind',None),
+                            http_status=getattr(exc,'http_status',None))))
+                    cancel['elapsed_ms']=round((time.monotonic()-cancel_started)*1000)
+                    reconcile['last_cancel']=cancel
+                    reconcile.setdefault('first_cancel',copy.deepcopy(cancel))
             reconcile['attempts']=int(reconcile.get('attempts',0))+1
             query_order=copy.deepcopy(o)
             deadline=self._entry_deadlines.get(g['id'])
@@ -251,7 +263,9 @@ class Engine:
             evidence['valid']=valid
             if not shape_valid:
                 evidence.update(error_code='INVALID_RESPONSE',error_kind='invalid_response')
-            reconcile['last_query']={**evidence,'query_ms':query_ms,'query_timeout_ms':query_budget}
+                evidence['validation_issues']=validation_issues(r,o['requested'])
+            elif not valid: evidence['validation_issues']=['quantity_regressed']
+            reconcile['last_query']={**evidence,'time_ms':stamp(),'query_ms':query_ms,'query_timeout_ms':query_budget}
             if valid:
                 merged={**o['result'],**r}
                 if r.get('status')=='done' and not r.get('error'):
@@ -293,7 +307,8 @@ class Engine:
             # two seconds. Persist all fill/identity/stage changes immediately,
             # plus a periodic heartbeat; intent/result durability is unchanged.
             identity=tuple(str(o['result'].get(k,'')) for k in ('ticket','deal','position','position_identifier'))
-            signature=(evidence,identity)
+            cancel=reconcile.get('last_cancel',{})
+            signature=(evidence,identity,cancel.get('returned'),cancel.get('result'))
             previous=self._reconcile_notices.get(o['id'])
             checked=time.monotonic()
             if (force or first_exhausted or previous is None or previous[0]!=signature or

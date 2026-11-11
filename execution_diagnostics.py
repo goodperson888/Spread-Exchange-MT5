@@ -47,7 +47,7 @@ def build_report(state, events):
     group_ids={g['id']:'G'+str(i+1) for i,g in enumerate(groups)}
     orders=[o for o in state.get('orders',[]) if o.get('group') in group_ids]
     order_ids={o['id']:'O'+str(i+1) for i,o in enumerate(orders)}
-    report={'schema_version':2,'exported_ms':int(time.time()*1000),
+    report={'schema_version':2,'receipt_schema_version':1,'exported_ms':int(time.time()*1000),
         'scope':{'group_limit':200,'event_limit':2000,'groups':len(groups),'orders':len(orders)},
         'notes':[
             '仅含最近200组已持久化执行记录及最近2000条中的执行、启动、暂停白名单事件；导出时正在执行的记录可能尚未完成。',
@@ -72,6 +72,8 @@ def build_report(state, events):
         'initial_result保留下单直接回报，valid仅指通过本机字段校验，不代表已确认成交；reconcile.last_query及事件保留查询预算、耗时、固定错误分类和平台数字错误码，不导出原始错误或账号标识。',
         'query_timeout_ms是适配器请求超时参数，并非严格总耗时上限；多阶段网络请求可能超出该值。1.5秒等敞口配置仍单独决定能否开第二腿。',
         'confirmation为MT5成交核对阶段、各查询返回状态和数量校验字段；has_ticket/has_deal等只表示是否取得编号，不含编号值。first_unconfirmed_query保留第一次未确认的查询；稳定重复事件限频，attempt仍累计实际查询次数。',
+        'receipt为已有平台回执的白名单字段与原字段类型；missing、null、零值和无法解析分别保留。币安values含avgPrice、cumQuote、executedQty及平台时间，price_source说明归一化价格来源；MT5含直接order_send回执，precheck_receipt单列order_check结果，即使同次调用已由历史确认也保留原回执。编号仅保留有无，不导出请求回显、账户、注释和错误原文。',
+        'validation_issues为本机校验失败的固定分类；reconcile.first_cancel/last_cancel记录首次及最近一次撤单调用返回与耗时，returned仅代表调用正常返回，不证明撤单成功；撤单后仍查询原订单。ack_received_ms为MT5原生下单调用返回的本机时间，早于可能的历史补查。所有新增采集复用已有调用和日志提交，不增加查询；平台原始时间不用于推断时区或本机延迟。',
     ])
     probe=state.get('mt5_history_probe')
     if isinstance(probe,dict):
@@ -109,12 +111,19 @@ def build_report(state, events):
         if isinstance(o.get('initial_result'),dict): row['initial_result']=result_evidence(o['initial_result'])
         row['quote_context']={leg:numbers(o.get('quote_context',{}).get(leg,{}),
             'bid ask bid_qty ask_qty time_ms observed_ms source_time_ms') for leg in ('binance','mt5')}
-        row['reconcile']=numbers(o.get('reconcile',{}),'attempts started_ms next_ms')
+        row['reconcile']=numbers(o.get('reconcile',{}),'attempts started_ms next_ms cancel_attempts')
         rec=o.get('reconcile',{})
+        if type(rec.get('cancel_sent')) is bool: row['reconcile']['cancel_sent']=rec['cancel_sent']
+        for key in ('first_cancel','last_cancel'):
+            if isinstance(rec.get(key),dict):
+                cancel=rec[key]
+                row['reconcile'][key]={**numbers(cancel,'time_ms elapsed_ms'),
+                                       'result':result_evidence(cancel.get('result',{}))}
+                if type(cancel.get('returned')) is bool: row['reconcile'][key]['returned']=cancel['returned']
         if type(rec.get('exhausted')) is bool: row['reconcile']['exhausted']=rec['exhausted']
         if isinstance(rec.get('last_query'),dict):
             row['reconcile']['last_query']={**result_evidence(rec['last_query']),
-                                          **numbers(rec['last_query'],'query_ms query_timeout_ms')}
+                                          **numbers(rec['last_query'],'time_ms query_ms query_timeout_ms')}
         if isinstance(rec.get('first_unconfirmed_query'),dict):
             first=rec['first_unconfirmed_query']
             row['reconcile']['first_unconfirmed_query']={**result_evidence(first),

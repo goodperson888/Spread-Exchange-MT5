@@ -18,7 +18,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 from urllib.error import HTTPError, URLError
 from liquidation_risk import mt5_risk_fields
-from execution_evidence import confirmation_evidence
+from execution_evidence import confirmation_evidence, capture_receipt
 
 
 def _utc_datetime_from_timestamp(seconds):
@@ -39,14 +39,17 @@ except ImportError:  # REST fallback remains available for source deployments.
 
 
 class ApiError(Exception):
-    def __init__(self, code, message, uncertain=False, kind=None):
+    def __init__(self, code, message, uncertain=False, kind=None, http_status=None):
         super().__init__(message)
         self.code, self.uncertain = code, uncertain
         self.kind=kind or ('timeout' if code=='TIMEOUT' else 'network' if code=='NETWORK' else
                            'invalid_response' if code=='INVALID_RESPONSE' else 'exchange')
+        self.http_status=http_status
 
     def evidence(self):
-        return {'error':str(self),'error_code':self.code,'error_kind':self.kind}
+        data={'error':str(self),'error_code':self.code,'error_kind':self.kind}
+        if isinstance(self.http_status,int): data['http_status']=self.http_status
+        return data
 
 
 class Binance:
@@ -115,7 +118,7 @@ class Binance:
                             '2. 阅读并确认页面提示的 TradFi 永续合约协议；无需为此实际下单。\n'
                             '3. 返回本程序等待下一次预检；仍失败时重新连接并对账。\n'
                             '若没有协议入口或签署后仍报错，请联系币安客服确认该账户的合约资格。')
-            raise ApiError(code, message, exc.code >= 500 or code in (-1006, -1007)) from None
+            raise ApiError(code, message, exc.code >= 500 or code in (-1006, -1007), http_status=exc.code) from None
         except (TimeoutError, URLError) as exc:
             timed_out=isinstance(exc,TimeoutError) or isinstance(getattr(exc,'reason',None),TimeoutError)
             raise ApiError('TIMEOUT' if timed_out else 'NETWORK',
@@ -261,12 +264,22 @@ class Binance:
 
     @staticmethod
     def normalize(r):
-        status=r['status']; qty=float(r.get('executedQty',0)); price=float(r.get('avgPrice',0))
-        if qty > 0 and price <= 0:
-            price = float(r.get('cumQuote', 0)) / qty
-        final=status in ('FILLED','CANCELED','EXPIRED','EXPIRED_IN_MATCH','REJECTED')
-        return dict(status='done' if final else 'pending', qty=qty, price=price,
-                    ticket=str(r.get('orderId','')), raw_status=status)
+        receipt=capture_receipt('binance',r)
+        try:
+            status=r['status']; qty=float(r.get('executedQty',0)); price=float(r.get('avgPrice',0))
+            receipt['price_source']='avgPrice' if price>0 else 'unavailable'
+            if qty > 0 and price <= 0:
+                price = float(r.get('cumQuote', 0)) / qty
+                if price>0: receipt['price_source']='cumQuote'
+            final=status in ('FILLED','CANCELED','EXPIRED','EXPIRED_IN_MATCH','REJECTED')
+            return dict(status='done' if final else 'pending', qty=qty, price=price,
+                        ticket=str(r.get('orderId','')), raw_status=status,receipt=receipt)
+        except (ValueError,TypeError,KeyError,OverflowError):
+            result=dict(status='unknown',qty=0,price=0,receipt=receipt,
+                        error='币安回报字段无法解析，等待查询确认',error_code='INVALID_RESPONSE',error_kind='invalid_response')
+            if isinstance(r,dict) and isinstance(r.get('orderId'),(str,int)):
+                result['ticket']=str(r['orderId'])
+            return result
 
     @staticmethod
     def executable_depth(order, args, book):
@@ -333,7 +346,7 @@ class Binance:
                     'error_code':'INVALID_RESPONSE','error_kind':'invalid_response'}
 
     def cancel(self, order):
-        self.request('/fapi/v1/order', dict(symbol=order['symbol'],origClientOrderId=order['id']), 'DELETE', True)
+        return self.normalize(self.request('/fapi/v1/order', dict(symbol=order['symbol'],origClientOrderId=order['id']), 'DELETE', True))
 
     def income(self, symbol, start, end):
         # Binance limits one income-history query to seven days. Split long
@@ -635,7 +648,7 @@ class NativeMT5Fills:
 
     def submitted(self, order, result, contract):
         ticket = str(result.order or '')
-        data = dict(status='unknown',qty=0,price=0,retcode=result.retcode)
+        data = dict(status='unknown',qty=0,price=0,retcode=result.retcode,receipt=capture_receipt('mt5',result))
         if result.order: data['ticket'] = ticket
         if result.deal: data['deal'] = str(result.deal)
         for key, value in (('ack_volume',result.volume),('ack_price',result.price)):
@@ -907,9 +920,10 @@ def worker_main():
                             req['position']=int(o['position'])
                         check=mt.order_check(req)
                         if not check or check.retcode!=0:
-                            data=dict(status='done',qty=0,price=0,error='MT5 订单预检查未通过')
+                            data=dict(status='done',qty=0,price=0,submitted=False,error='MT5 订单预检查未通过')
                         else:
                             result=mt.order_send(req)
+                            ack_received_ms=int(time.time()*1000)
                             if result is None: data=dict(status='unknown',qty=0,price=0)
                             elif result.retcode in (mt.TRADE_RETCODE_DONE,mt.TRADE_RETCODE_DONE_PARTIAL):
                                 data=NativeMT5Fills(mt,s.name,magic).submitted(o,result,s.trade_contract_size)
@@ -917,7 +931,18 @@ def worker_main():
                                 data=dict(status='unknown',qty=0,price=0,retcode=result.retcode)
                                 if result.order: data['ticket']=str(result.order)
                                 if result.deal: data['deal']=str(result.deal)
-                            else: data=dict(status='done',qty=0,price=0,error=f'MT5 拒单 {result.retcode}')
+                            else: data=dict(status='done',qty=0,price=0,retcode=result.retcode,error=f'MT5 拒单 {result.retcode}')
+                            # Preserve the direct acknowledgement even when submitted()
+                            # already recovered a fill via history in the same call.
+                            if 'receipt' not in data: data['receipt']=capture_receipt('mt5',result)
+                            data['ack_received_ms']=ack_received_ms
+                        data['precheck_receipt']=capture_receipt('mt5',check)
+                        if check is None or (check.retcode==0 and result is None):
+                            try:
+                                native_error=mt.last_error()
+                                if isinstance(native_error,(tuple,list)) and isinstance(native_error[0],int):
+                                    data['native_error_code']=native_error[0]
+                            except Exception: pass
                 else: raise ValueError('未知 MT5 指令')
             print(json.dumps(dict(ok=True,data=data),allow_nan=False),flush=True)
         except Exception as exc:
@@ -966,7 +991,7 @@ class LiveBroker:
         return self.b.query(order) if order['leg']=='binance' else self.m.call('query',order=order)
 
     def cancel(self, order):
-        if order['leg']=='binance': self.b.cancel(order)
+        if order['leg']=='binance': return self.b.cancel(order)
 
 
 class PaperBroker:

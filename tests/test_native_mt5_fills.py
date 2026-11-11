@@ -209,6 +209,38 @@ class NativeMT5FillTests(unittest.TestCase):
         self.mt.history_deals_get.assert_called_once_with(ticket=500)
         self.mt.order_send.assert_called_once()
 
+    def test_original_zero_ack_and_precheck_survive_history_recovery(self):
+        self.ack.retcode_external=7;self.ack.bid=3999.9;self.ack.ask=4000
+        self.ack.request_id=123;self.ack.comment='PRIVATE-DO-NOT-EXPORT'
+        r=self.run_worker(self.o)['data']
+        self.assertEqual(r['price'],4000)
+        self.assertEqual(r['receipt']['values']['price'],0)
+        self.assertEqual(r['receipt']['values']['volume'],0)
+        self.assertEqual(r['receipt']['values']['retcode_external'],7)
+        self.assertTrue(r['receipt']['has_request_id'])
+        self.assertEqual(r['precheck_receipt']['values']['retcode'],0)
+        self.assertGreater(r['ack_received_ms'],0)
+        self.assertNotIn('PRIVATE-DO-NOT-EXPORT',json.dumps(r))
+
+    def test_precheck_rejection_keeps_numeric_code_and_never_sends(self):
+        self.mt.order_check.side_effect=lambda req:NS(retcode=10019,comment='private')
+        r=self.run_worker(self.o)['data']
+        self.assertFalse(r['submitted'])
+        self.assertEqual(r['precheck_receipt']['values']['retcode'],10019)
+        self.mt.order_send.assert_not_called()
+
+    def test_native_rejection_and_none_preserve_safe_failure_details(self):
+        self.ack.retcode=10030
+        r=self.run_worker(self.o)['data']
+        self.assertEqual(r['retcode'],10030)
+        self.assertEqual(r['receipt']['values']['retcode'],10030)
+        self.mt.reset_mock();self.ack=None;self.mt.last_error.return_value=(-10005,'private')
+        r=self.run_worker(self.o)['data']
+        self.assertEqual(r['status'],'unknown')
+        self.assertEqual(r['native_error_code'],-10005)
+        self.assertEqual(r['receipt']['payload_type'],'null')
+        self.assertNotIn('private',json.dumps(r))
+
     def test_actual_worker_queries_terminal_resolved_symbol_without_sending(self):
         self.mt.symbol_info.return_value.name='xauusd'
         self.p.symbol=self.d.symbol=self.h.symbol='xauusd'
