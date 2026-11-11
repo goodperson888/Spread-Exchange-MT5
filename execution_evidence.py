@@ -59,12 +59,41 @@ PLATFORM_STATUSES = {'NEW','PARTIALLY_FILLED','FILLED','CANCELED','PENDING_CANCE
                      'REJECTED','EXPIRED','EXPIRED_IN_MATCH'}
 ERROR_CODES = {'NETWORK','TIMEOUT','INVALID_RESPONSE','DEPTH_INSUFFICIENT','DEPTH_CHECK_FAILED'}
 ERROR_KINDS = {'timeout','network','exchange','invalid_response','local_validation','unknown'}
+MT5_STAGES = {'positions_unavailable','identity_unresolved','deals_missing','pending_unavailable',
+              'order_pending','order_history_missing','order_identity_mismatch','order_not_terminal',
+              'fill_volume_invalid','fill_volume_mismatch','deals_ambiguous','deal_fields_invalid',
+              'confirmed','query_exception'}
+MT5_READS = {'deals_ticket','deals_position','deals_range','pending_ticket','orders_ticket','orders_range'}
+
+
+def confirmation_evidence(value):
+    if not isinstance(value,dict): return {}
+    data={}
+    if isinstance(value.get('stage'),str) and value['stage'] in MT5_STAGES: data['stage']=value['stage']
+    for key in ('position_matches','deal_matches','order_matches','order_state','volume_initial',
+                'volume_current','deal_lots','filled_lots','candidate_rows','ticket_matches',
+                'symbol_matches','magic_matches','side_matches','entry_matches'):
+        n=value.get(key)
+        if isinstance(n,(int,float)) and not isinstance(n,bool) and math.isfinite(n): data[key]=n
+    reads=[]
+    for row in value.get('reads',[])[:7] if isinstance(value.get('reads'),list) else []:
+        if not isinstance(row,dict) or not isinstance(row.get('api'),str) or row['api'] not in MT5_READS: continue
+        if row.get('status') not in ('ok','empty','unavailable','error'): continue
+        clean={'api':row['api'],'status':row['status']}
+        for key in ('rows','error_code'):
+            if isinstance(row.get(key),int) and not isinstance(row[key],bool): clean[key]=row[key]
+        reads.append(clean)
+    if reads: data['reads']=reads
+    return data
 
 
 def result_evidence(result):
     if not isinstance(result,dict): return {'error_kind':'invalid_response'}
     data={}
     if type(result.get('valid')) is bool: data['valid']=result['valid']
+    for key in ('ticket','deal','position','position_identifier'):
+        if key in result: data['has_'+key]=result[key] not in (None,'',0,'0')
+        elif type(result.get('has_'+key)) is bool: data['has_'+key]=result['has_'+key]
     for key in ('qty','price','request_ms','response_received_ms','retcode','ack_volume','ack_price'):
         value=result.get(key)
         if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value): data[key]=value
@@ -74,4 +103,6 @@ def result_evidence(result):
     if (isinstance(code,int) and not isinstance(code,bool)) or (isinstance(code,str) and code in ERROR_CODES): data['error_code']=code
     if isinstance(result.get('error_kind'),str) and result['error_kind'] in ERROR_KINDS: data['error_kind']=result['error_kind']
     elif result.get('error'): data['error_kind']='unknown'
+    confirmation=confirmation_evidence(result.get('confirmation'))
+    if confirmation: data['confirmation']=confirmation
     return data

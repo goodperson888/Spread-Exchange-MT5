@@ -734,3 +734,17 @@ test('unresolved attention group never claims protective handling is complete',a
  assert.match(f.el('trading-result').textContent,/等待持仓对账/);
  assert.equal(f.el('trading-toggle').disabled,true);
 });
+
+test('MT5 confirmation stage is visible only for an active group and never starts trading',async()=>{
+ const snapshot={connected:true,capabilities:{mode:'live',reconciled:false},
+  state:{enabled:false,recovery:true,groups:[{id:'g1',status:'attention',parameters:{}}],
+   orders:[{id:'o1',group:'g1',leg:'mt5',action:'open',requested:1,
+    result:{status:'unknown',qty:0,price:0},reconcile:{last_query:{confirmation:{stage:'order_history_missing'}}}}]}};
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ assert.match(f.el('trading-result').textContent,/MT5 成交仍未确认/);
+ assert.match(f.el('trading-result').textContent,/历史订单/);
+ assert.equal(f.el('trading-toggle').disabled,true);
+ assert.equal(f.calls.filter(c=>c.url==='/api/trading/start'||c.url==='/api/trading/close').length,0);
+ snapshot.state.groups[0].status='closed';await f.refresh();
+ assert.doesNotMatch(f.el('trading-result').textContent,/MT5 成交仍未确认/);
+});

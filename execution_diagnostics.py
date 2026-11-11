@@ -71,6 +71,7 @@ def build_report(state, events):
         'runtime为本机最后已提交状态，不代表导出时实时持仓；启动/暂停历史受最近2000条事件上限约束。',
         'initial_result保留下单直接回报，valid仅指通过本机字段校验，不代表已确认成交；reconcile.last_query及事件保留查询预算、耗时、固定错误分类和平台数字错误码，不导出原始错误或账号标识。',
         'query_timeout_ms是适配器请求超时参数，并非严格总耗时上限；多阶段网络请求可能超出该值。1.5秒等敞口配置仍单独决定能否开第二腿。',
+        'confirmation为MT5成交核对阶段、各查询返回状态和数量校验字段；has_ticket/has_deal等只表示是否取得编号，不含编号值。first_unconfirmed_query保留第一次未确认的查询；稳定重复事件限频，attempt仍累计实际查询次数。',
     ])
     probe=state.get('mt5_history_probe')
     if isinstance(probe,dict):
@@ -114,6 +115,10 @@ def build_report(state, events):
         if isinstance(rec.get('last_query'),dict):
             row['reconcile']['last_query']={**result_evidence(rec['last_query']),
                                           **numbers(rec['last_query'],'query_ms query_timeout_ms')}
+        if isinstance(rec.get('first_unconfirmed_query'),dict):
+            first=rec['first_unconfirmed_query']
+            row['reconcile']['first_unconfirmed_query']={**result_evidence(first),
+                                                        **numbers(first,'time_ms query_ms query_timeout_ms')}
         report['orders'].append(row)
     kinds={'order_intent','order_result','order_reconciled','order_reconcile_retry','order_reconcile_exhausted',
            'group_opening','group_opened','group_closed','exit_signal','entry_skipped','close_attempt','entry_recovered'}

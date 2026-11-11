@@ -123,7 +123,70 @@ class NativeMT5FillTests(unittest.TestCase):
         self.assertEqual((r['status'],r['position'],r['qty']),('done','900',1))
         self.mt.positions_get.assert_not_called()
 
-    def run_worker(self, order):
+    def test_missing_ticket_index_recovers_by_exact_position_history(self):
+        self.mt.history_deals_get.side_effect=lambda *a,**kw: () if 'ticket' in kw else (self.d,)
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual((r['status'],r['qty']),('done',1))
+        self.assertEqual([c.kwargs for c in self.mt.history_deals_get.call_args_list],
+                         [{'ticket':500},{'position':700}])
+        self.assertEqual(r['confirmation']['stage'],'confirmed')
+
+    def test_missing_indexes_use_bounded_range_and_exact_order_identity(self):
+        foreign=NS(**vars(self.d));foreign.order=501;foreign.ticket=601
+        self.mt.history_deals_get.side_effect=lambda *a,**kw: () if kw else (foreign,self.d)
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual((r['status'],r['qty'],r['ticket']),('done',1,'500'))
+        args=self.mt.history_deals_get.call_args.args
+        self.assertLessEqual(args[1].timestamp()-args[0].timestamp(),172800)
+        self.assertEqual(r['confirmation']['ticket_matches'],1)
+
+    def test_missing_terminal_ticket_index_recovers_same_order_from_range(self):
+        foreign=NS(**vars(self.h));foreign.ticket=501
+        self.mt.history_orders_get.side_effect=lambda *a,**kw: () if kw else (foreign,self.h)
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual((r['status'],r['qty']),('done',1))
+        self.assertEqual(r['confirmation']['reads'][-1]['api'],'orders_range')
+
+    def test_fallback_never_claims_other_order_even_with_same_comment(self):
+        self.d.order=501
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual((r['status'],r['qty']),('unknown',0))
+        self.assertEqual(r['confirmation']['stage'],'deals_missing')
+        self.assertEqual(r['confirmation']['ticket_matches'],0)
+        self.mt.order_send.assert_not_called()
+
+    def test_exact_deal_recovers_missing_order_id_despite_rewritten_comment(self):
+        self.ack.order=0;self.ack.volume=.01;self.d.comment='rewritten';self.p.comment='rewritten'
+        r=self.f.submitted(self.o,self.ack,100)
+        self.assertEqual((r['status'],r['qty'],r['ticket'],r['deal']),('done',1,'500','600'))
+        self.assertFalse(any(c.kwargs.get('ticket')==600 for c in self.mt.history_deals_get.call_args_list))
+
+    def test_failed_history_reports_safe_api_code_and_stage(self):
+        self.mt.history_deals_get.return_value=None;self.mt.history_orders_get.return_value=None
+        self.mt.last_error.return_value=(-4,'PRIVATE-DO-NOT-EXPORT')
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual(r['status'],'unknown')
+        self.assertEqual(r['confirmation']['stage'],'order_history_missing')
+        self.assertTrue(all(x['error_code']==-4 for x in r['confirmation']['reads'] if x['status']=='unavailable'))
+        self.assertNotIn('PRIVATE-DO-NOT-EXPORT',json.dumps(r['confirmation']))
+
+    def test_missing_magic_match_is_visible_without_relaxing_ownership(self):
+        self.d.magic=0
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual(r['status'],'unknown')
+        self.assertEqual(r['confirmation']['stage'],'deals_missing')
+        self.assertEqual(r['confirmation']['magic_matches'],0)
+        self.assertEqual(r['confirmation']['ticket_matches'],1)
+
+    def test_volume_mismatch_stage_preserves_the_two_values_for_diagnosis(self):
+        self.h.volume_initial=.02
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual(r['status'],'unknown')
+        self.assertEqual(r['confirmation']['stage'],'fill_volume_mismatch')
+        self.assertEqual(r['confirmation']['filled_lots'],.02)
+        self.assertEqual(r['confirmation']['deal_lots'],.01)
+
+    def run_worker(self, order, command='submit'):
         self.mt.TRADE_RETCODE_DONE=10009;self.mt.TRADE_RETCODE_DONE_PARTIAL=10010
         self.mt.ORDER_FILLING_IOC=1;self.mt.ORDER_FILLING_FOK=0
         self.mt.ORDER_TYPE_BUY=0;self.mt.ORDER_TYPE_SELL=1
@@ -133,7 +196,7 @@ class NativeMT5FillTests(unittest.TestCase):
         self.mt.symbol_info_tick.return_value=NS(ask=4000,bid=3999.9)
         self.mt.order_check.return_value=NS(retcode=0);self.mt.order_send.return_value=self.ack
         messages=[dict(command='init',settings=dict(account='123',server='TEST',symbol='XAUUSD'),magic=42),
-                  dict(command='submit',order=order)]
+                  dict(command=command,order=order)]
         output=io.StringIO()
         with patch.dict(sys.modules,{'MetaTrader5':self.mt}),patch('sys.stdin',io.StringIO(
                 '\n'.join(json.dumps(x) for x in messages))),patch('sys.stdout',output):
@@ -145,6 +208,32 @@ class NativeMT5FillTests(unittest.TestCase):
         self.assertTrue(r['ok']);self.assertEqual(r['data']['qty'],1)
         self.mt.history_deals_get.assert_called_once_with(ticket=500)
         self.mt.order_send.assert_called_once()
+
+    def test_actual_worker_queries_terminal_resolved_symbol_without_sending(self):
+        self.mt.symbol_info.return_value.name='xauusd'
+        self.p.symbol=self.d.symbol=self.h.symbol='xauusd'
+        r=self.run_worker({**self.o,'result':{'ticket':'500'}},command='query')
+        self.assertTrue(r['ok']);self.assertEqual(r['data']['qty'],1)
+        self.mt.positions_get.assert_called_once_with(symbol='xauusd')
+        self.mt.order_send.assert_not_called()
+
+    def test_malformed_deal_volume_stays_unknown_with_diagnosis(self):
+        self.d.volume='bad'
+        r=NativeMT5Fills(self.mt,'XAUUSD',42).query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual(r['status'],'unknown')
+        self.assertEqual(r['confirmation']['stage'],'deal_fields_invalid')
+
+    def test_manual_flat_still_recovers_exact_opening_from_range_history(self):
+        self.mt.positions_get.return_value=()
+        exit_deal=NS(**{**vars(self.d),'ticket':601,'order':501,'type':1,'entry':1,
+                       'comment':'manual','magic':0,'price':4001})
+        self.mt.history_deals_get.side_effect=lambda *args,**kwargs: () if kwargs else (self.d,exit_deal)
+        r=self.f.query({**self.o,'result':{'ticket':'500'}})
+        self.assertEqual((r['status'],r['qty'],r['price']),('done',1,4000))
+        self.assertEqual(r['position_identifier'],'700')
+        self.assertNotIn('position',r)
+        self.assertEqual(r['confirmation']['stage'],'confirmed')
+        self.mt.order_send.assert_not_called()
 
     def test_actual_worker_resolves_close_ticket_by_exact_opening_identity(self):
         self.ack.volume=.01;self.ack.price=3999.9

@@ -18,9 +18,20 @@
   const eventLabels={boot:'程序启动',start:'启动自动开仓',pause:'暂停自动开仓',entry_preflight_blocked:'开仓预检暂未通过',entry_skipped:'跳过本次开仓',group_opening:'准备开仓',group_opened:'双边开仓完成',group_closed:'交易组已结束',order_intent:'准备发送订单',order_result:'订单回报',order_reconciled:'订单对账完成',entry_recovered:'延迟回报已确认，双边开仓完成',order_reconcile_retry:'订单对账重试',order_reconcile_exhausted:'快速确认结束，继续低频对账',close_requested:'请求平仓',close_attempt:'尝试平仓',exit_signal:'触发退出条件',entry_threshold_applied:'开仓阈值已更新',reconciled:'持仓对账通过',paper_reconciled:'纸面持仓对账通过',auto_reconciled_flat:'空仓自动对账通过',costs_verified:'费用已核验',cost_verification_pending:'等待费用核验',exit_rules_updated:'已有组退出规则已修改',external_orders_resolved:'原订单成交已核对',recovery_flat_confirmed:'已确认旧组双边平仓',external_position_changed:'发现平台持仓变化，已暂停交易',external_close_backfilled:'平台外部平仓记录已回补',adoption_management:'已有仓位管理状态变更',adoption_closing_costs_checked:'接管仓位平仓费用已核验'};
   const eventFields={request_ms:'下单回报耗时（毫秒）',query_ms:'订单查询耗时（毫秒）',query_timeout_ms:'查询超时预算（毫秒）',error_kind:'错误分类',reason_code:'暂停原因代码',reason_label:'暂停原因',time_ms:'记录时间（毫秒）',enabled_before:'暂停前开仓已启用',keep_entry:'保留原确认时限',threshold:'开仓阈值',reason:'原因',state:'状态',group:'交易组',id:'订单标识',leg:'平台',action:'操作',qty:'数量',price:'价格',status:'回报状态',error:'说明',result:'回报',mode:'模式',entry:'开仓价差',value:'数值',attempt:'尝试次数',net:'净收益',net_estimate:'预估净收益',signal_spread:'触发价差',binance_qty:'币安数量',mt5_lots:'MT5手数',position_mode:'持仓模式',enabled:'启用',code:'原因代码',ticket:'订单号',submitted:'已发送',raw_status:'交易所状态',error_code:'错误码',fee:'手续费',changes:'修改项',before:'原规则',after:'新规则',revision:'规则版本',target_mode:'止盈方式',take_contraction_usd:'收窄量',exit_spread_usd:'退出价差',require_net_profit:'要求最低净收益',min_net_profit_usd:'最低净收益',group_loss_enabled:'单组亏损限制启用',group_max_loss_usd:'单组最大亏损',max_hold_minutes:'从原开仓计持仓时限（分钟）'};
   const eventValues={waiting:'等待检查',checking:'检查中',expired:'已过期',failed:'失败',ready:'通过',done:'已结束',pending:'待确认',unknown:'未知',binance:'币安',mt5:'MT5',open:'开仓',close:'平仓',paper:'纸面',live:'实盘',hedge:'双向持仓',one_way:'单向持仓',contraction:'价差收窄',absolute:'绝对退出价差'};
+  const confirmationLabels={positions_unavailable:'持仓读取暂不可用',identity_unresolved:'订单归属尚未确认',
+    deals_missing:'未查到与本单严格匹配的成交',pending_unavailable:'当前委托查询暂不可用',order_pending:'平台委托尚未结束',
+    order_history_missing:'历史订单尚未返回',order_identity_mismatch:'历史订单归属不一致',order_not_terminal:'历史订单尚未结束',
+    fill_volume_invalid:'历史订单数量字段异常',fill_volume_mismatch:'历史订单数量与成交明细不一致',
+    deals_ambiguous:'成交明细存在歧义',deal_fields_invalid:'成交数量或价格字段无效',query_exception:'成交查询返回字段异常'};
+  Object.assign(eventFields,{confirmation:'MT5成交核对',stage:'核对阶段',reads:'查询路径',api:'读取接口',
+    has_ticket:'已取得订单号',has_deal:'已取得成交号',has_position:'已取得持仓票据',has_position_identifier:'已取得持仓标识',
+    position_matches:'匹配持仓数',deal_matches:'匹配成交数',order_matches:'匹配历史订单数',order_state:'平台订单状态',
+    volume_initial:'订单初始手数',volume_current:'订单剩余手数',deal_lots:'明细成交手数',filled_lots:'订单成交手数',
+    rows:'返回记录数',valid:'通过本机字段校验'});
   function eventDetails(value,key='') {
     if(value&&typeof value==='object') return Object.entries(value).map(([k,v])=>`${eventFields[k]||k}：${eventDetails(v,k)}`).join('；');
     if(typeof value==='boolean')return value?'是':'否';
+    if(key==='stage')return confirmationLabels[value]||(value==='confirmed'?'成交已核对':String(value??'—'));
     return ['state','status','leg','action','mode','position_mode','target_mode'].includes(key)?(eventValues[value]||String(value??'—')):String(value??'—');
   }
   function renderEvents(events) {
@@ -379,13 +390,18 @@
       : oldManaging ? '旧仓管理运行中 · 新开仓未启动'
       : '已连接，尚未启动自动开仓';
     const message=result.message ? `\n${result.message}` : '';
+    const activeGroupIds=new Set((state.groups||[]).filter(g=>g.status!=='closed').map(g=>g.id));
+    const unknownMt5=(state.orders||[]).find(o=>activeGroupIds.has(o.group)&&o.leg==='mt5'&&o.result?.status!=='done');
+    const confirmationStage=unknownMt5?.reconcile?.last_query?.confirmation?.stage||unknownMt5?.result?.confirmation?.stage;
+    const confirmationMessage=unknownMt5
+      ? `\nMT5 成交仍未确认：${confirmationLabels[confirmationStage]||'仍在查询真实成交回报'}；当前不能认定已双边平仓。` : '';
     const next=(!result.connected ? '请先连接行情。'
       : ((!reconciled||state.recovery) ? (result.external_close_status?.message||'请先点击“持仓对账”，对账通过后才能启动自动开仓。')
       : protectionPending ? '平仓完成前不能启动自动开仓；若有成交待确认，先核对再处理已有敞口。'
       : paused ? '已有仓位继续按规则管理。核对平台持仓和暂停原因后，点击“启动自动开仓”手动恢复；程序不会自动恢复开新仓。'
       : result.capabilities?.live_orders ? '实盘通道已连接、持仓已对账；启动时仍会检查配置和策略状态。'
       : '纸面模式不会发送真实订单。'));
-    text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${message}\n${next}${result.plan?`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError));
+    text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${result.plan?`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError));
     const auto=result.auto_values||{}, details=[];
     if(auto.fx?.value) {
       if(loaded && el('auto-fx').checked && !dirtyFields.has('usdt-fx')) el('usdt-fx').value=Number(auto.fx.value).toFixed(6);

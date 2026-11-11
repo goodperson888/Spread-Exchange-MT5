@@ -124,8 +124,50 @@ class ConfirmationTests(unittest.TestCase):
         self.assertEqual(evidence['error_code'],'TIMEOUT')
         self.assertFalse(evidence['valid'])
 
+    def test_repeated_unknown_reads_preserve_pause_time_and_throttle_events(self):
+        self.b.unknown=True;pause=dict(self.e.state['last_pause'])
+        for _ in range(20):
+            self.o['reconcile']['next_ms']=0;self.e.state['alarm']='后台正在核对原订单'
+            self.e.resolve(self.g);self.clock.advance(1)
+        events=self.store.events(100)
+        self.assertEqual(self.e.state['last_pause'],pause)
+        self.assertEqual(sum(e['kind']=='pause' for e in events),1)
+        retries=[e for e in events if e['kind'].startswith('order_reconcile_')]
+        self.assertEqual(len(retries),2)  # First failed read and fast phase exhausted.
+        self.assertEqual(self.o['reconcile']['attempts'],20)
+        first=dict(self.o['reconcile']['first_unconfirmed_query'])
+        self.clock.advance(31);self.o['reconcile']['next_ms']=0
+        self.e.resolve(self.g)
+        self.assertEqual(self.o['reconcile']['first_unconfirmed_query'],first)
+        self.assertEqual(len(self.b.submitted),1)
+        self.assertEqual(self.store.events(1)[0]['kind'],'order_reconcile_exhausted')
+
+    def test_partial_fill_changes_are_durable_without_waiting_for_heartbeat(self):
+        self.b.query=Mock(side_effect=[dict(status='pending',qty=.5,price=4306),
+                                      dict(status='pending',qty=.6,price=4306)])
+        for qty in (.5,.6):
+            self.o['reconcile']['next_ms']=0
+            self.e.resolve(self.g)
+            saved=self.store.load()['orders'][0]
+            self.assertEqual(saved['result']['qty'],qty)
+        self.assertEqual(len(self.b.submitted),1)
+
 
 class EvidenceTests(unittest.TestCase):
+    def test_confirmation_filters_private_nested_fields_and_keeps_first_failure(self):
+        secret='PRIVATE-DO-NOT-EXPORT'
+        result=dict(status='unknown',qty=0,price=0,ticket=secret,deal=secret,
+                    confirmation=dict(stage='fill_volume_mismatch',filled_lots=.02,deal_lots=.01,
+                    account=secret,rows=[secret],reads=[dict(api='deals_ticket',status='unavailable',rows=0,
+                    error_code=-4,error=secret),dict(api=secret,status='error',rows=0)]))
+        state=dict(groups=[dict(id='g')],orders=[dict(id='o',group='g',result=result,
+            reconcile=dict(first_unconfirmed_query=dict(time_ms=123,query_ms=16,**result)))])
+        r=build_report(state,[]);e=r['orders'][0]['result']
+        self.assertNotIn(secret,json.dumps(r))
+        self.assertTrue(e['has_ticket']);self.assertTrue(e['has_deal'])
+        self.assertEqual(e['confirmation']['reads'],[dict(api='deals_ticket',status='unavailable',rows=0,error_code=-4)])
+        self.assertEqual(r['orders'][0]['reconcile']['first_unconfirmed_query']['time_ms'],123)
+
     def test_pause_audit_and_runtime_are_allowlisted_even_without_groups(self):
         secret='PRIVATE-DO-NOT-EXPORT'
         state=dict(enabled=False,recovery=False,alarm='订单状态未知 '+secret,
@@ -154,7 +196,7 @@ class EvidenceTests(unittest.TestCase):
                      query_ms=391,query_timeout_ms=1000,result=dict(status='unknown',error_code=-2013,
                      error_kind='exchange',error='PRIVATE-DO-NOT-EXPORT',ticket='PRIVATE-DO-NOT-EXPORT')))]
         r=build_report(s,events);d=r['events'][0]['data']
-        self.assertEqual(d['result'],dict(status='unknown',error_code=-2013,error_kind='exchange'))
+        self.assertEqual(d['result'],dict(status='unknown',error_code=-2013,error_kind='exchange',has_ticket=True))
         self.assertEqual(d['query_timeout_ms'],1000)
         self.assertNotIn('PRIVATE-DO-NOT-EXPORT',json.dumps(r))
 

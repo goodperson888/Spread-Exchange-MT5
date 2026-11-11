@@ -34,6 +34,7 @@ class Engine:
     RECONCILE_DELAYS_MS = (100, 300, 700, 1200)
     QUERY_TIMEOUT_MS = 1000
     RECENT_RECONCILE_MS = 10000
+    RECONCILE_LOG_INTERVAL_MS = 30000
 
     def __init__(self, store, broker):
         self.store,self.broker=store,broker
@@ -41,6 +42,7 @@ class Engine:
         # resume an interrupted entry, even if the wall clock moved backwards.
         self._entry_deadlines={}
         self._execution_timers={}
+        self._reconcile_notices={}
         self.state=store.load() or dict(groups=[],orders=[],last_open_ms=0,enabled=False,mode='paper',key=None,alarm='',recovery=False)
         self.state['enabled']=False
         self.state['boot_ms']=stamp()
@@ -261,6 +263,7 @@ class Engine:
                     merged['reconcile_time_ms']=stamp()
                 o['result']=merged
                 if r.get('status')=='done':
+                    self._reconcile_notices.pop(o['id'],None)
                     self.save('order_reconciled',{'id':o['id'],'result':merged,
                               'attempt':reconcile['attempts'],'query_ms':query_ms,'query_timeout_ms':query_budget})
                     continue
@@ -272,6 +275,8 @@ class Engine:
                   'query_timeout_ms':query_budget,'result':evidence,
                   'status':r.get('status','unknown') if isinstance(r,dict) else 'unknown'}
             if isinstance(r,dict) and r.get('error'): data['error']=str(r['error'])
+            reconcile.setdefault('first_unconfirmed_query',{'time_ms':stamp(),**reconcile['last_query']})
+            first_exhausted=not reconcile.get('exhausted') and reconcile['attempts']>=len(self.RECONCILE_DELAYS_MS)
             if reconcile['attempts']>=len(self.RECONCILE_DELAYS_MS):
                 reconcile['exhausted']=True
                 # Attempt count must never invalidate an unexpired entry
@@ -279,14 +284,27 @@ class Engine:
                 # unwind; recent unknown orders need prompt bounded reads.
                 recent=stamp()-reconcile['started_ms']<self.RECENT_RECONCILE_MS
                 reconcile['next_ms']=stamp()+(500 if recent else 2000)
-                self.save('order_reconcile_exhausted',data)
+                kind='order_reconcile_exhausted'
             else:
                 reconcile['next_ms']=max(stamp()+100,reconcile['started_ms']+
                     self.RECONCILE_DELAYS_MS[reconcile['attempts']])
-                self.save('order_reconcile_retry',data)
+                kind='order_reconcile_retry'
+            # Stable unknown reads need no synchronous journal commit every
+            # two seconds. Persist all fill/identity/stage changes immediately,
+            # plus a periodic heartbeat; intent/result durability is unchanged.
+            identity=tuple(str(o['result'].get(k,'')) for k in ('ticket','deal','position','position_identifier'))
+            signature=(evidence,identity)
+            previous=self._reconcile_notices.get(o['id'])
+            checked=time.monotonic()
+            if (force or first_exhausted or previous is None or previous[0]!=signature or
+                    (checked-previous[1])*1000>=self.RECONCILE_LOG_INTERVAL_MS):
+                self._reconcile_notices[o['id']]=(copy.deepcopy(signature),checked)
+                self.save(kind,data)
         if self.uncertain(g):
             reason='订单状态未知，禁止重发；正在分层查询成交和持仓'
-            if self.state.get('alarm')!=reason: self.pause(reason,keep_entry=True)
+            # Background position checks may update alarm text every scan.
+            # Do not turn that into a new pause/time stamp on every scan.
+            if self.state.get('enabled') or not self.state.get('last_pause'): self.pause(reason,keep_entry=True)
             return False
         return True
 

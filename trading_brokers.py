@@ -18,6 +18,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 from urllib.error import HTTPError, URLError
 from liquidation_risk import mt5_risk_fields
+from execution_evidence import confirmation_evidence
 
 
 def _utc_datetime_from_timestamp(seconds):
@@ -529,49 +530,105 @@ class NativeMT5Fills:
         return data
 
     def query(self, order):
-        from datetime import datetime, timezone
         saved = order.get('result') or {}
         ticket = saved.get('ticket') or order.get('ticket')
         try: ticket = str(int(ticket)) if int(ticket)>0 else None
         except (TypeError,ValueError): ticket = None
-        current = self.positions(order) if order['action']=='open' else ()
-        rows = self.mt.history_deals_get(ticket=int(ticket)) if ticket else None
-        if ticket:
-            matches = self.matches(rows, order, ticket)
-        else:
-            # Older journals discarded the acknowledgement ticket. The exact
-            # unique opening comment can recover its position without dates.
-            matches = []
-            if len(current)==1:
-                rows = self.mt.history_deals_get(position=current[0].identifier)
-                matches = self.matches(rows, order)
-            if not matches:
-                # Broker history clocks can differ from UTC. Widen only this
-                # read, keeping exact comment/magic/symbol/direction matching.
-                start = order['created_ms']/1000-86400
-                end = order['created_ms']/1000+86400
-                rows = self.mt.history_deals_get(_utc_datetime_from_timestamp(start),
-                                                _utc_datetime_from_timestamp(end))
-                matches = self.matches(rows, order)
+        info={'reads':[]}
+        try: current = self.positions(order) if order['action']=='open' else ()
+        except Exception: current = ()
+        info['position_matches']=len(current)
+
+        def read(label, method, *args, **kwargs):
+            record={'api':label}
+            try:
+                rows=method(*args,**kwargs)
+                record.update(status='unavailable' if rows is None else 'ok' if rows else 'empty',rows=len(rows or ()))
+            except Exception:
+                rows=None;record.update(status='error',rows=0)
+            if rows is None:
+                try:
+                    error=self.mt.last_error()
+                    if isinstance(error,(tuple,list)) and error and isinstance(error[0],int): record['error_code']=error[0]
+                except Exception: pass
+            info['reads'].append(record)
+            return rows
+
+        def finish(stage, result=None):
+            info['stage']=stage
+            return {**dict(status='unknown',qty=0,price=0),
+                    **({'ticket':str(ticket)} if ticket else {}),**(result or {}),
+                    'confirmation':confirmation_evidence(info)}
+
+        def time_range():
+            created=order['created_ms']/1000
+            return (_utc_datetime_from_timestamp(created-86400),_utc_datetime_from_timestamp(created+86400))
+
+        def matched(rows):
+            rows=rows or ()
+            base=[d for d in rows if str(d.order)==str(ticket)] if ticket else list(rows)
+            info.update(candidate_rows=len(rows),ticket_matches=len(base),
+                        symbol_matches=sum(d.symbol==self.symbol for d in base),
+                        magic_matches=sum(d.magic==self.magic for d in base),
+                        side_matches=sum(d.type==(0 if order['action']=='open' else 1) for d in base),
+                        entry_matches=sum(d.entry in ((0,) if order['action']=='open' else (1,2,3)) for d in base))
+            # An exact deal ID from this request may recover a missing order
+            # ID even when the broker rewrote the comment. Never match by
+            # price/volume/time proximity or use a deal ID as an order ID.
+            deal=saved.get('deal')
+            if not ticket and deal:
+                anchors=[d for d in rows if str(d.ticket)==str(deal)
+                         and self.matches((d,),order,str(d.order))]
+                ids={str(d.order) for d in anchors}
+                if len(ids)==1: return self.matches(rows,order,ids.pop())
+            return self.matches(rows,order,ticket)
+
+        rows = read('deals_ticket',self.mt.history_deals_get,ticket=int(ticket)) if ticket else None
+        matches=matched(rows)
+        if not matches and len(current)==1:
+            rows=read('deals_position',self.mt.history_deals_get,position=current[0].identifier)
+            matches=matched(rows)
+        if not matches:
+            # Some terminals expose a just-filled order in position/range
+            # history before the ticket index. All fallbacks retain exact
+            # symbol, magic, direction and order/deal/comment ownership.
+            rows=read('deals_range',self.mt.history_deals_get,*time_range())
+            matches=matched(rows)
+        if not ticket:
             if len({str(d.order) for d in matches}) != 1:
-                return dict(status='unknown',qty=0,price=0)
+                return finish('identity_unresolved')
             ticket = str(matches[0].order)
-        unknown = dict(status='unknown',qty=0,price=0,ticket=str(ticket))
+        info['deal_matches']=len(matches)
         # A visible deal can be only part of an IOC fill or a still-live order.
-        pending = self.mt.orders_get(ticket=int(ticket))
-        terminal = self.mt.history_orders_get(ticket=int(ticket))
-        if pending is None or pending or not terminal: return unknown
+        pending = read('pending_ticket',self.mt.orders_get,ticket=int(ticket))
+        if pending is None: return finish('pending_unavailable')
+        if pending: return finish('order_pending')
+        terminal = read('orders_ticket',self.mt.history_orders_get,ticket=int(ticket))
+        if not terminal:
+            terminal=read('orders_range',self.mt.history_orders_get,*time_range())
+        if not terminal: return finish('order_history_missing')
         terminal = [x for x in terminal if str(x.ticket)==str(ticket) and x.symbol==self.symbol
                     and x.magic==self.magic and x.type==(0 if order['action']=='open' else 1)]
-        if len(terminal)!=1: return unknown
+        info['order_matches']=len(terminal)
+        if len(terminal)!=1: return finish('order_identity_mismatch')
         item = terminal[0]
+        info.update(order_state=item.state,volume_initial=item.volume_initial,volume_current=item.volume_current)
         if item.state not in (self.mt.ORDER_STATE_FILLED,self.mt.ORDER_STATE_CANCELED,
-                              self.mt.ORDER_STATE_REJECTED,self.mt.ORDER_STATE_EXPIRED): return unknown
+                              self.mt.ORDER_STATE_REJECTED,self.mt.ORDER_STATE_EXPIRED): return finish('order_not_terminal')
+        if any(not isinstance(v,(int,float)) or isinstance(v,bool) or not math.isfinite(v) or v<0
+               for v in (item.volume_initial,item.volume_current)): return finish('fill_volume_invalid')
+        if any(not isinstance(v,(int,float)) or isinstance(v,bool) or not math.isfinite(v) or v<=0
+               for d in matches for v in (d.volume,d.price)): return finish('deal_fields_invalid')
+        info['deal_lots']=sum(d.volume for d in matches)
         filled = item.volume_initial-item.volume_current
-        if not math.isfinite(filled) or filled<0: return unknown
-        if abs(sum(d.volume for d in matches)-filled)>1e-9: return unknown
-        if filled==0: return dict(status='done',qty=0,price=0,ticket=str(ticket))
-        return {**unknown,**self.aggregate(matches,order,current)}
+        if not math.isfinite(filled) or filled<0: return finish('fill_volume_invalid')
+        info['filled_lots']=filled
+        if filled>0 and not matches: return finish('deals_missing')
+        if abs(sum(d.volume for d in matches)-filled)>1e-9: return finish('fill_volume_mismatch')
+        if filled==0: return finish('confirmed',dict(status='done',qty=0,price=0))
+        result=self.aggregate(matches,order,current)
+        stage='confirmed' if result['status']=='done' else 'deals_ambiguous'
+        return finish(stage,result)
 
     def submitted(self, order, result, contract):
         ticket = str(result.order or '')
@@ -585,7 +642,7 @@ class NativeMT5Fills:
         if not (math.isfinite(qty) and 0<qty<=order['requested']+1e-7
                 and isinstance(price,(int,float)) and math.isfinite(price) and price>0):
             # Unusual acknowledgements use verified terminal order + deal data.
-            if result.order:
+            if result.order or result.deal:
                 try: data.update(self.query({**order,'result':data}))
                 except Exception: data['error']='MT5 成交回报待核对，保留订单编号继续查询'
             if data['status']!='done':
@@ -758,8 +815,6 @@ def worker_main():
         if str(a.login)!=str(settings['account']) or a.server!=settings['server']:
             raise ValueError('MT5 账户发生变化，已阻止交易')
         return a,t
-    def query_order(o):
-        return NativeMT5Fills(mt,settings['symbol'],magic).query(o)
     for line in sys.stdin:
         try:
             r=json.loads(line); cmd=r['command']
@@ -813,7 +868,7 @@ def worker_main():
                     rates=mt.copy_rates_from_pos(s.name,tf,1,r['count'])
                     if rates is None: raise ValueError('MT5 历史数据读取失败')
                     data=[dict(t=int(x['time'])*1000,close=float(x['close'])) for x in rates]
-                elif cmd=='query': data=query_order(r['order'])
+                elif cmd=='query': data=NativeMT5Fills(mt,s.name,magic).query(r['order'])
                 elif cmd=='margin':
                     value=mt.order_calc_margin(mt.ORDER_TYPE_BUY,s.name,r['lots'],mt.symbol_info_tick(s.name).ask)
                     if value is None: raise ValueError('无法核验 MT5 保证金')
