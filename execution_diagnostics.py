@@ -5,6 +5,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from execution_latency import PROCESS_LATENCY
 from execution_evidence import reason_code, REASON_LABELS, result_evidence
 
 
@@ -201,4 +202,7 @@ def export_report(path):
         state=json.loads(row[0]) if row else {}
     finally:
         db.close()
-    return build_report(state,events)
+    report=build_report(state,events)
+    report['latency']=PROCESS_LATENCY.snapshot()
+    report['notes'].append('latency为当前进程内最近最多512个阶段样本的统计，重启或重新连接清空，mode区分纸面与实盘；不增加平台查询或日志提交。strategy_pass为一次engine.tick，含执行与确认，decision为条件评估及估值；quote_wait为最新一侧报价首次被策略取用时距本机接收的时间，两边quote_age分别为策略取用时的本机报价年龄，不能当作跨平台网络延迟。')
+    return report

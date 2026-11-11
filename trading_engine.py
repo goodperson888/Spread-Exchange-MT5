@@ -57,6 +57,10 @@ class Engine:
 
     def save(self, kind, data=None): self.store.commit(self.state,kind,data)
 
+    def _latency(self, phase, value):
+        latency = getattr(self, 'latency', None)
+        if latency is not None: latency.record(phase, value)
+
     def active(self): return [g for g in self.state['groups'] if g['status']!='closed']
 
     def pause(self, reason='已暂停新开仓；已有仓位继续管理', keep_entry=False):
@@ -136,6 +140,7 @@ class Engine:
         self.state['orders'].append(o);self.save('order_intent',{'id':o['id'],'group':g['id'],'leg':leg,'action':action,'qty':qty})
         request_started=time.monotonic()
         o['intent_journal_ms']=round((request_started-journal_started)*1000,3)
+        self._latency('intent_journal_ms', o['intent_journal_ms'])
         o['dispatch_ms']=stamp()
         try: result=self.broker.submit(copy.deepcopy(o))
         except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
@@ -153,6 +158,7 @@ class Engine:
                         error_code='INVALID_RESPONSE',error_kind='invalid_response')
             initial_evidence.update(error_code='INVALID_RESPONSE',error_kind='invalid_response')
         result['request_ms']=round((time.monotonic()-request_started)*1000)
+        self._latency(leg+'_'+action+'_request_ms', result['request_ms'])
         result['response_received_ms']=stamp()
         if result.get('status')=='done' and float(result.get('qty',0))>0:
             result['fill_time_ms']=stamp()
@@ -194,6 +200,7 @@ class Engine:
             timing['confirmed_ms']=stamp()
             # A restart cannot reconstruct a monotonic timer. Never invent latency.
             timing['elapsed_ms']=round((time.monotonic()-started)*1000,3) if started is not None else None
+            if timing['elapsed_ms'] is not None: self._latency('pair_'+action+'_ms', timing['elapsed_ms'])
 
     def _record_spread(self, g, action, signal=None):
         rows=[o for o in self.state['orders'] if o['group']==g['id'] and o['action']==action
@@ -288,6 +295,7 @@ class Engine:
                              and str(o['result']['ticket'])!=str(r['ticket']))
             valid=valid and not ticket_mismatch
             query_ms=round((time.monotonic()-query_started)*1000)
+            self._latency('confirmation_query_ms', query_ms)
             evidence=result_evidence(r)
             evidence['valid']=valid
             if not shape_valid:
@@ -659,6 +667,8 @@ class Engine:
         if not valid_quote(q,c):
             if self.active(): self.state['alarm']='报价过期、时钟偏差或品种不符，等待有效行情；已有仓位仍未平仓'
             return
+        measure = getattr(self, 'latency', None) is not None
+        decision_elapsed = 0.
         exit_event=False
         for g in self.active():
             if g['key']!=q['key']: raise ValueError('当前行情与持仓账户或品种不一致')
@@ -675,7 +685,10 @@ class Engine:
                         self._entry_deadlines.pop(g['id'],None)
                         g['status']='unwinding';g['reason']='开仓确认窗口已结束或流程中断，正在保护性平仓'
                         self.pause(g['reason'])
+            started = time.monotonic() if measure else 0
             g['valuation']=self.valuation(g,q)
+            if measure: decision_elapsed += time.monotonic()-started
+        started = time.monotonic() if measure else 0
         opened=[g for g in self.active() if g['status']=='open' and (not g.get('imported') or g.get('management_enabled'))]
         total=sum(g.get('valuation',{}).get('net',0) for g in self.active() if not g.get('imported'))
         loss=c['strategy']['total_loss_enabled'] and total<=-c['strategy']['total_max_loss_usd']
@@ -708,11 +721,15 @@ class Engine:
                     require_net_profit=s['require_net_profit'],target_mode=s['target_mode'])
                 if g['id'] in basket_exit: decision['basket_estimated_net']=sum(x['valuation']['net'] for x in basket)
                 g.update(status='closing',reason=reason,exit_signal=q['exit'],exit_decision=decision)
+                if measure: decision_elapsed += time.monotonic()-started
                 exit_event=True;self.save('exit_signal',{'group':g['id'],'reason':reason,**decision})
                 if reason in ('本策略总浮动亏损上限','单组亏损上限'): self.pause(reason)
+                started = time.monotonic() if measure else 0
+        if measure: decision_elapsed += time.monotonic()-started
         for g in self.active():
             if g['status'] in ('closing','unwinding'):
                 exit_event=True;self.close_group(g,q)
+        started = time.monotonic() if measure else 0
         s=c['strategy'];all_active=self.active();active=[g for g in all_active if not g.get('imported')];grid_index=0;open_threshold=s['entry_spread_usd'];grid_allowed=True
         if s.get('grid_enabled') and active:
             # Grid additions are separate paired groups. They only continue
@@ -723,10 +740,12 @@ class Engine:
                 grid_allowed=grid_index<=int(s['grid_max_adds'])
             else:
                 grid_allowed=False
-        if (self.state['enabled'] and not exit_event and all(g['status']=='open' for g in all_active)
+        should_open = (self.state['enabled'] and not exit_event and all(g['status']=='open' for g in all_active)
             and grid_allowed and len(active)<s['max_groups']
             and sum(g['lots'] for g in all_active)+p['lots']<=s['max_total_lots']+1e-9
-            and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and q['entry']>=open_threshold):
+            and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and q['entry']>=open_threshold)
+        if measure: self._latency('decision_ms', (decision_elapsed+time.monotonic()-started)*1000)
+        if should_open:
             self.open(c,p,q,grid_index=grid_index,min_entry_spread=open_threshold)
 
     @staticmethod

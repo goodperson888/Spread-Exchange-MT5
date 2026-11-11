@@ -262,7 +262,9 @@ class AdoptionTests(unittest.TestCase):
         closes=[o for o in self.engine.state['orders'] if o['action']=='close']
         r.terminal.call.return_value=[dict(comment=o['id'],volume=.01,commission=-.1,fee=0,swap=-.1)
             for o in closes if o['leg']=='mt5']
-        r.binance.trades.return_value=[{'commission':'.1'}];r.binance.commissions_usdt.return_value=.1
+        r.binance.trades.side_effect=lambda symbol,ticket:[{'commission':'.1', 'qty':str(next(
+            o['result']['qty'] for o in closes if o['leg']=='binance' and o['result']['ticket']==ticket))}]
+        r.binance.commissions_usdt.return_value=.1
         r.binance.income.return_value=[dict(incomeType='FUNDING_FEE',time=g['opened_ms'],income='-.3')]
         r._verify_import_costs(g)
         self.assertEqual(r.binance.trades.call_count,2)  # only newly sent close orders, no synthetic IDs

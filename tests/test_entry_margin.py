@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import _test_runtime
 import server
 from execution_diagnostics import build_report
+from execution_latency import LatencyStats
 from market_push import TickFreshness
 from trading_brokers import PaperBroker
 from trading_engine import Engine, stamp
@@ -23,6 +24,7 @@ class EntryMarginTests(unittest.TestCase):
         self.c=config();self.c['execution']['mode']='live';self.c['mt5']['adapter']='native'
         self.c['costs'].update(usdt_usd_auto=False,binance_fee_auto=False)
         self.r=server.TradingRuntime.__new__(server.TradingRuntime)
+        self.r.latency=LatencyStats()
         self.r.lock=threading.RLock();self.r.engine=Engine(self.store,PaperBroker());self.r.store=self.store
         self.r.connected=False;self.r.reconciled=False;self.r.config=None
         for key in ('pump','terminal','market_stream','entry_preflight','risk_monitor','external_monitor','push_bridge'):
@@ -48,7 +50,7 @@ class EntryMarginTests(unittest.TestCase):
         self.stream=Mock();self.stream.quote.return_value=dict(bid=4306,ask=4306.1,time_ms=stamp())
         patches=dict(Binance=Mock(return_value=self.exchange),Terminal=Mock(return_value=self.terminal),
             BinanceBookTicker=Mock(return_value=Mock(start=Mock(return_value=self.stream))),
-            EntryPreflight=Mock(),BinanceRiskMonitor=Mock(),QuotePump=Mock(),checked_spec=Mock())
+            EntryPreflight=Mock(),BinanceRiskMonitor=Mock(),MaintenanceMonitor=Mock(),QuotePump=Mock(),checked_spec=Mock())
         for name,value in patches.items():
             p=patch.object(server,name,value);p.start();self.addCleanup(p.stop)
         p=patch.object(server.external_closes,'ExternalCloseMonitor',Mock());p.start();self.addCleanup(p.stop)
