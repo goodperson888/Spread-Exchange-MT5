@@ -867,3 +867,15 @@ test('record hints appear on hover or keyboard focus and dismiss on Escape and w
   f.el('view-records').onfocusin({target:{closest:()=>target}});assert.equal(f.el('record-tooltip').hidden,false);
   f.windowListeners['gold-workspace-changed']();assert.equal(f.el('record-tooltip').hidden,true);
 });
+
+
+test('closed group reason hint shows trigger profit separately from final result',async()=>{
+ const snapshot=unknownSnapshot('closed');
+ snapshot.state.orders=[];
+ Object.assign(snapshot.state.groups[0],{reason:'逐组止盈',exit_decision:{signal_spread:.5,contraction:2.1,
+  estimated_net:.2,estimated_rebate:1.2,min_net_profit:0,require_net_profit:true}});
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ const html=f.el('groups').innerHTML;
+ assert.match(html,/data-record-hint="[^"]*原因：逐组止盈[^"]*触发时[^"]*预估净收益/);
+ assert.match(html,/实际成交与费用可能改变最终结果/);
+});

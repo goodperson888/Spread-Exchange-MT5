@@ -101,7 +101,12 @@
       if(g.status!=='open'||g.valuation_status==='unverified'||!v||!c||g.key!==q.key)return g;
       const b=Number(v.remaining?.binance||0),m=Number(v.remaining?.mt5||0);
       const fx=q.usdt_usd??c.usdt_usd, oldFx=basis.usdt_usd??c.usdt_usd;
-      const gross=v.gross-b*(q.binance.ask*fx-basis.binance.ask*oldFx)+m*(q.mt5.bid-basis.mt5.bid);
+      const decomposed=Number.isFinite(v.binance_pnl_usdt)&&Number.isFinite(v.mt5_pnl_usd);
+      const binancePnl=decomposed?v.binance_pnl_usdt-b*(q.binance.ask-basis.binance.ask):undefined;
+      const mt5Pnl=decomposed?v.mt5_pnl_usd+m*(q.mt5.bid-basis.mt5.bid):undefined;
+      // Older snapshots lack the PnL split; project price moves at their saved
+      // FX until the next server snapshot, without revaluing contract notional.
+      const gross=decomposed?binancePnl*fx+mt5Pnl:v.gross-b*(q.binance.ask-basis.binance.ask)*oldFx+m*(q.mt5.bid-basis.mt5.bid);
       const exitBinance=b*q.binance.ask*fx*c.binance_taker_percent/100;
       const exitMt5=m/g.contract*c.mt5_commission_per_lot_side;
       const exit=exitBinance+exitMt5;
@@ -109,7 +114,7 @@
       const rebateBinance=(Number(v.rebate_fee_base_binance||0)+Math.max(0,exitBinance))*Number(c.binance_rebate_percent||0)/100;
       const rebateMt5=(Number(v.rebate_fee_base_mt5||0)+Math.max(0,exitMt5))*Number(c.mt5_rebate_percent||0)/100;
       const before=gross-v.fees-exit+v.carry;
-      return {...g,valuation:{...v,gross,estimated_exit_fee:exit,estimated_exit_fee_binance:exitBinance,estimated_exit_fee_mt5:exitMt5,
+      return {...g,valuation:{...v,...(decomposed?{binance_pnl_usdt:binancePnl,mt5_pnl_usd:mt5Pnl,valuation_fx:fx}:{}),gross,estimated_exit_fee:exit,estimated_exit_fee_binance:exitBinance,estimated_exit_fee_mt5:exitMt5,
         estimated_rebate:rebateBinance+rebateMt5,estimated_rebate_binance:rebateBinance,estimated_rebate_mt5:rebateMt5,
         net_before_rebate:before,net:before+rebateBinance+rebateMt5}};
     });

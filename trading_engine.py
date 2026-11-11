@@ -48,6 +48,9 @@ class Engine:
         self.state['boot_ms']=stamp()
         for g in self.state['groups']:
             if g.get('imported'): g['management_enabled']=False
+            if (g.get('status')=='closed' and g.get('valuation',{}).get('pnl_schema_version')!=2
+                    and not self.uncertain(g) and max(self.amounts(g).values())<1e-8):
+                g['valuation']=self.valuation(g,dict(binance=dict(ask=0),mt5=dict(bid=0)))
         self.state['recovery']=any(g['status']!='closed' for g in self.state['groups'])
         if self.state['recovery']: self.state['alarm']='程序重启，须连接原账户并完成持仓对账后恢复管理'
         self.save('boot')
@@ -159,7 +162,21 @@ class Engine:
         o['initial_result']={**initial_evidence,'request_ms':result['request_ms'],
                              'response_received_ms':result['response_received_ms'],'valid':valid}
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
+        if action=='close' and self._price_only_full_fill(o):
+            # One bounded read, never another order write. Keep the direct
+            # acknowledgement intact and do not re-enable a paused engine.
+            o['reconcile']['next_ms']=stamp()
+            self.resolve(g)
         return o
+
+    @staticmethod
+    def _price_only_full_fill(o):
+        initial=o.get('initial_result',{})
+        return (o.get('leg')=='binance' and initial.get('raw_status')=='FILLED'
+                and initial.get('status')=='done' and initial.get('valid') is False
+                and initial.get('validation_issues')==['nonpositive_fill_price']
+                and initial.get('qty')==o.get('requested') and initial.get('price')==0
+                and bool(o.get('result',{}).get('ticket')))
 
     def _begin_execution(self, g, action, q=None, started=None, started_ms=None):
         key='execution_'+action
@@ -191,6 +208,11 @@ class Engine:
         if signal is None:
             signal=next((o.get('signal_spread') for o in rows if o.get('signal_spread') is not None),None)
         for o in rows:
+            if 'reference' in o and 'slippage' in o:
+                sell=(o['leg']=='binance')==(o['action']=='open')
+                adverse=(o['reference']-o['result']['price']) if sell else (o['result']['price']-o['reference'])
+                o['adverse_slippage']=adverse
+                o['slippage_exceeded']=adverse>o['slippage']+1e-8
             if signal is not None: o['signal_spread']=signal
             o['actual_spread']=actual
             o['spread_slippage']=actual-signal if signal is not None else None
@@ -257,14 +279,20 @@ class Engine:
             except Exception as exc:
                 r={'status':'unknown','qty':0,'price':0,'error':str(exc)}
             shape_valid=self.result_valid(r,o['requested'])
-            valid=shape_valid and r.get('qty',0)>=o['result'].get('qty',0)
+            minimum=o['result'].get('qty',0)
+            if self._price_only_full_fill(o): minimum=max(minimum,o['initial_result']['qty'])
+            valid=shape_valid and r.get('qty',0)>=minimum
+            ticket_mismatch=(isinstance(r,dict) and o['leg']=='binance'
+                             and o['result'].get('ticket') and r.get('ticket')
+                             and str(o['result']['ticket'])!=str(r['ticket']))
+            valid=valid and not ticket_mismatch
             query_ms=round((time.monotonic()-query_started)*1000)
             evidence=result_evidence(r)
             evidence['valid']=valid
             if not shape_valid:
                 evidence.update(error_code='INVALID_RESPONSE',error_kind='invalid_response')
                 evidence['validation_issues']=validation_issues(r,o['requested'])
-            elif not valid: evidence['validation_issues']=['quantity_regressed']
+            elif not valid: evidence['validation_issues']=['identity_mismatch' if ticket_mismatch else 'quantity_regressed']
             reconcile['last_query']={**evidence,'time_ms':stamp(),'query_ms':query_ms,'query_timeout_ms':query_budget}
             if valid:
                 merged={**o['result'],**r}
@@ -324,7 +352,15 @@ class Engine:
         return True
 
     def valuation(self, g, q):
-        fx=q.get('usdt_usd',g['costs']['usdt_usd']);c=g['costs'];gross=0;fees=0
+        c=g['costs'];fx=q.get('usdt_usd',c['usdt_usd']);fees=0
+        if g.get('status')=='closed':
+            # Freeze historical PnL conversion, including when fees arrive later.
+            closes=[o for o in self.state['orders'] if o['group']==g['id'] and o['leg']=='binance'
+                    and o['action']=='close' and o.get('result',{}).get('qty',0)>0]
+            total=sum(o['result']['qty'] for o in closes)
+            historical=sum(o['result']['qty']*o.get('fx',c['usdt_usd']) for o in closes)/total if total else c['usdt_usd']
+            fx=g.get('valuation_fx',historical)
+        pnl=dict(binance=0.,mt5=0.)
         fee_base=dict(binance=0.,mt5=0.);fee_flags=[]
         owned=self.amounts(g)
         for o in self.state['orders']:
@@ -332,13 +368,16 @@ class Engine:
             r=o.get('result',{});qty=r.get('qty',0);price=r.get('price',0)
             sign=1 if (o['leg']=='binance')==(o['action']=='open') else -1
             order_fx=o.get('fx',g['costs']['usdt_usd'])
-            gross+=sign*qty*price*(order_fx if o['leg']=='binance' else 1)
+            pnl[o['leg']]+=sign*qty*price
             fee=r.get('fee', qty*price*c['binance_taker_percent']/100 if o['leg']=='binance' else qty/g['contract']*c['mt5_commission_per_lot_side'])*(order_fx if o['leg']=='binance' else 1)
             fees+=fee
             fee_base[o['leg']]+=max(0,fee)
             if qty>0: fee_flags.append(r.get('fee_verified') is True)
-        gross-=owned['binance']*q['binance']['ask']*fx
-        gross+=owned['mt5']*q['mt5']['bid']
+        pnl['binance']-=owned['binance']*q['binance']['ask']
+        pnl['mt5']+=owned['mt5']*q['mt5']['bid']
+        # Linear USDT futures settle the price difference in USDT. Convert
+        # that PnL once, rather than converting both full contract notionals.
+        gross=pnl['binance']*fx+pnl['mt5']
         exit_fee_binance=owned['binance']*q['binance']['ask']*fx*c['binance_taker_percent']/100
         exit_fee_mt5=owned['mt5']/g['contract']*c['mt5_commission_per_lot_side']
         exit_fee=exit_fee_binance+exit_fee_mt5
@@ -363,7 +402,8 @@ class Engine:
         rebate=rebate_binance+rebate_mt5
         before_rebate=gross-fees-exit_fee+carry
         flat=max(owned.values())<1e-8
-        return dict(gross=round(gross,8),fees=round(fees,8),estimated_exit_fee=round(exit_fee,8),
+        return dict(pnl_schema_version=2,binance_pnl_usdt=round(pnl['binance'],8),mt5_pnl_usd=round(pnl['mt5'],8),valuation_fx=fx,
+                    gross=round(gross,8),fees=round(fees,8),estimated_exit_fee=round(exit_fee,8),
                     estimated_exit_fee_binance=round(exit_fee_binance,8),estimated_exit_fee_mt5=round(exit_fee_mt5,8),
                     mt5_swap=round(mt5_swap,8),binance_funding=round(funding,8),carry=round(carry,8),
                     net_before_rebate=round(before_rebate,8),estimated_rebate=round(rebate,8),
@@ -479,11 +519,8 @@ class Engine:
             self._entry_deadlines.pop(g['id'],None)
             self._execution_timers.pop((g['id'],'open'),None)
             return
-        initial=first.get('initial_result',{})
-        if (result.get('status')!='done' and first_leg=='binance' and self.state['enabled']
-                and initial.get('raw_status')=='FILLED' and initial.get('status')=='done'
-                and initial.get('valid') is False and result.get('ticket')
-                and initial.get('qty')==p['qty'] and initial.get('price')==0
+        if (result.get('status')!='done' and self.state['enabled']
+                and self._price_only_full_fill(first)
                 and time.monotonic()<self._entry_deadlines[g['id']]):
             # A terminal FILLED acknowledgement without a price is incomplete,
             # not permission to hedge. Try one read within the original entry
@@ -522,8 +559,23 @@ class Engine:
         self._complete_execution(g,'close')
         self._execution_timers.pop((g['id'],'open'),None)
         g['valuation']=self.valuation(g,q)
+        g['valuation_fx']=g['valuation']['valuation_fx']
         self.save('group_closed',{'group':g['id'],'net_estimate':g['valuation']['net']})
         return True
+
+    def _close_quote(self, q):
+        provider=getattr(self,'close_quote_provider',None)
+        if provider:
+            try: q=provider()
+            except Exception: q=None
+        return q
+
+    def _close_order(self, g, leg, qty, q, refresh=True):
+        if refresh: q=self._close_quote(q)
+        if not valid_group_quote(q,g['key'],g['parameters']):
+            self.state['alarm']='平仓等待有效新报价；成交查询继续，当前尚未双平'
+            return
+        return self.order(g,leg,'close',qty,q)
 
     def close_group(self, g, q):
         self._begin_execution(g,'close',q)
@@ -534,6 +586,7 @@ class Engine:
         # Status reads must precede account ownership checks: a delayed fill
         # changes the expected exposure that those checks compare against.
         if not self.resolve(g): return
+        q=self._close_quote(q)
         if not valid_group_quote(q,g['key'],g['parameters']):
             self.state['alarm']='平仓等待有效新报价；成交查询继续，当前尚未双平'
             return
@@ -546,6 +599,21 @@ class Engine:
         amounts=self.amounts(g)
         if max(amounts.values())<1e-8:
             self.finalize_flat(g,q);return
+        # A normal profit exit can be deferred only before either leg closes.
+        # Once any close fills, always finish reducing the other leg instead
+        # of leaving exposure while waiting for a more profitable price.
+        if (g.get('reason')=='逐组止盈' and g['parameters'].get('exit_mode')=='group'
+                and not any(o['group']==g['id'] and o['action']=='close'
+                            and o.get('result',{}).get('qty',0)>0 for o in self.state['orders'])):
+            v=self.valuation(g,q);s=g['parameters']
+            if (not self.target(g,g['entry'],q['exit']) or
+                    (s['require_net_profit'] and v['net']<s['min_net_profit_usd'])):
+                g.update(status='open',reason='止盈报价已变化，继续持仓等待条件')
+                g.pop('exit_signal',None);g.pop('exit_decision',None);g.pop('execution_close',None)
+                self._execution_timers.pop((g['id'],'close'),None)
+                self.save('exit_deferred',dict(group=g['id'],reason=g['reason'],
+                          signal_spread=q['exit'],estimated_net=v['net'],min_net_profit=s['min_net_profit_usd']))
+                return
         if g['attempts']>=g['retry_limit']:
             g['status']='attention';self.pause('减仓重试达到上限，仍有敞口；请检查账户后使用“重试平仓”');return
         g['attempts']+=1;self.save('close_attempt',{'group':g['id'],'attempt':g['attempts']})
@@ -553,9 +621,9 @@ class Engine:
         # hedged portion until that reduction is confirmed.
         before_m, before_b = amounts['mt5'], amounts['binance']
         if before_m-before_b>1e-8:
-            self.order(g,'mt5','close',before_m-before_b,q)
+            self._close_order(g,'mt5',before_m-before_b,q)
         elif before_b-before_m>1e-8:
-            self.order(g,'binance','close',before_b-before_m,q)
+            self._close_order(g,'binance',before_b-before_m,q)
         if self.uncertain(g): return
         amounts=self.amounts(g); before_m, before_b=amounts['mt5'],amounts['binance']
         if abs(before_m-before_b)>1e-8:
@@ -566,11 +634,11 @@ class Engine:
         # than MT5 actually closed. This prevents a rejected/partial MT5 close
         # from creating a naked MT5 long.
         if before_m>1e-8:
-            self.order(g,'mt5','close',before_m,q)
+            self._close_order(g,'mt5',before_m,q,refresh=False)
             after_m=self.amounts(g)['mt5']
             mt5_closed=max(0,before_m-after_m)
             if mt5_closed>1e-8:
-                self.order(g,'binance','close',min(before_b,mt5_closed),q)
+                self._close_order(g,'binance',min(before_b,mt5_closed),q)
         if g.get('imported') and not self.uncertain(g):
             after=self.amounts(g)
             if after['mt5']<before_m-1e-8 and abs(after['mt5']-after['binance'])<1e-8:
@@ -630,7 +698,16 @@ class Engine:
             elif s['exit_mode']=='group' and self.target(g,g['entry'],q['exit']) and (not s['require_net_profit'] or v['net']>=s['min_net_profit_usd']): reason='逐组止盈'
             if reason:
                 self._begin_execution(g,'close',q)
-                g.update(status='closing',reason=reason,exit_signal=q['exit']);exit_event=True;self.save('exit_signal',{'group':g['id'],'reason':reason,'signal_spread':q['exit']})
+                decision=dict(signal_spread=q['exit'],entry_spread=g['entry'],
+                    contraction=g['entry']-q['exit'],target_contraction=s['take_contraction_usd'],
+                    target_spread=s['exit_spread_usd'],min_net_profit=s['min_net_profit_usd'],
+                    estimated_net=v['net'],estimated_net_before_rebate=v['net_before_rebate'],
+                    estimated_gross=v['gross'],estimated_exit_fee=v['estimated_exit_fee'],
+                    estimated_rebate=v['estimated_rebate'],valuation_fx=v['valuation_fx'],
+                    require_net_profit=s['require_net_profit'],target_mode=s['target_mode'])
+                if g['id'] in basket_exit: decision['basket_estimated_net']=sum(x['valuation']['net'] for x in basket)
+                g.update(status='closing',reason=reason,exit_signal=q['exit'],exit_decision=decision)
+                exit_event=True;self.save('exit_signal',{'group':g['id'],'reason':reason,**decision})
                 if reason in ('本策略总浮动亏损上限','单组亏损上限'): self.pause(reason)
         for g in self.active():
             if g['status'] in ('closing','unwinding'):

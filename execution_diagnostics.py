@@ -75,6 +75,9 @@ def build_report(state, events):
         if margin.get('phase') in ('connect','start'): clean['phase']=margin['phase']
         report['runtime']['entry_margin']=clean
     report['notes'].extend([
+        'pnl_schema_version=2将币安线性合约价差盈亏先以USDT计算后换汇；已平仓的换算汇率固定，不对开平两笔名义本金分别换汇。旧记录的价差变化不能直接当作净收益。',
+        'exit_decision记录下单前止盈判断的预估收益、预计返佣及阈值，不是成交保证；exit_deferred表示第一腿前报价已不满足逐组止盈条件。adverse_slippage按各订单原报价和成交价计算，正值为不利，slippage_exceeded提示超出预算但不否定真实成交。',
+        '币安平仓直接回报为完整FILLED数量但缺少均价时，会做一次有请求超时预算的原订单补查；补查失败保持暂停，已暂停状态不自动恢复。',
         'runtime为本机最后已提交状态，不代表导出时实时持仓；启动/暂停历史受最近2000条事件上限约束。',
         'initial_result保留下单直接回报，valid仅指通过本机字段校验，不代表已确认成交；reconcile.last_query及事件保留查询预算、耗时、固定错误分类和平台数字错误码，不导出原始错误或账号标识。',
         'query_timeout_ms是适配器请求超时参数，并非严格总耗时上限；多阶段网络请求可能超出该值。1.5秒等敞口配置仍单独决定能否开第二腿。',
@@ -100,7 +103,12 @@ def build_report(state, events):
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
         row.update(numbers(g,'exit_rules_revision'))
         row['costs']=numbers(g.get('costs',{}),'usdt_usd binance_rebate_percent mt5_rebate_percent')
-        row['valuation']=numbers(g.get('valuation',{}),'gross fees estimated_exit_fee net_before_rebate estimated_rebate estimated_rebate_binance estimated_rebate_mt5 net')
+        row['valuation']=numbers(g.get('valuation',{}),'pnl_schema_version binance_pnl_usdt mt5_pnl_usd valuation_fx gross fees estimated_exit_fee net_before_rebate estimated_rebate estimated_rebate_binance estimated_rebate_mt5 net')
+        if isinstance(g.get('exit_decision'),dict):
+            decision=g['exit_decision']
+            row['exit_decision']=numbers(decision,'signal_spread entry_spread contraction target_contraction target_spread min_net_profit estimated_net estimated_net_before_rebate estimated_gross estimated_exit_fee estimated_rebate valuation_fx basket_estimated_net')
+            if type(decision.get('require_net_profit')) is bool: row['exit_decision']['require_net_profit']=decision['require_net_profit']
+            if decision.get('target_mode') in ('contraction','absolute'): row['exit_decision']['target_mode']=decision['target_mode']
         for action in ('open','close'):
             if 'execution_'+action in g:
                 row['execution_'+action]=numbers(g['execution_'+action],'started_ms signal_time_ms signal_spread confirmed_ms elapsed_ms')
@@ -111,7 +119,8 @@ def build_report(state, events):
              'leg':choice(o,'leg',('binance','mt5')),'action':choice(o,'action',('open','close')),
              'symbol':symbol(o.get('symbol')),'imported':bool(o.get('imported')),
              'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
-             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage')}
+             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage')}
+        if type(o.get('slippage_exceeded')) is bool: row['slippage_exceeded']=o['slippage_exceeded']
         row['result']={'status':choice(result,'status',('done','pending','unknown')),
                        **numbers(result,'qty price fee fee_verified_ms swap request_ms response_received_ms fill_time_ms reconcile_time_ms platform_time_ms retcode ack_volume ack_price')}
         row['result'].update(result_evidence(result))
@@ -137,7 +146,7 @@ def build_report(state, events):
                                                         **numbers(first,'time_ms query_ms query_timeout_ms')}
         report['orders'].append(row)
     kinds={'order_intent','order_result','order_reconciled','order_reconcile_retry','order_reconcile_exhausted',
-           'group_opening','group_opened','group_closed','exit_signal','entry_skipped','close_attempt','entry_recovered','opening_fee_verified'}
+           'group_opening','group_opened','group_closed','exit_signal','exit_deferred','entry_skipped','close_attempt','entry_recovered','opening_fee_verified'}
     for event in events:
         data=event.get('data') or {}
         if event.get('kind') in ('boot','start','pause','reconciled','paper_reconciled','auto_reconciled_flat','close_requested'):
@@ -169,7 +178,7 @@ def build_report(state, events):
         oid=order_ids.get(data.get('id'));gid=group_ids.get(data.get('group'))
         if oid is None and gid is None: continue
         row={'kind':event['kind'],**numbers(event,'time'),
-             'data':numbers(data,'attempt query_ms query_timeout_ms signal_spread entry qty net_estimate fee')}
+             'data':numbers(data,'attempt query_ms query_timeout_ms signal_spread entry qty net_estimate fee entry_spread contraction target_contraction target_spread min_net_profit estimated_net estimated_net_before_rebate estimated_gross estimated_exit_fee estimated_rebate valuation_fx basket_estimated_net')}
         if isinstance(data.get('result'),dict): row['data']['result']=result_evidence(data['result'])
         if data.get('reason'): row['data'].update(safe_reason(data))
         if oid: row['data']['order']=oid

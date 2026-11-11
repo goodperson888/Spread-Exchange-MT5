@@ -265,6 +265,7 @@ class TradingRuntime:
             self.external_close_status = None
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.engine.quote_provider = self._execution_quote
+            self.engine.close_quote_provider = self._cached_close_quote
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
             self._last_mt5_snapshot = snapshot if config['mt5']['adapter']=='native' else None
             self._last_mt5_snapshot_at = mt5_snapshot_started
@@ -555,6 +556,23 @@ class TradingRuntime:
         market=self.market_stream.quote(max_age_ms=c['strategy']['max_quote_age_ms']) if self.market_stream else None
         if market is None: market=self.binance.quote(c['symbol'])
         return self._quote(mt5,market,c)
+
+    def _cached_close_quote(self):
+        """Nonblocking cache reads only: no terminal or REST calls between legs."""
+        c=self.config
+        latest=self.pump.read()[0] if self.pump else None
+        latest=latest or self.quote
+        if not latest or latest.get('key')!=pair_key(c): return None
+        mt5=latest['mt5']
+        if self.push_bridge and c['mt5']['adapter']!='paper':
+            pushed=self.push_bridge.quote(c['mt5'],c['strategy']['max_quote_age_ms'])
+            if pushed and pushed.get('observed_ms',0)>=mt5.get('observed_ms',0): mt5=pushed
+        market=self.market_stream.quote(max_age_ms=c['strategy']['max_quote_age_ms']) if self.market_stream else None
+        market=observed_quote(market,market.get('time_ms',0)) if market else latest['binance']
+        fx=c['costs']['usdt_usd']
+        # Preserve original receipt times: reading a cache never refreshes age.
+        return dict(key=latest['key'],time_ms=now_ms(),mt5=dict(mt5),binance=dict(market),
+                    usdt_usd=fx,entry=market['bid']*fx-mt5['ask'],exit=market['ask']*fx-mt5['bid'])
 
     def _entry_preflight_guard(self, q, threshold):
         preflight = self.entry_preflight

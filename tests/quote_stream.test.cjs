@@ -126,3 +126,19 @@ test('live projected profit preserves incurred rebates and reprices future fee r
  assert.ok(Math.abs(v.net-(-3.47))<1e-9);
  assert.equal(group.valuation.net,undefined);
 });
+
+
+test('USDT futures PnL projection converts price differences, never contract notional',()=>{
+ const basis={key:'a',usdt_usd:1,binance:{ask:3990},mt5:{bid:3991}};
+ const latest={key:'a',usdt_usd:.99,binance:{ask:3990},mt5:{bid:3991}};
+ const group={key:'a',status:'open',contract:100,costs:{usdt_usd:1,binance_taker_percent:0,mt5_commission_per_lot_side:0},
+  valuation:{gross:1,binance_pnl_usdt:10,mt5_pnl_usd:-9,fees:0,carry:0,remaining:{binance:1,mt5:1}}};
+ const v=markGroups([group],basis,latest)[0].valuation;
+ assert.ok(Math.abs(v.gross-.9)<1e-9);assert.equal(v.binance_pnl_usdt,10);
+ const moved={...latest,binance:{ask:3989},mt5:{bid:3992}};
+ const next=markGroups([group],basis,moved)[0].valuation;
+ assert.ok(Math.abs(next.gross-(11*.99-8))<1e-9);
+ const legacy={...group,valuation:{...group.valuation}};
+ delete legacy.valuation.binance_pnl_usdt;delete legacy.valuation.mt5_pnl_usd;
+ assert.equal(markGroups([legacy],basis,latest)[0].valuation.gross,1);
+});

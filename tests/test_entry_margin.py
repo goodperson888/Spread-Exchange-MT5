@@ -140,6 +140,7 @@ class EntryMarginTests(unittest.TestCase):
         # An offline broker confirms both close legs. The margin guard must
         # never run from the engine's close path, including while entry-paused.
         self.r.engine.broker=PaperBroker()
+        self.r.pump.read.return_value=(self.r.quote,1,'')
         self.r.engine.request_close(g['id'])
         before=self.terminal.call.call_count
         self.r.engine.close_group(g,quote(self.c))

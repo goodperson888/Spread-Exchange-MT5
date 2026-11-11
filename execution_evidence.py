@@ -20,6 +20,9 @@ REASON_LABELS = {
     'PERMISSION_DENIED': '平台交易权限不可用',
     'ENTRY_MARGIN': '新开仓保证金不足或未能核验；已有仓位仍可管理',
     'MANUAL_CLOSE': '用户请求平仓，新开仓暂停',
+    'TARGET_REACHED': '价差达到止盈条件且通过配置的净收益检查',
+    'TARGET_DEFERRED': '下单前止盈条件已不满足，继续持仓等待',
+    'HOLD_TIMEOUT': '达到最长持仓时间',
     'OTHER': '其他原因；原始文本未导出',
 }
 
@@ -40,6 +43,11 @@ def reason_code(reason):
         ('行情或交易通道异常', 'CHANNEL_ERROR'),
         ('减仓重试达到上限', 'CLOSE_RETRIES_EXHAUSTED'),
         ('亏损上限', 'RISK_LIMIT'),
+        ('逐组止盈', 'TARGET_REACHED'),
+        ('止盈报价已变化', 'TARGET_DEFERRED'),
+        ('整篮子止盈', 'TARGET_REACHED'),
+        ('接管篮子收窄并盈利', 'TARGET_REACHED'),
+        ('持仓超时', 'HOLD_TIMEOUT'),
         ('自动交易权限已关闭', 'PERMISSION_DENIED'),
         ('新开仓保证金', 'ENTRY_MARGIN'),
         ('外部平仓记录已回补', 'RECOVERED_PAUSED'),
@@ -153,7 +161,7 @@ def capture_receipt(platform, payload):
 
 
 VALIDATION_ISSUES = ('not_object','invalid_status','invalid_quantity','quantity_exceeds_request',
-                     'invalid_price','nonpositive_fill_price','quantity_regressed')
+                     'invalid_price','nonpositive_fill_price','quantity_regressed','identity_mismatch')
 
 
 def validation_issues(result, requested):
