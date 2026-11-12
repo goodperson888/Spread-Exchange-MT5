@@ -6,6 +6,7 @@ import sqlite3
 import time
 from pathlib import Path
 from execution_latency import PROCESS_LATENCY
+from exit_observations import PROCESS_EXIT_OBSERVATIONS
 from execution_evidence import reason_code, REASON_LABELS, result_evidence
 
 
@@ -27,6 +28,7 @@ def exit_parameters(row):
     for key in ('require_net_profit','group_loss_enabled'):
         if type(row.get(key)) is bool:result[key]=row[key]
     if row.get('target_mode') in ('contraction','absolute'):result['target_mode']=row['target_mode']
+    if row.get('exit_mode') in ('group','basket'):result['exit_mode']=row['exit_mode']
     return result
 
 
@@ -203,6 +205,9 @@ def export_report(path):
     finally:
         db.close()
     report=build_report(state,events)
+    aliases={g['id']:'G'+str(i+1) for i,g in enumerate(state.get('groups',[])[-200:])}
+    report['exit_observations']=PROCESS_EXIT_OBSERVATIONS.snapshot(aliases)
+    report['notes'].append('exit_observations为本次连接内策略实际检查过的退出条件，最多512段；原因、规则或报价有效性改变及每30秒开启新段，first/latest为该段首末证据，samples累计检查次数，min_exit_spread/max_net为段内极值，极值未必同时出现。仅用限量内存，不增加平台请求或日志提交；重启/重新连接清空。报价无效、恢复等待等提前返回不重新估值，缺少net不能当作零。规则中revision对应当时锁定版本，整篮子按加权入场与篮子净收益检查。图表记录与策略取样独立；未被策略取用的瞬时行情、导出前旧版未采集的瞬间及已淘汰段无法还原。内存与持久化快照不是原子快照，未映射组仅统计数量。')
     report['latency']=PROCESS_LATENCY.snapshot()
     report['notes'].append('latency为当前进程内最近最多512个阶段样本的统计，重启或重新连接清空，mode区分纸面与实盘；不增加平台查询或日志提交。strategy_pass为一次engine.tick，含执行与确认，decision为条件评估及估值；quote_wait为最新一侧报价首次被策略取用时距本机接收的时间，两边quote_age分别为策略取用时的本机报价年龄，不能当作跨平台网络延迟。')
     return report

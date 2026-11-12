@@ -61,6 +61,15 @@ class Engine:
         latency = getattr(self, 'latency', None)
         if latency is not None: latency.record(phase, value)
 
+    def _observe_exit(self, g, q, code=None, **evidence):
+        observer = getattr(self, 'exit_observations', None)
+        if observer is not None: observer.observe(g, q, code, **evidence)
+
+    def observe_exit_wait(self, c, q, code):
+        if getattr(self, 'exit_observations', None) is None: return
+        for g in self.active():
+            self._observe_exit(g, q, code, limits=c['strategy'], expected_key=pair_key(c))
+
     def active(self): return [g for g in self.state['groups'] if g['status']!='closed']
 
     def pause(self, reason='已暂停新开仓；已有仓位继续管理', keep_entry=False):
@@ -594,16 +603,20 @@ class Engine:
             timing.update(signal_time_ms=q.get('time_ms'),signal_spread=q.get('exit'))
         # Status reads must precede account ownership checks: a delayed fill
         # changes the expected exposure that those checks compare against.
-        if not self.resolve(g): return
+        if not self.resolve(g):
+            self._observe_exit(g,q,'CLOSE_PENDING')
+            return
         q=self._close_quote(q)
         if not valid_group_quote(q,g['key'],g['parameters']):
             self.state['alarm']='平仓等待有效新报价；成交查询继续，当前尚未双平'
+            self._observe_exit(g,q,'CLOSE_QUOTE_UNAVAILABLE')
             return
         if g.get('imported') and hasattr(self,'before_import_close'):
             if self.before_import_close() is False: return
             # Account reads can take longer than the quote budget. Wait for another tick.
             if any(stamp()-int(q[leg].get('observed_ms',q[leg].get('time_ms',0)))>g['parameters']['max_quote_age_ms'] for leg in ('binance','mt5')):
                 self.state['alarm']='接管平仓核验完成时行情已过期，等待新报价'
+                self._observe_exit(g,q,'CLOSE_QUOTE_UNAVAILABLE')
                 return
         amounts=self.amounts(g)
         if max(amounts.values())<1e-8:
@@ -617,6 +630,8 @@ class Engine:
             v=self.valuation(g,q);s=g['parameters']
             if (not self.target(g,g['entry'],q['exit']) or
                     (s['require_net_profit'] and v['net']<s['min_net_profit_usd'])):
+                self._observe_exit(g,q,'RECHECK_TARGET' if not self.target(g,g['entry'],q['exit'])
+                                   else 'RECHECK_NET_PROFIT',valuation=v)
                 g.update(status='open',reason='止盈报价已变化，继续持仓等待条件')
                 g.pop('exit_signal',None);g.pop('exit_decision',None);g.pop('execution_close',None)
                 self._execution_timers.pop((g['id'],'close'),None)
@@ -663,9 +678,12 @@ class Engine:
 
     def tick(self, c, p, q):
         self.reconcile_pending(c)
-        if self.state['recovery']: return
+        if self.state['recovery']:
+            self.observe_exit_wait(c,q,'RECOVERY_PENDING')
+            return
         if not valid_quote(q,c):
             if self.active(): self.state['alarm']='报价过期、时钟偏差或品种不符，等待有效行情；已有仓位仍未平仓'
+            self.observe_exit_wait(c,q,'QUOTE_UNAVAILABLE')
             return
         measure = getattr(self, 'latency', None) is not None
         decision_elapsed = 0.
@@ -687,6 +705,10 @@ class Engine:
                         self.pause(g['reason'])
             started = time.monotonic() if measure else 0
             g['valuation']=self.valuation(g,q)
+            if g['status']!='open' or (g.get('imported') and not g.get('management_enabled')):
+                self._observe_exit(g,q,{'opening':'OPENING_PENDING','closing':'CLOSE_PENDING',
+                    'unwinding':'CLOSE_PENDING','attention':'ATTENTION_REQUIRED'}.get(g['status'],'MANAGEMENT_DISABLED'),
+                    valuation=g['valuation'],limits=c['strategy'])
             if measure: decision_elapsed += time.monotonic()-started
         started = time.monotonic() if measure else 0
         opened=[g for g in self.active() if g['status']=='open' and (not g.get('imported') or g.get('management_enabled'))]
@@ -694,6 +716,7 @@ class Engine:
         loss=c['strategy']['total_loss_enabled'] and total<=-c['strategy']['total_max_loss_usd']
         basket=[g for g in opened if g['parameters']['exit_mode']=='basket' and not g.get('imported')]
         basket_exit=set()
+        basket_evidence=None
         if basket:
             qty=sum(g['qty'] for g in basket); entry=sum(g['entry']*g['qty'] for g in basket)/qty
             net=sum(g['valuation']['net'] for g in basket)
@@ -701,6 +724,10 @@ class Engine:
             # existing-basket edits update all current members atomically.
             if all(self.target(g,entry,q['exit']) and (not g['parameters']['require_net_profit'] or net>=g['parameters']['min_net_profit_usd']) for g in basket):
                 basket_exit={g['id'] for g in basket}
+            if getattr(self,'exit_observations',None) is not None:
+                basket_evidence=dict(entry=entry,net=net,members=len(basket),
+                    target_blocked_members=sum(not self.target(g,entry,q['exit']) for g in basket),
+                    net_blocked_members=sum(g['parameters']['require_net_profit'] and net<g['parameters']['min_net_profit_usd'] for g in basket))
         for g in opened:
             s=g['parameters'];v=g['valuation'];reason=''
             if g.get('imported'):
@@ -710,6 +737,7 @@ class Engine:
             elif s['max_hold_minutes'] and stamp()-g['opened_ms']>=s['max_hold_minutes']*60000: reason='持仓超时'
             elif g['id'] in basket_exit: reason='整篮子止盈'
             elif s['exit_mode']=='group' and self.target(g,g['entry'],q['exit']) and (not s['require_net_profit'] or v['net']>=s['min_net_profit_usd']): reason='逐组止盈'
+            self._observe_exit(g,q,valuation=v,basket=basket_evidence,trigger=reason,limits=c['strategy'])
             if reason:
                 self._begin_execution(g,'close',q)
                 decision=dict(signal_spread=q['exit'],entry_spread=g['entry'],

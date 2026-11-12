@@ -32,6 +32,7 @@ from trading_store import Store
 from maintenance_work import MaintenanceWork
 from runtime_maintenance import MaintenanceMonitor
 from execution_latency import PROCESS_LATENCY
+from exit_observations import PROCESS_EXIT_OBSERVATIONS
 from execution_diagnostics import export_report
 import position_adoption
 import exit_rules
@@ -94,6 +95,7 @@ class TradingRuntime(MaintenanceWork):
         self.engine = Engine(self.store, PaperBroker())
         self.latency = PROCESS_LATENCY
         self.engine.latency = self.latency
+        self.engine.exit_observations = PROCESS_EXIT_OBSERVATIONS
         self.maintenance = None
         self.binance = None
         self.market_stream = None
@@ -274,6 +276,7 @@ class TradingRuntime(MaintenanceWork):
             self.external_close_status = None
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.latency.reset(mode)
+            PROCESS_EXIT_OBSERVATIONS.reset(mode)
             self.engine.quote_provider = self._execution_quote
             self.engine.close_quote_provider = self._cached_close_quote
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
@@ -646,6 +649,7 @@ class TradingRuntime(MaintenanceWork):
         q, version, error = self.pump.read()
         if error or q is None:
             self.engine.reconcile_pending(c)
+            self.engine.observe_exit_wait(c,q,'QUOTE_UNAVAILABLE')
         if error: raise ValueError(error)
         if q is None: return
         self.quote = q
@@ -657,13 +661,16 @@ class TradingRuntime(MaintenanceWork):
         if c['execution']['mode']=='live' and not self.reconciled:
             self.engine.reconcile_pending(c)
             self._auto_reconcile_flat()
+            if not self.reconciled: self.engine.observe_exit_wait(c,q,'RECOVERY_PENDING')
         if c['execution']['mode']=='paper' or self.reconciled:
             if any(g.get('imported') for g in self.engine.active()) and time.monotonic()-getattr(self,'_last_import_check',0)>=2:
                 self._guard_import_close()
                 self._last_import_check=time.monotonic()
             # Slow account reads above must not leave the strategy using an old sample.
             q, version, error = self.pump.read()
-            if error: raise ValueError(error)
+            if error:
+                self.engine.observe_exit_wait(c,q,'QUOTE_UNAVAILABLE')
+                raise ValueError(error)
             self.quote = q
             if self.entry_preflight and q.get('entry', -float('inf')) >= c['strategy']['entry_spread_usd'] - self.entry_preflight.NEAR_USD:
                 self.entry_preflight.update(dict(key=q.get('key'), symbol=c['symbol'],
