@@ -37,6 +37,7 @@ from execution_diagnostics import export_report
 import position_adoption
 import exit_rules
 import external_closes
+import close_cause
 from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, observed_quote
 from entry_preflight import EntryPreflight
 from liquidation_risk import BinanceRiskMonitor, risk_snapshot
@@ -382,7 +383,7 @@ class TradingRuntime(MaintenanceWork):
             return True
         finally: self.lock.release()
 
-    def _external_publish(self, monitor, token, phase, proposals, errors, mt5_snapshot=None, history_probe=None):
+    def _external_publish(self, monitor, token, phase, proposals, errors, mt5_snapshot=None, history_probe=None, exposure_proof=None):
         if not self.lock.acquire(blocking=False): return False
         try:
             if (self.stop_event.is_set() or monitor.stopped.is_set() or not self.connected
@@ -442,7 +443,9 @@ class TradingRuntime(MaintenanceWork):
                     message = ('已回补可确认成交；仍有剩余仓位，请核对后处理；不会自动重新开仓'
                                if any(g.get('external_close') for g in active) else
                                '持仓数量与日志一致；上次异常仍待点击持仓对账确认，交易保持暂停')
-                else: message = '后台每约 5 秒核对程序持仓数量；平台手动平仓查到成交后回补记录'
+                elif any(g.get('liquidation_recovery') for g in active):
+                    message='平台强平后保护性平仓尚未全部完成；请关注交易组状态与剩余敞口，新开仓保持暂停'
+                else: message = '后台每约 5 秒核对程序持仓数量；平台外部平仓查到成交后回补记录'
                 self.external_close_status = dict(time_ms=at,level='warning' if waiting else 'normal',message=message)
                 return True
             if phase=='unavailable':
@@ -455,7 +458,9 @@ class TradingRuntime(MaintenanceWork):
                 self.engine._entry_deadlines.clear()
                 self.engine.state.update(enabled=False,recovery=True,alarm=reason)
                 self.reconciled = False
-                for g in active: g['external_attention'] = True
+                for g in active:
+                    if not g.get('external_attention'): g['external_detected_ms']=at
+                    g['external_attention'] = True
                 self.external_close_status = dict(time_ms=at,level='warning',message=reason)
                 if changed: self.engine.save('external_position_changed',{'groups':[g['id'] for g in active]})
                 return True
@@ -471,10 +476,21 @@ class TradingRuntime(MaintenanceWork):
             before = copy.deepcopy(self.engine.state)
             previous_status = self.external_close_status
             known = {o['id'] for o in self.engine.state['orders']}
-            new = [copy.deepcopy(o) for o in proposals if o['id'] not in known]
+            new = [copy.deepcopy(o) for o in proposals if o['id'] not in known and not o.get('_evidence_only')]
+            evidence_updates=[]
+            for proposal in proposals:
+                if not proposal.get('_evidence_only'): continue
+                order=next((o for o in self.engine.state['orders'] if o['id']==proposal['id']),None)
+                cause=close_cause.evidence(proposal.get('result',{}).get('close_cause'))
+                if (not order or order.get('source')!='external' or not cause
+                        or order['group']!=proposal['group'] or order['leg']!=proposal['leg']
+                        or any(order['result'].get(k)!=proposal['result'].get(k) for k in ('status','qty','price','ticket','platform_time_ms'))): continue
+                if not close_cause.evidence(order['result'].get('close_cause')):
+                    evidence_updates.append((order,cause))
             touched = {o['group'] for o in new}
             self.engine.state['orders'].extend(new)
             try:
+                for order,cause in evidence_updates: order['result']['close_cause']=cause
                 for order in new:
                     identity=order.pop('_opening_identity',None)
                     if identity:
@@ -503,22 +519,41 @@ class TradingRuntime(MaintenanceWork):
                     q = self.quote or dict(binance=dict(ask=0),mt5=dict(bid=0),usdt_usd=g['costs']['usdt_usd'])
                     g['valuation'] = self.engine.valuation(g,q)
                 remaining = self.engine.active()
+                armed=external_closes.protective_targets(self.engine.state,self.config,exposure_proof,mt5_snapshot,errors)
+                if armed:
+                    for group in remaining:
+                        if group['id'] not in armed: continue
+                        if not group.get('liquidation_recovery'):
+                            group['liquidation_recovery']=dict(detected_ms=group.get('external_detected_ms',at),
+                                armed_ms=at,**{'remaining_'+leg:qty for leg,qty in self.engine.amounts(group).items()})
+                            group['attempts']=0
+                        group.update(status='unwinding',reason='平台确认强平，保护性平仓剩余敞口')
+                        group.pop('external_attention',None)
+                    self.engine._entry_deadlines.clear()
+                    self.engine.state.update(enabled=False,recovery=False,alarm='平台确认强平，正在保护性平仓；新开仓保持暂停')
+                    self.engine.state['last_pause']=dict(time_ms=at,reason_code='LIQUIDATION',
+                        reason_label='平台确认强平，保护性平仓剩余敞口',enabled_before=False,keep_entry=False)
                 completed = bool(new) and not remaining and not errors
                 if completed:
                     self.engine.state.update(enabled=False,recovery=False,alarm='平台外部平仓记录已回补；新开仓保持暂停')
                     self.reconciled = True
                 message = ('平台外部平仓记录已回补；新开仓保持暂停' if completed else
                            '已回补可确认成交；仍有剩余仓位或待确认记录，请持仓对账后处理')
+                if armed: message='平台确认强平，已安排受影响组保护性平仓；新开仓保持暂停'
                 if not new and not any(g.get('external_close') for g in active):
                     message = '尚无可安全回补的完整成交；保留原记录，等待平台历史或人工对账'
                 if errors: message += '；'+'；'.join(errors)
                 if probe_changed: message += '；已记录 MT5 历史字段探针，请重新导出执行诊断'
                 self.external_close_status = dict(time_ms=at,level='normal' if completed else 'warning',message=message)
-                if new or probe_changed:
-                    self.engine.save('external_close_backfilled' if new else 'mt5_history_probe',
-                                     ({'groups':sorted(touched),'orders':[o['id'] for o in new]} if new else
+                if new or evidence_updates or probe_changed or armed:
+                    self.engine.save('liquidation_protection_armed' if armed else 'external_close_backfilled' if new or evidence_updates else 'mt5_history_probe',
+                                     ({'groups':sorted(touched|{o['group'] for o,_ in evidence_updates}|set(armed)),'orders':[o['id'] for o in new]} if new or evidence_updates or armed else
                                       {'row_count': history_probe.get('row_count',0),
                                        'query_count': len(history_probe.get('queries',[]))}))
+                if armed:
+                    self.reconciled=True
+                    wake=getattr(self,'market_wake',None)
+                    if wake is not None: wake.set()
             except Exception:
                 self.engine.state = before
                 self.external_close_status = previous_status

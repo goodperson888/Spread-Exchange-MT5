@@ -1,5 +1,6 @@
 """Small allowlists shared by execution and its private-data-free export."""
 import math
+import close_cause
 
 
 REASON_LABELS = {
@@ -23,6 +24,7 @@ REASON_LABELS = {
     'TARGET_REACHED': '价差达到止盈条件且通过配置的净收益检查',
     'TARGET_DEFERRED': '下单前止盈条件已不满足，继续持仓等待',
     'HOLD_TIMEOUT': '达到最长持仓时间',
+    'LIQUIDATION': '平台确认强平，保护性平仓剩余敞口',
     'OTHER': '其他原因；原始文本未导出',
 }
 
@@ -33,6 +35,7 @@ def reason_code(reason):
     # Classify only into fixed labels. Never export arbitrary upstream text.
     rules=(
         ('已暂停新开仓；已有仓位继续管理', 'USER_PAUSE'),
+        ('平台确认强平', 'LIQUIDATION'),
         ('程序重启', 'RESTART'),
         ('开仓确认窗口已结束', 'ENTRY_WINDOW_EXPIRED'),
         ('超出敞口期限', 'ENTRY_WINDOW_EXPIRED'),
@@ -201,6 +204,8 @@ def confirmation_evidence(value):
 def result_evidence(result):
     if not isinstance(result,dict): return {'error_kind':'invalid_response'}
     data={}
+    cause=close_cause.evidence(result.get('close_cause'))
+    if cause: data['close_cause']=cause
     if type(result.get('valid')) is bool: data['valid']=result['valid']
     if type(result.get('fee_verified')) is bool: data['fee_verified']=result['fee_verified']
     for key in ('ticket','deal','position','position_identifier'):

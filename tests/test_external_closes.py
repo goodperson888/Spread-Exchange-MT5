@@ -491,7 +491,145 @@ class ExternalCloseTests(unittest.TestCase):
         self.assertTrue(any(e['kind']=='external_close_backfilled' for e in report['events']))
 
 
+    def force_mt5(self):
+        self.deals[1]['reason']=6
+        self.client.positions.return_value=[self.b_position()]
+        self.fills=self.fills[:1]
+
+    def test_confirmed_stopout_arms_then_execution_closes_only_remaining_leg(self):
+        self.force_mt5();self.r.market_wake=threading.Event()
+        self.g['parameters'].update(require_net_profit=True,min_net_profit_usd=10000)
+        self.monitor.step()
+        self.assertEqual(self.g['status'],'unwinding');self.assertTrue(self.r.reconciled)
+        self.assertFalse(self.e.state['recovery']);self.assertFalse(self.e.state['enabled'])
+        self.assertTrue(self.r.market_wake.is_set());self.broker.submit.assert_not_called()
+        self.assertEqual(self.external()[0]['result']['close_cause']['kind'],'liquidation')
+        self.assertEqual(self.store.load()['groups'][0]['status'],'unwinding')
+        original=self.broker.submit._mock_wraps
+        def submit(order):
+            self.assertEqual(self.store.events()[0]['kind'],'order_intent')
+            self.assertEqual(order['slippage'],self.g['parameters']['unwind_slippage_usd'])
+            return original(order)
+        self.broker.submit.side_effect=submit
+        self.e.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(self.g['status'],'closed')
+        self.assertEqual([(c.args[0]['leg'],c.args[0]['requested']) for c in self.broker.submit.call_args_list],[('binance',2)])
+        self.assertFalse(self.e.state['enabled'])
+        report=build_report(self.e.state,self.store.events())
+        self.assertEqual(report['groups'][0]['reason_code'],'LIQUIDATION')
+        self.assertIn('armed_ms',report['groups'][0]['liquidation_recovery'])
+        self.assertIn('liquidation_protection_armed',[e['kind'] for e in report['events']])
+
+    def test_manual_stoploss_takeprofit_and_missing_reason_never_arm(self):
+        for reason in (0,1,2,3,4,5,None,True,6.0,'6'):
+            with self.subTest(reason=reason):
+                from close_cause import mt5_cause
+                self.assertNotEqual(mt5_cause([dict(reason=reason)])['kind'],'liquidation')
+        self.force_mt5();self.deals[1]['reason']=4;self.deals[1]['comment']='so 40%'
+        self.monitor.step();self.assertEqual(self.g['status'],'attention')
+        self.assertTrue(self.e.state['recovery']);self.broker.submit.assert_not_called()
+
+    def test_old_external_fill_is_enriched_without_duplicate_and_can_arm(self):
+        self.force_mt5();self.deals[1].pop('reason')
+        self.monitor.step();order=self.external()[0];order['result'].pop('close_cause')
+        previous=copy.deepcopy(order);self.deals[1]['reason']=6
+        self.monitor.step()
+        self.assertEqual(len(self.external()),1);self.assertEqual(self.external()[0]['id'],previous['id'])
+        self.assertEqual(order['result']['qty'],previous['result']['qty'])
+        self.assertEqual(self.g['status'],'unwinding');self.assertTrue(self.r.reconciled)
+
+    def test_restart_requires_fresh_proof_and_does_not_rearm_entries(self):
+        self.force_mt5();self.monitor.step();attempts=self.g['attempts']=2
+        self.e.state['recovery']=True;self.r.reconciled=False
+        self.monitor.step()
+        self.assertEqual(self.g['status'],'unwinding');self.assertTrue(self.r.reconciled)
+        self.assertEqual(self.g['attempts'],attempts);self.assertFalse(self.e.state['enabled'])
+        self.e.tick(self.c,self.plan,quote(self.c));self.assertEqual(self.g['status'],'closed')
+
+    def test_partial_forced_close_removes_excess_first_then_finishes_group(self):
+        self.force_mt5();self.deals[1]['volume']=.01;self.mt5['positions']=[self.mt_position(.01)]
+        self.monitor.step();self.assertEqual(self.g['status'],'unwinding')
+        self.e.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual([(c.args[0]['leg'],c.args[0]['requested']) for c in self.broker.submit.call_args_list],
+                         [('binance',1),('mt5',1),('binance',1)])
+        self.assertEqual(self.g['status'],'closed')
+
+    def test_unknown_protective_close_is_queried_without_duplicate_submission(self):
+        self.force_mt5();self.monitor.step()
+        self.broker.submit.side_effect=lambda o:dict(status='unknown',qty=0,price=0)
+        self.broker.query.side_effect=lambda o:dict(status='unknown',qty=0,price=0)
+        self.e.tick(self.c,self.plan,quote(self.c));self.e.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(self.broker.submit.call_count,1)
+        self.assertEqual(self.e.amounts(self.g),dict(binance=2,mt5=0))
+
+    def test_protective_retry_limit_is_not_reset_or_automatically_rearmed(self):
+        self.force_mt5();self.monitor.step();self.g['attempts']=self.g['retry_limit']
+        self.e.tick(self.c,self.plan,quote(self.c));self.assertEqual(self.g['status'],'attention')
+        self.e.state['recovery']=True;self.r.reconciled=False
+        self.monitor.step();self.assertEqual(self.g['status'],'attention')
+        self.assertFalse(self.r.reconciled);self.broker.submit.assert_not_called()
+
+    def test_stopout_with_unknown_binance_ownership_stays_blocked(self):
+        self.force_mt5();self.client.query.side_effect=lambda o:dict(status='unknown',qty=0,price=0)
+        self.monitor.step()
+        self.assertEqual(self.g['status'],'attention');self.assertFalse(self.r.reconciled)
+        self.e.tick(self.c,self.plan,quote(self.c));self.broker.submit.assert_not_called()
+
+    def test_stale_snapshot_and_pending_orders_cannot_authorize_protection(self):
+        self.force_mt5();self.monitor.step()
+        from external_closes import protective_targets
+        proof=dict(mode='one_way',positions=[self.b_position()],open_orders=[],checked_monotonic=time.monotonic()-6)
+        self.assertEqual(protective_targets(self.e.state,self.c,proof,self.mt5,[]),[])
+        proof.update(checked_monotonic=time.monotonic(),open_orders=[dict(id='pending')])
+        self.assertEqual(protective_targets(self.e.state,self.c,proof,self.mt5,[]),[])
+        proof.update(open_orders=[],positions=[self.b_position(-1)])
+        self.assertEqual(protective_targets(self.e.state,self.c,proof,self.mt5,[]),[])
+        proof.update(positions=[self.b_position()])
+        self.assertEqual(protective_targets(self.e.state,self.c,proof,self.mt5,['history incomplete']),[])
+
+    def test_arm_commit_failure_keeps_pause_and_never_submits(self):
+        self.force_mt5();save=self.e.save
+        def fail(kind,data=None):
+            if kind=='liquidation_protection_armed': raise OSError('disk unavailable')
+            return save(kind,data)
+        with patch.object(self.e,'save',side_effect=fail):self.monitor.step()
+        self.assertFalse(self.r.reconciled);self.assertTrue(self.e.state['recovery'])
+        self.assertFalse(self.e.state['enabled']);self.assertEqual(self.external(),[])
+        self.assertNotIn('liquidation_recovery',self.e.state['groups'][0]);self.broker.submit.assert_not_called()
+
+    def test_binance_confirmed_liquidation_links_only_exact_order(self):
+        self.mt5['positions']=[self.mt_position()];self.deals=self.deals[:1]
+        forced=dict(orderId=102,symbol=self.g['symbol'],side='BUY',positionSide='BOTH',status='FILLED',executedQty='2',avgPrice='4303')
+        self.client.force_orders.return_value=[forced]
+        self.monitor.step();self.assertEqual(self.g['status'],'unwinding')
+        self.e.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual([c.args[0]['leg'] for c in self.broker.submit.call_args_list],['mt5'])
+        self.assertEqual(self.g['status'],'closed')
+        from close_cause import binance_cause
+        external=next(o for o in self.external() if o['leg']=='binance')
+        for changes in (dict(orderId=103),dict(positionSide='LONG'),dict(executedQty='1'),dict(avgPrice='4304')):
+            self.assertEqual(binance_cause(external,[dict(forced,**changes)],'one_way')['kind'],'unknown')
+
+    def test_cause_export_sanitizes_arbitrary_values_and_preserves_numeric_reason(self):
+        self.force_mt5();self.monitor.step();order=self.external()[0]
+        secret='DO-NOT-EXPORT-ACCOUNT'
+        order['result']['close_cause'].update(comment=secret,account=secret,labels=[secret])
+        report=build_report(self.e.state,self.store.events())
+        text=json.dumps(report,ensure_ascii=False)
+        self.assertNotIn(secret,text);self.assertNotIn(self.g['id'],text)
+        cause=next(o['result']['close_cause'] for o in report['orders'] if o['source']=='external')
+        self.assertEqual(cause['mt5_reasons'],[6]);self.assertEqual(cause['labels'],['强平 Stop Out'])
+
+
 class TradeHistoryTests(unittest.TestCase):
+    def test_force_orders_uses_signed_liquidation_filter_and_rejects_full_pages(self):
+        client=Binance('key','secret');client.request=Mock(return_value=[])
+        self.assertEqual(client.force_orders('XAUUSDT',1000,2000),[])
+        client.request.assert_called_once_with('/fapi/v1/forceOrders',
+            dict(symbol='XAUUSDT',autoCloseType='LIQUIDATION',startTime=1000,endTime=2000,limit=100),signed=True)
+        client.request.return_value=[{}]*100
+        with self.assertRaisesRegex(ValueError,'不完整'):client.force_orders('XAUUSDT',1000,2000)
+
     def test_native_external_history_uses_order_and_position_ids_not_local_dates_or_manual_magic(self):
         Deal=namedtuple('Deal','ticket order position_id symbol magic')
         opening=Deal(11,1001,900,'XAUUSD',123);manual=Deal(12,1002,900,'XAUUSD',0)

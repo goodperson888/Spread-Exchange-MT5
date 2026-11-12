@@ -78,6 +78,7 @@ def build_report(state, events):
         if margin.get('phase') in ('connect','start'): clean['phase']=margin['phase']
         report['runtime']['entry_margin']=clean
     report['notes'].extend([
+        'result.close_cause为已确认外部成交的固定原因证据：MT5保留原reason数字码，6表示Stop Out；币安仅将已签名LIQUIDATION强平订单与原成交编号、方向、数量、均价精确匹配后标记强平。liquidation_protection_armed仅表示已安排保护性平仓，不证明已经双平；liquidation_recovery记录本机发现/安排时间和当时剩余数量。缺失原因不等于手动平仓，平台原始时间不用于推算本机耗时。',
         'quote_source=cache表示下单前使用后台缓存报价，refresh表示走原同步报价读取路径；不是纯网络耗时。开仓第二腿缓存需两边本机接收时间均在250毫秒内，同时满足用户配置的更严格行情时效和时差限制；缓存不足仍走原查询，不放宽开仓敞口时限。',
         'pnl_schema_version=2将币安线性合约价差盈亏先以USDT计算后换汇；已平仓的换算汇率固定，不对开平两笔名义本金分别换汇。旧记录的价差变化不能直接当作净收益。',
         'exit_decision记录下单前止盈判断的预估收益、预计返佣及阈值，不是成交保证；exit_deferred表示第一腿前报价已不满足逐组止盈条件。adverse_slippage按各订单原报价和成交价计算，正值为不利，slippage_exceeded提示超出预算但不否定真实成交。',
@@ -106,6 +107,8 @@ def build_report(state, events):
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
         row.update(numbers(g,'exit_rules_revision'))
+        if isinstance(g.get('liquidation_recovery'),dict):
+            row['liquidation_recovery']=numbers(g['liquidation_recovery'],'detected_ms armed_ms remaining_mt5 remaining_binance')
         row['costs']=numbers(g.get('costs',{}),'usdt_usd binance_rebate_percent mt5_rebate_percent')
         row['valuation']=numbers(g.get('valuation',{}),'pnl_schema_version binance_pnl_usdt mt5_pnl_usd valuation_fx gross fees estimated_exit_fee net_before_rebate estimated_rebate estimated_rebate_binance estimated_rebate_mt5 net')
         if isinstance(g.get('exit_decision'),dict):
@@ -164,7 +167,7 @@ def build_report(state, events):
             if gid: row['data']['group']=gid
             report['events'].append(row)
             continue
-        if event.get('kind') in ('external_position_changed','external_close_backfilled','external_orders_resolved','recovery_flat_confirmed'):
+        if event.get('kind') in ('external_position_changed','external_close_backfilled','external_orders_resolved','recovery_flat_confirmed','liquidation_protection_armed'):
             related=[group_ids[x] for x in data.get('groups',[]) if x in group_ids]
             if related: report['events'].append({'kind':event['kind'],**numbers(event,'time'),'data':{'groups':related}})
             continue

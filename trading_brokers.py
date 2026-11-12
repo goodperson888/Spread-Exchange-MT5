@@ -367,6 +367,14 @@ class Binance:
     def trades(self, symbol, order_id):
         return self.request('/fapi/v1/userTrades',dict(symbol=symbol,orderId=order_id,limit=1000),signed=True)
 
+    def force_orders(self, symbol, start, end):
+        # Only used by the read-only incident observer. A full page is not
+        # assumed complete, and never authorizes an automatic close.
+        rows=self.request('/fapi/v1/forceOrders',dict(symbol=symbol,autoCloseType='LIQUIDATION',
+            startTime=int(start),endTime=int(end),limit=100),signed=True)
+        if not isinstance(rows,list) or len(rows)>=100: raise ValueError('强平历史不完整，须人工核对')
+        return rows
+
     def trade_history(self, symbol, start, end):
         """Complete bounded time windows; a full page is split, never truncated."""
         start,end = int(start),int(end)

@@ -4,13 +4,16 @@ No position delta is ever converted into a synthetic fill. Binance attribution
 is intentionally limited to an unambiguous single group in the history window.
 """
 import hashlib
+import copy
 import json
 import math
 import threading
 import time
 
 from trading_engine import Engine
+from trading_config import pair_key
 import opening_costs
+import close_cause
 
 
 def number(value):
@@ -35,7 +38,7 @@ def observation_state(state):
     start = min((g['opened_ms'] for g in active),default=float('inf'))
     peers = [{k:g.get(k) for k in ('id','key','status','opened_ms','closed_ms','exit_rules_revision')}
              for g in state['groups'] if g['id'] not in ids and g.get('closed_ms',0)>=start]
-    return dict(groups=active+peers,orders=[o for o in state['orders'] if o['group'] in ids])
+    return dict(groups=active+peers,orders=[o for o in state['orders'] if o['group'] in ids],recovery=bool(state.get('recovery')))
 
 
 def fingerprint(state):
@@ -49,7 +52,7 @@ def fingerprint(state):
         row={k:o.get(k) for k in ('id','group','leg','action','requested','position','opening_id',
                                  'position_identifier','source','external_deal_ids')}
         row['result']={k:o.get('result',{}).get(k) for k in
-                       ('status','qty','price','fee','swap','ticket','deal','position','position_identifier','retcode','ack_volume','ack_price')}
+                       ('status','qty','price','fee','swap','ticket','deal','position','position_identifier','retcode','ack_volume','ack_price','close_cause')}
         orders.append(row)
     return hashlib.sha256(json.dumps([groups,orders],sort_keys=True,
                                     allow_nan=False).encode()).hexdigest()
@@ -128,7 +131,7 @@ def external_order(group, leg, rows, qty, price, fee, order_id, at, position=Non
     key = json.dumps([group['key'],leg,order_id,ids],ensure_ascii=False)
     result = dict(status='done',qty=qty,price=price,ticket=str(order_id),fee=fee,
                   platform_time_ms=at,reconcile_time_ms=int(time.time()*1000))
-    if leg=='mt5': result.update(position=position,position_identifier=identifier,swap=swap)
+    if leg=='mt5': result.update(position=position,position_identifier=identifier,swap=swap,close_cause=close_cause.mt5_cause(rows))
     return dict(id='external-'+hashlib.sha256(key.encode()).hexdigest()[:24],group=group['id'],
                 leg=leg,action='close',symbol=group['symbol'] if leg=='binance' else group['mt5_symbol'],
                 source='external',external_deal_ids=ids,requested=qty,created_ms=at,
@@ -173,7 +176,7 @@ def mt5_backfill(state, config, group, current, deals):
         raise ValueError('MT5 持仓存在其他加仓成交')
     exits = [d for d in history if d['entry'] in (1,2,3)]
     if any(d['type']!=1 for d in exits): raise ValueError('MT5 平仓方向不符')
-    used = set()
+    used = set(); refresh=[]
     for o in own:
         if o['action']!='close': continue
         if o.get('source')=='external':
@@ -184,13 +187,16 @@ def mt5_backfill(state, config, group, current, deals):
         if not rows or abs(sum(number(d['volume'])*group['contract'] for d in rows)-o['result']['qty'])>1e-7:
             raise ValueError('MT5 已记平仓与成交历史不符')
         used.update(str(d['ticket']) for d in rows)
+        if o.get('source')=='external' and not close_cause.evidence(o['result'].get('close_cause')):
+            update=copy.deepcopy(o);update['result']['close_cause']=close_cause.mt5_cause(rows)
+            update['_evidence_only']=True;refresh.append(update)
     p = current.get(position_ticket)
     if p and str(p.get('identifier'))!=identifier: raise ValueError('MT5 当前持仓标识不符')
     actual = number(p['lots'])*group['contract'] if p else 0
     closed = sum(number(d['volume'])*group['contract'] for d in exits)
     if abs(r['qty']-closed-actual)>1e-7 or actual>amounts(state,group)['mt5']+1e-7:
         raise ValueError('MT5 平仓历史与剩余持仓尚未一致')
-    result = []
+    result = refresh
     for d in exits:
         if str(d['ticket']) in used: continue
         if any(o['group']==group['id'] and o['leg']=='mt5' and o.get('source')!='external'
@@ -275,6 +281,34 @@ def propose(state, config, mode, positions, mt5, fills, deals, commission):
     return proposals,list(dict.fromkeys(errors))
 
 
+def protective_targets(state, config, proof, mt5, errors):
+    """Authorize close-only recovery after exact fills and fresh stable exposure.
+
+    No disappearance, low margin, raw comment or user assertion is a fill/cause.
+    Unrelated recovery groups keep the whole runtime blocked.
+    """
+    if errors or not isinstance(proof,dict) or not isinstance(mt5,dict): return []
+    if config['execution']['mode']!='live' or config['mt5']['adapter']!='native': return []
+    checked=proof.get('checked_monotonic')
+    if not close_cause.finite(checked) or not 0<=time.monotonic()-checked<=5: return []
+    active=[g for g in state['groups'] if g['status']!='closed']
+    targets=[]
+    for g in active:
+        if g.get('imported') or g.get('mode')!='live' or g.get('key')!=pair_key(config): return []
+        own=[o for o in state['orders'] if o['group']==g['id']]
+        if any(o.get('result',{}).get('status')!='done' for o in own): return []
+        if any(close_cause.liquidated(o) for o in own) and max(amounts(state,g).values())>1e-8:
+            if g['status'] not in ('open','attention','unwinding','closing'): return []
+            if g['status']=='attention' and g.get('liquidation_recovery'): return []
+            targets.append(g['id'])
+        elif g['status']!='open': return []
+    if not targets: return []
+    try:
+        if differences(state,config,proof['mode'],proof['positions'],mt5,proof['open_orders']): return []
+    except (ValueError,KeyError,TypeError,OverflowError): return []
+    return targets
+
+
 class ExternalCloseMonitor:
     """Dedicated read clients/process. Never borrows the order terminal lock."""
     INTERVAL = 5.
@@ -343,11 +377,11 @@ class ExternalCloseMonitor:
             mode = self.client.refresh_position_mode()
             positions = self.client.positions(config['symbol']); orders = self.client.open_orders(config['symbol'])
             mt5 = self.terminal.call('snapshot')
-            if not differences(state,config,mode,positions,mt5,orders):
+            if not differences(state,config,mode,positions,mt5,orders) and not close_cause.needs_history(state):
                 if self.runtime._external_publish(self,token,'checked',[],[]):
                     self.verify_opening_fee(state,config,token)
                 return
-            if not self.runtime._external_publish(self,token,'detected',[],[]): return
+            if not self.runtime._external_publish(self,token,'detected',[],[],mt5_snapshot=mt5): return
             if self.history_token!=token:
                 self.history_token=token;self.history_attempts=0;self.history_retry_at=0.
             if self.retry_requested.is_set():
@@ -394,6 +428,25 @@ class ExternalCloseMonitor:
                 fills = []; identity_error = True
             # Re-read after history retrieval; changes during the scan wait for
             # the next pass. Local order changes are checked separately by token.
+            # Classify only exact external orders, outside the execution lock.
+            proposals,errors = propose(state,config,mode,positions,mt5,fills,deals,self.client.commissions_usdt)
+            existing=[o for o in state['orders'] if o.get('source')=='external' and o['leg']=='binance'
+                      and not close_cause.evidence(o['result'].get('close_cause'))]
+            candidates=[o for o in proposals if o['leg']=='binance']+[dict(copy.deepcopy(o),_evidence_only=True) for o in existing]
+            if candidates:
+                try:
+                    lo=min(o['result']['platform_time_ms'] for o in candidates)-60000
+                    hi=max(o['result']['platform_time_ms'] for o in candidates)+60000
+                    forced=self.client.force_orders(config['symbol'],lo,hi)
+                    if not isinstance(forced,list): raise ValueError('强平成交回报无效')
+                    for order in candidates:
+                        order['result']['close_cause']=close_cause.binance_cause(order,forced,mode)
+                    proposals.extend(o for o in candidates if o.get('_evidence_only'))
+                except Exception:
+                    # Real closes may still be backfilled. No cause proof means
+                    # no automatic liquidation response; retry on a later scan.
+                    pass
+            checked_monotonic=time.monotonic()
             again = self.client.positions(config['symbol']); pending = self.client.open_orders(config['symbol'])
             latest = self.terminal.call('snapshot')
             a = observed(config,mode,positions,mt5); b = observed(config,mode,again,latest)
@@ -403,7 +456,11 @@ class ExternalCloseMonitor:
             if stable(a)!=stable(b) or pending or latest['orders']:
                 self.runtime._external_publish(self,token,'pending',[],['平台持仓仍在变化，等待下一次核对'],history_probe=history_probe)
                 return
-            proposals,errors = propose(state,config,mode,again,latest,fills,deals,self.client.commissions_usdt)
+            # The stable second snapshot must validate the same exact fills.
+            verified,verification_errors = propose(state,config,mode,again,latest,fills,deals,self.client.commissions_usdt)
+            if {o['id'] for o in verified}!={o['id'] for o in proposals if not (o.get('_evidence_only') and o['leg']=='binance')}:
+                errors.append('成交证据在核对期间变化')
+            errors += verification_errors
             errors = history_error + errors
             if errors and history_probe is None:
                 try:
@@ -420,7 +477,8 @@ class ExternalCloseMonitor:
                 self.history_attempts+=1
             else:
                 self.history_retry_at=0.;self.history_attempts=0
-            self.runtime._external_publish(self,token,'backfill',proposals,errors,mt5_snapshot=latest,history_probe=history_probe)
+            self.runtime._external_publish(self,token,'backfill',proposals,errors,mt5_snapshot=latest,history_probe=history_probe,
+                exposure_proof=dict(mode=mode,positions=again,open_orders=pending,checked_monotonic=checked_monotonic))
         except (ValueError,KeyError,TypeError,OverflowError):
             self.runtime._external_publish(self,token,'blocked',[],[])
         except Exception:
