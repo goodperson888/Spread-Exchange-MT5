@@ -98,6 +98,34 @@ class Engine:
     def uncertain(self, g):
         return [o for o in self.state['orders'] if o['group']==g['id'] and o.get('result',{}).get('status')!='done']
 
+    def _waiting_second_confirmation(self, g):
+        """Allow one native MT5 acknowledgement race within the original window.
+
+        A successful acknowledgement and visible matching deal are permission
+        to keep reading the original order, never proof of a complete fill.
+        Manual pause/restart invalidates this process-local permission.
+        """
+        deadline=self._entry_deadlines.get(g['id'])
+        if (g.get('status')!='opening' or not self.state['enabled'] or self.state['recovery']
+                or deadline is None or time.monotonic()>=deadline
+                or stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms']
+                or g.get('second_leg')!='mt5'):
+            return False
+        orders=[o for o in self.state['orders'] if o['group']==g['id'] and o['action']=='open']
+        first=next((o for o in orders if o['leg']==g.get('first_leg')),None)
+        second=next((o for o in orders if o['leg']=='mt5'),None)
+        if not first or not second: return False
+        r=second['result'];ack=second.get('initial_result',{});proof=ack.get('confirmation',{})
+        return (first['result'].get('status')=='done' and first['result'].get('qty')==g['qty']
+                and r.get('status')=='unknown' and r.get('qty')==0
+                and ack.get('valid') is True and ack.get('retcode')==10009
+                and ack.get('ack_volume')==g['lots'] and ack.get('ack_price')==0
+                and bool(r.get('ticket'))
+                and proof.get('stage')=='order_pending' and proof.get('position_matches')==1
+                and proof.get('deal_matches')==1
+                and all(proof.get(key)==1 for key in
+                        ('ticket_matches','symbol_matches','magic_matches','side_matches','entry_matches')))
+
     def order(self, g, leg, action, qty, q):
         if qty<=1e-9: return
         side=q[leg]; sell=(leg=='binance')==(action=='open')
@@ -362,6 +390,7 @@ class Engine:
                 self._reconcile_notices[o['id']]=(copy.deepcopy(signature),checked)
                 self.save(kind,data)
         if self.uncertain(g):
+            if self._waiting_second_confirmation(g): return False
             reason='订单状态未知，禁止重发；正在分层查询成交和持仓'
             # Background position checks may update alarm text every scan.
             # Do not turn that into a new pause/time stamp on every scan.
@@ -450,26 +479,31 @@ class Engine:
         if abs(result.get('qty',0)-g['qty'])>1e-8:
             g['status']='unwinding';g['reason']=f'{first_label} 开仓拒单或部分成交，正在保护性平仓';self.pause(g['reason'])
             self.close_group(g,q);return True
-        if stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms']:
-            g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期，正在保护性平仓';self.pause(g['reason'])
-            self.close_group(g,q);return True
-        # A retry can only continue if the second leg has not already been
-        # submitted.  Never create a duplicate order after a late response.
-        existing=next((o for o in self.state['orders']
-                       if o['group']==g['id'] and o['leg']==second_leg and o['action']=='open'),None)
-        if existing is not None: return False
-        second_q=q
-        provider=getattr(self,'quote_provider',None)
-        if provider:
-            try: second_q=provider()
-            except Exception as exc:
-                g['status']='unwinding';g['reason']='第二腿前无法取得新报价，正在保护性平仓：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return True
         deadline=self._entry_deadlines.get(g['id'])
         if (stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms'] or
-            (deadline is not None and time.monotonic()>=deadline) or not valid_quote(second_q,c)):
-            g['status']='unwinding';g['reason']='第一腿成交后报价过期或超出敞口期限，正在保护性平仓';self.pause(g['reason']);self.close_group(g,second_q);return True
+                (deadline is not None and time.monotonic()>=deadline)):
+            g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期，正在保护性平仓';self.pause(g['reason'])
+            self.close_group(g,q);return True
+        # Submit the second leg only once. A later pass may finalize its
+        # verified original fill, but must never create a duplicate order.
+        existing=next((o for o in self.state['orders']
+                       if o['group']==g['id'] and o['leg']==second_leg and o['action']=='open'),None)
+        second=existing
+        if second is None:
+            second_q=q
+            provider=getattr(self,'quote_provider',None)
+            if provider:
+                try: second_q=provider()
+                except Exception as exc:
+                    g['status']='unwinding';g['reason']='第二腿前无法取得新报价，正在保护性平仓：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return True
+            if (stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms'] or
+                (deadline is not None and time.monotonic()>=deadline) or not valid_quote(second_q,c)):
+                g['status']='unwinding';g['reason']='第一腿成交后报价过期或超出敞口期限，正在保护性平仓';self.pause(g['reason']);self.close_group(g,second_q);return True
+            second=self.order(g,second_leg,'open',g['qty'],second_q)
+        # Keep the normal 100 ms reconciliation backoff and original deadline.
+        # No sleep, resubmission, additional write or relaxed fill validation.
+        if second['result']['status']!='done' and self._waiting_second_confirmation(g): return True
         self._entry_deadlines.pop(g['id'],None)
-        second=self.order(g,second_leg,'open',g['qty'],second_q)
         if second['result']['status']=='done' and abs(second['result']['qty']-g['qty'])<1e-8:
             actual=self._record_spread(g,'open',g.get('entry_signal',g['entry']))
             if actual is None:
@@ -674,7 +708,22 @@ class Engine:
         # Read-only confirmation must continue even while quotes are stale or
         # restart recovery blocks all writes. resolve() already applies backoff.
         for g in self.active():
-            if g['key']==pair_key(c) and self.uncertain(g): self.resolve(g)
+            if g['key']!=pair_key(c): continue
+            self._expire_second_confirmation(g)
+            if self.uncertain(g): self.resolve(g)
+            self._expire_second_confirmation(g)
+
+    def _expire_second_confirmation(self, g):
+        # Even without a usable quote, commit the expired/interrupted state.
+        # Actual closing still needs confirmed fills and valid execution quotes.
+        if g.get('status')!='opening' or not any(
+                o['group']==g['id'] and o['leg']==g.get('second_leg') and o['action']=='open'
+                for o in self.state['orders']): return
+        deadline=self._entry_deadlines.get(g['id'])
+        if (deadline is None or time.monotonic()>=deadline or
+                stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms']):
+            g['status']='unwinding';g['reason']='开仓确认窗口已结束或流程中断，正在保护性平仓'
+            self.pause(g['reason'])
 
     def tick(self, c, p, q):
         self.reconcile_pending(c)
@@ -691,15 +740,17 @@ class Engine:
         for g in self.active():
             if g['key']!=q['key']: raise ValueError('当前行情与持仓账户或品种不一致')
             if g['status']=='opening':
-                if self.resolve(g):
+                confirmed=self.resolve(g)
+                deadline=self._entry_deadlines.get(g['id'])
+                if confirmed or not self._waiting_second_confirmation(g):
                     # If the first leg was only late to acknowledge, continue
                     # the paired entry while the original exposure window is
                     # still valid. Otherwise _finish_open performs the normal
                     # protective unwind.
-                    deadline=self._entry_deadlines.get(g['id'])
                     if deadline is not None and time.monotonic()<deadline:
                         self._finish_open(c,p,g,q)
-                    else:
+                    elif confirmed or any(o['group']==g['id'] and o['leg']==g.get('second_leg')
+                                          and o['action']=='open' for o in self.state['orders']):
                         self._entry_deadlines.pop(g['id'],None)
                         g['status']='unwinding';g['reason']='开仓确认窗口已结束或流程中断，正在保护性平仓'
                         self.pause(g['reason'])
