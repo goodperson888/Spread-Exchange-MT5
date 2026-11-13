@@ -7,6 +7,21 @@ def now_ms(): return int(time.time()*1000)
 
 
 class MaintenanceWork:
+    def _native_order_costs(self, order):
+        result=self.terminal.call('query',order=order)
+        saved=order['result']
+        if (not isinstance(result,dict) or result.get('status')!='done'
+                or not saved.get('ticket') or str(result.get('ticket'))!=str(saved['ticket'])
+                or result.get('fee_verified') is not True):
+            raise ValueError('MT5 原订单成交费用尚未确认')
+        for key in ('qty','price','fee','swap'):
+            if (not isinstance(result.get(key),(int,float)) or isinstance(result[key],bool)
+                    or not math.isfinite(result[key])):
+                raise ValueError('MT5 原订单费用字段尚未完整返回')
+        if abs(result['qty']-saved['qty'])>1e-7 or abs(result['price']-saved['price'])>1e-7:
+            raise ValueError('MT5 原订单成交数量或价格不一致')
+        return result['fee'],result['swap']
+
     def _update_live_carry(self, positions, refresh_funding=True):
         if self.config['execution']['mode']!='live': return
         active=self.engine.active();orders=self.engine.state['orders']
@@ -53,8 +68,8 @@ class MaintenanceWork:
     def _verify_closed_costs(self):
         """Replace estimates with broker deal records after a completed live group.
 
-        Binance commissions are matched to the exact order IDs. MT5 deals are
-        matched to our unique comments and magic number. Funding has no order
+        Binance commissions are matched to the exact order IDs. MT5 deals use
+        strategy comments or the strict native original-order verifier. Funding has no order
         ID in Binance's income feed, so it is only attributed while this app
         is the sole managed position for this symbol (enforced by reconcile).
 
@@ -87,7 +102,8 @@ class MaintenanceWork:
             group['cost_check_ms']=now_ms()
             try:
                 by_id = {o['id']: o for o in self.engine.state['orders'] if o['group'] == group['id']}
-                fees = {}
+                fees = {};swaps = {}
+                group['cost_verification_stage']='binance_fees'
                 for order in by_id.values():
                     if order['leg'] != 'binance' or order['result'].get('qty',0)<=0:
                         continue
@@ -105,6 +121,7 @@ class MaintenanceWork:
                         raise ValueError('币安成交费用记录尚未完整返回')
                     fees[order['id']] = self.binance.commissions_usdt(fills)
                 mt5_orders = [o for o in by_id.values() if o['leg']=='mt5' and o['result'].get('qty',0)>0]
+                group['cost_verification_stage']='mt5_fees'
                 deals = self.terminal.call('history', start_ms=group['opened_ms'] - 60000) if mt5_orders else []
                 mt_swap = 0
                 for order in mt5_orders:
@@ -116,15 +133,23 @@ class MaintenanceWork:
                         continue
                     rows = [x for x in deals if x.get('comment') == order['id']]
                     if not rows or abs(sum(float(x.get('volume',0))*group['contract'] for x in rows)-order['result']['qty'])>1e-7:
-                        raise ValueError('MT5 成交费用记录尚未完整返回')
-                    fees[order['id']] = -sum(float(x.get('commission', 0)) + float(x.get('fee', 0)) for x in rows)
-                    mt_swap += sum(float(x.get('swap', 0)) for x in rows)
+                        if self.config['mt5']['adapter']!='native':
+                            raise ValueError('MT5 成交费用记录尚未完整返回')
+                        # Broker-rewritten comments are not ownership evidence.
+                        # Reuse the native exact-order/terminal-volume verifier
+                        # on this isolated read-only maintenance worker.
+                        fees[order['id']],swaps[order['id']]=self._native_order_costs(order)
+                    else:
+                        fees[order['id']] = -sum(float(x.get('commission', 0)) + float(x.get('fee', 0)) for x in rows)
+                        swaps[order['id']]=sum(float(x.get('swap', 0)) for x in rows)
+                    mt_swap += swaps[order['id']]
 
                 # Funding is reported for the whole symbol position. Allocate
                 # each event by group quantity among all groups alive then, so
                 # overlapping groups do not each claim the full account fee.
                 window_start = group['opened_ms']
                 window_end = group['closed_ms'] + 1000
+                group['cost_verification_stage']='binance_funding'
                 income = self.binance.income(group['symbol'], window_start, window_end)
                 funding = 0
                 for item in income:
@@ -146,12 +171,14 @@ class MaintenanceWork:
                 for order_id, fee in fees.items():
                     by_id[order_id]['result']['fee'] = fee
                     by_id[order_id]['result']['fee_verified'] = True
+                    if order_id in swaps: by_id[order_id]['result']['swap']=swaps[order_id]
                 group['mt5_swap_usd'] = mt_swap
                 group['binance_funding_usd'] = funding * group['costs']['usdt_usd']
                 group['carry_usd'] = group['mt5_swap_usd'] + group['binance_funding_usd']
                 group['costs_verified'] = True
                 group.pop('cost_verification_error',None)
                 group['valuation'] = self.engine.valuation(group, self.quote)
+                group['cost_verification_stage']='verified'
                 self.engine.save('costs_verified', {'group': group['id'], 'net': group['valuation']['net']})
             except Exception as exc:
                 # Position is already flat; retain estimates and surface the

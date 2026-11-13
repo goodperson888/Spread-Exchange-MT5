@@ -87,6 +87,8 @@ def build_report(state, events):
         'initial_result保留下单直接回报，valid仅指通过本机字段校验，不代表已确认成交；reconcile.last_query及事件保留查询预算、耗时、固定错误分类和平台数字错误码，不导出原始错误或账号标识。',
         'query_timeout_ms是适配器请求超时参数，并非严格总耗时上限；多阶段网络请求可能超出该值。1.5秒等敞口配置仍单独决定能否开第二腿。',
         'confirmation为MT5成交核对阶段、各查询返回状态和数量校验字段；has_ticket/has_deal等只表示是否取得编号，不含编号值。first_unconfirmed_query保留第一次未确认的查询；稳定重复事件限频，attempt仍累计实际查询次数。',
+        'close_attempts为各平台实际平仓请求次数，retry_limit为每个平台的请求上限；等待报价或查询原订单不占次数。订单close_attempt和slippage_mode记录该次请求计数及普通/保护滑点。close_protection记录发现单边剩余敞口的本机时间和数量，close_halt保留达到重试上限时的平台及剩余数量；后续外部平仓不会抹去这些证据。旧版整轮计数不能还原为每个平台请求次数。',
+        '原生MT5平仓成功回执缺价格、原订单短暂待处理时最多提供300ms本机核对期，期间平仓组继续阻止开新仓；超时或部分成交仍暂停，不恢复已暂停的程序。cost_verification_stage为已平仓后台费用核验的固定步骤分类；缺失或待核验不能视为实际费用为零。',
         'receipt为已有平台回执的白名单字段与原字段类型；missing、null、零值和无法解析分别保留。币安values含avgPrice、cumQuote、executedQty及平台时间，price_source说明归一化价格来源；MT5含直接order_send回执，precheck_receipt单列order_check结果，即使同次调用已由历史确认也保留原回执。编号仅保留有无，不导出请求回显、账户、注释和错误原文。',
         'validation_issues为本机校验失败的固定分类；reconcile.first_cancel/last_cancel记录首次及最近一次撤单调用返回与耗时，returned仅代表调用正常返回，不证明撤单成功；撤单后仍查询原订单。ack_received_ms为MT5原生下单调用返回的本机时间，早于可能的历史补查。所有新增采集复用已有调用和日志提交，不增加查询；平台原始时间不用于推断时区或本机延迟。',
     ])
@@ -102,13 +104,23 @@ def build_report(state, events):
              'mt5_symbol':symbol(g.get('mt5_symbol')),
              'first_leg':choice(g,'first_leg',('binance','mt5')),
              'second_leg':choice(g,'second_leg',('binance','mt5')),
-             **numbers(g,'opened_ms closed_ms qty lots contract entry entry_signal exit exit_signal entry_threshold grid_index')}
+             **numbers(g,'opened_ms closed_ms qty lots contract entry entry_signal exit exit_signal entry_threshold grid_index retry_limit')}
         if g.get('reason'): row.update(safe_reason(g))
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
         row.update(numbers(g,'exit_rules_revision'))
         if isinstance(g.get('liquidation_recovery'),dict):
             row['liquidation_recovery']=numbers(g['liquidation_recovery'],'detected_ms armed_ms remaining_mt5 remaining_binance')
+        if isinstance(g.get('close_attempts'),dict): row['close_attempts']=numbers(g['close_attempts'],'binance mt5')
+        if isinstance(g.get('close_protection'),dict):
+            row['close_protection']=numbers(g['close_protection'],'started_ms remaining_mt5 remaining_binance')
+        if isinstance(g.get('close_halt'),dict):
+            row['close_halt']={**numbers(g['close_halt'],'time_ms retry_limit remaining_mt5 remaining_binance'),
+                               'leg':choice(g['close_halt'],'leg',('binance','mt5'))}
+        row.update(numbers(g,'cost_check_ms'))
+        if type(g.get('costs_verified')) is bool: row['costs_verified']=g['costs_verified']
+        if g.get('cost_verification_stage') in ('binance_fees','mt5_fees','binance_funding','verified'):
+            row['cost_verification_stage']=g['cost_verification_stage']
         row['costs']=numbers(g.get('costs',{}),'usdt_usd binance_rebate_percent mt5_rebate_percent')
         row['valuation']=numbers(g.get('valuation',{}),'pnl_schema_version binance_pnl_usdt mt5_pnl_usd valuation_fx gross fees estimated_exit_fee net_before_rebate estimated_rebate estimated_rebate_binance estimated_rebate_mt5 net')
         if isinstance(g.get('exit_decision'),dict):
@@ -126,7 +138,8 @@ def build_report(state, events):
              'leg':choice(o,'leg',('binance','mt5')),'action':choice(o,'action',('open','close')),
              'symbol':symbol(o.get('symbol')),'imported':bool(o.get('imported')),
              'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
-             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage')}
+             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt')}
+        if o.get('slippage_mode') in ('normal','protective'): row['slippage_mode']=o['slippage_mode']
         if o.get('quote_source') in ('cache','refresh'): row['quote_source']=o['quote_source']
         if type(o.get('slippage_exceeded')) is bool: row['slippage_exceeded']=o['slippage_exceeded']
         row['result']={'status':choice(result,'status',('done','pending','unknown')),
@@ -153,7 +166,7 @@ def build_report(state, events):
             row['reconcile']['first_unconfirmed_query']={**result_evidence(first),
                                                         **numbers(first,'time_ms query_ms query_timeout_ms')}
         report['orders'].append(row)
-    kinds={'order_intent','order_result','order_reconciled','order_reconcile_retry','order_reconcile_exhausted',
+    kinds={'order_intent','order_result','order_reconciled','order_reconcile_retry','order_reconcile_exhausted','costs_verified','cost_verification_pending',
            'group_opening','group_opened','group_closed','exit_signal','exit_deferred','entry_skipped','close_attempt','entry_recovered','opening_fee_verified'}
     for event in events:
         data=event.get('data') or {}
@@ -186,7 +199,9 @@ def build_report(state, events):
         oid=order_ids.get(data.get('id'));gid=group_ids.get(data.get('group'))
         if oid is None and gid is None: continue
         row={'kind':event['kind'],**numbers(event,'time'),
-             'data':numbers(data,'attempt query_ms query_timeout_ms signal_spread entry qty net_estimate fee entry_spread contraction target_contraction target_spread min_net_profit estimated_net estimated_net_before_rebate estimated_gross estimated_exit_fee estimated_rebate valuation_fx basket_estimated_net')}
+             'data':numbers(data,'attempt close_attempt query_ms query_timeout_ms signal_spread entry qty net_estimate fee entry_spread contraction target_contraction target_spread min_net_profit estimated_net estimated_net_before_rebate estimated_gross estimated_exit_fee estimated_rebate valuation_fx basket_estimated_net')}
+        if data.get('leg') in ('binance','mt5'): row['data']['leg']=data['leg']
+        if data.get('slippage_mode') in ('normal','protective'): row['data']['slippage_mode']=data['slippage_mode']
         if isinstance(data.get('result'),dict): row['data']['result']=result_evidence(data['result'])
         if data.get('reason'): row['data'].update(safe_reason(data))
         if oid: row['data']['order']=oid

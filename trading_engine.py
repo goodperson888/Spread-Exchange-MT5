@@ -35,12 +35,14 @@ class Engine:
     QUERY_TIMEOUT_MS = 1000
     RECENT_RECONCILE_MS = 10000
     RECONCILE_LOG_INTERVAL_MS = 30000
+    CLOSE_CONFIRM_GRACE_MS = 300
 
     def __init__(self, store, broker):
         self.store,self.broker=store,broker
         # Deliberately not persisted: a restart or manual pause must never
         # resume an interrupted entry, even if the wall clock moved backwards.
         self._entry_deadlines={}
+        self._close_confirmation_deadlines={}
         self._execution_timers={}
         self._reconcile_notices={}
         self.state=store.load() or dict(groups=[],orders=[],last_open_ms=0,enabled=False,mode='paper',key=None,alarm='',recovery=False)
@@ -74,6 +76,7 @@ class Engine:
 
     def pause(self, reason='已暂停新开仓；已有仓位继续管理', keep_entry=False):
         if not keep_entry: self._entry_deadlines.clear()
+        self._close_confirmation_deadlines.clear()
         code=reason_code(reason)
         evidence={'time_ms':stamp(),'reason_code':code,'reason_label':REASON_LABELS[code],
                   'enabled_before':bool(self.state.get('enabled')),'keep_entry':bool(keep_entry)}
@@ -126,11 +129,25 @@ class Engine:
                 and all(proof.get(key)==1 for key in
                         ('ticket_matches','symbol_matches','magic_matches','side_matches','entry_matches')))
 
+    def _waiting_close_confirmation(self, g):
+        # An active closing group already blocks all new entries. A native
+        # success ack may briefly lag in terminal history; this grace changes
+        # only when we latch the pause, never the fill or resubmission rules.
+        if g.get('status')!='closing' or not self.state['enabled'] or self.state['recovery']: return False
+        pending=self.uncertain(g)
+        return bool(pending) and all(o['action']=='close' and o['leg']=='mt5'
+            and o['result'].get('status')=='unknown' and o['result'].get('qty')==0
+            and time.monotonic()<self._close_confirmation_deadlines.get(o['id'],0) for o in pending)
+
     def order(self, g, leg, action, qty, q):
         if qty<=1e-9: return
         side=q[leg]; sell=(leg=='binance')==(action=='open')
         reference=side['bid' if sell else 'ask']
-        if g.get('status')=='unwinding':
+        remaining=self.amounts(g) if action=='close' else None
+        residual=(action=='close' and g.get('status')=='closing'
+                  and abs(remaining['mt5']-remaining['binance'])>1e-8)
+        protective=g.get('status')=='unwinding' or residual
+        if protective:
             # Groups created by an older build do not have the dedicated
             # unwind field; fall back to their saved normal budget safely.
             budget=g['parameters'].get('unwind_slippage_usd', g['parameters']['max_slippage_usd'])
@@ -142,6 +159,12 @@ class Engine:
                reference=reference,limit=reference+(-slip if sell else slip),slippage=slip,
                fx=q.get('usdt_usd',g['costs']['usdt_usd']),
                created_ms=stamp(),result={'status':'unknown','qty':0,'price':0})
+        o['slippage_mode']='protective' if protective else 'normal'
+        if action=='close':
+            if isinstance(g.get('close_attempts'),dict): o['close_attempt']=g['close_attempts'].get(leg,0)
+            if residual:
+                g.setdefault('close_protection',dict(started_ms=stamp(),remaining_mt5=remaining['mt5'],
+                                                    remaining_binance=remaining['binance']))
         if leg=='binance':
             # bookTicker carries the current top-of-book quantity.  The live
             # broker uses it as a zero-latency fast path and only requests
@@ -174,7 +197,8 @@ class Engine:
             o['opening_id']=opened['id']
             o['position_identifier']=opened['result'].get('position_identifier')
         journal_started=time.monotonic()
-        self.state['orders'].append(o);self.save('order_intent',{'id':o['id'],'group':g['id'],'leg':leg,'action':action,'qty':qty})
+        self.state['orders'].append(o);self.save('order_intent',{'id':o['id'],'group':g['id'],'leg':leg,'action':action,'qty':qty,
+            **({'close_attempt':o['close_attempt']} if 'close_attempt' in o else {}),'slippage_mode':o['slippage_mode']})
         request_started=time.monotonic()
         o['intent_journal_ms']=round((request_started-journal_started)*1000,3)
         self._latency('intent_journal_ms', o['intent_journal_ms'])
@@ -206,6 +230,12 @@ class Engine:
         o['initial_result']={**initial_evidence,'request_ms':result['request_ms'],
                              'response_received_ms':result['response_received_ms'],'valid':valid}
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
+        if (action=='close' and leg=='mt5' and valid and result.get('status')=='unknown'
+                and result.get('retcode')==10009 and result.get('ack_price')==0
+                and result.get('ack_volume')==o['requested']/g['contract'] and result.get('ticket')
+                and isinstance(result.get('confirmation'),dict) and result['confirmation'].get('stage')=='order_pending'
+                and result.get('qty')==0 and g.get('status')=='closing' and self.state['enabled']):
+            self._close_confirmation_deadlines[o['id']]=time.monotonic()+self.CLOSE_CONFIRM_GRACE_MS/1000
         if action=='close' and self._price_only_full_fill(o):
             # One bounded read, never another order write. Keep the direct
             # acknowledgement intact and do not re-enable a paused engine.
@@ -351,6 +381,7 @@ class Engine:
                     merged['reconcile_time_ms']=stamp()
                 o['result']=merged
                 if r.get('status')=='done':
+                    self._close_confirmation_deadlines.pop(o['id'],None)
                     self._reconcile_notices.pop(o['id'],None)
                     self.save('order_reconciled',{'id':o['id'],'result':merged,
                               'attempt':reconcile['attempts'],'query_ms':query_ms,'query_timeout_ms':query_budget})
@@ -390,7 +421,7 @@ class Engine:
                 self._reconcile_notices[o['id']]=(copy.deepcopy(signature),checked)
                 self.save(kind,data)
         if self.uncertain(g):
-            if self._waiting_second_confirmation(g): return False
+            if self._waiting_second_confirmation(g) or self._waiting_close_confirmation(g): return False
             reason='订单状态未知，禁止重发；正在分层查询成交和持仓'
             # Background position checks may update alarm text every scan.
             # Do not turn that into a new pause/time stamp on every scan.
@@ -586,6 +617,7 @@ class Engine:
 
     def request_close(self, group_id=None, reason='用户平仓'):
         self._entry_deadlines.clear()
+        self._close_confirmation_deadlines.clear()
         code=reason_code(reason)
         self.state['last_pause']={'time_ms':stamp(),'reason_code':code,'reason_label':REASON_LABELS[code],
                                   'enabled_before':bool(self.state.get('enabled')),'keep_entry':False}
@@ -594,7 +626,8 @@ class Engine:
         for g in self.active():
             if group_id is None or g['id']==group_id:
                 self._begin_execution(g,'close')
-                if g['status']=='attention': g['attempts']=0
+                if g['status']=='attention':
+                    g['attempts']=0;g['close_attempts']={'binance':0,'mt5':0}
                 # A manual close must not downgrade an ongoing protective
                 # unwind to the tighter normal slippage budget.
                 if g['status']!='unwinding': g.update(status='closing',reason=reason)
@@ -627,7 +660,36 @@ class Engine:
         if not valid_group_quote(q,g['key'],g['parameters']):
             self.state['alarm']='平仓等待有效新报价；成交查询继续，当前尚未双平'
             return
-        return self.order(g,leg,'close',qty,q)
+        counts=g.get('close_attempts')
+        if counts is None:
+            # Preserve exhausted legacy protection until an explicit manual
+            # retry. Otherwise reconstruct actual writes, not old loop counts.
+            if g['attempts']>=g['retry_limit']:
+                self._halt_close(g,leg);return
+            counts={side:sum(o['group']==g['id'] and o['leg']==side and o['action']=='close'
+                            and o.get('source')!='external'
+                            for o in self.state['orders']) for side in ('binance','mt5')}
+            g['close_attempts']=counts
+        if counts.get(leg,0)>=g['retry_limit']:
+            self._halt_close(g,leg);return
+        counts[leg]=counts.get(leg,0)+1
+        g['attempts']=max(counts.values())
+        # The existing order-intent commit makes these counters durable before
+        # the broker write. Waiting for quotes/history spends no retry budget.
+        order=self.order(g,leg,'close',qty,q)
+        if (order and order['result'].get('status')=='done'
+                and order['result'].get('qty',0)<order['requested']-1e-8
+                and abs(self.amounts(g)['mt5']-self.amounts(g)['binance'])>1e-8
+                and self.state['enabled']):
+            self.pause('单边平仓未完成，继续保护性减仓；新开仓仍暂停')
+        return order
+
+    def _halt_close(self, g, leg):
+        remaining=self.amounts(g)
+        g['status']='attention'
+        g['close_halt']=dict(time_ms=stamp(),leg=leg,retry_limit=g['retry_limit'],
+                            remaining_mt5=remaining['mt5'],remaining_binance=remaining['binance'])
+        self.pause('减仓重试达到上限，仍有敞口；请检查账户后使用“重试平仓”')
 
     def close_group(self, g, q):
         self._begin_execution(g,'close',q)
@@ -672,9 +734,6 @@ class Engine:
                 self.save('exit_deferred',dict(group=g['id'],reason=g['reason'],
                           signal_spread=q['exit'],estimated_net=v['net'],min_net_profit=s['min_net_profit_usd']))
                 return
-        if g['attempts']>=g['retry_limit']:
-            g['status']='attention';self.pause('减仓重试达到上限，仍有敞口；请检查账户后使用“重试平仓”');return
-        g['attempts']+=1;self.save('close_attempt',{'group':g['id'],'attempt':g['attempts']})
         # Remove a pre-existing unmatched excess first. Do not touch the
         # hedged portion until that reduction is confirmed.
         before_m, before_b = amounts['mt5'], amounts['binance']
@@ -700,7 +759,7 @@ class Engine:
         if g.get('imported') and not self.uncertain(g):
             after=self.amounts(g)
             if after['mt5']<before_m-1e-8 and abs(after['mt5']-after['binance'])<1e-8:
-                g['attempts']=0
+                g['attempts']=0;g['close_attempts']={'binance':0,'mt5':0}
         if not self.uncertain(g) and max(self.amounts(g).values())<1e-8:
             self.finalize_flat(g,q)
 

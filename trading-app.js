@@ -255,7 +255,10 @@
       const statusDetail=[stateDescriptions[g.status]||stateLabel,pending.length?'有订单成交尚未确认，当前为'+(states[g.status]||g.status):'',basis,g.execution_warning].filter(Boolean).join('；');
       const decision=g.exit_decision;
       const exitDetail=decision?` 触发时：价差 ${n(decision.signal_spread)}，收窄 ${n(decision.contraction)} USD/盎司；预估净收益 ${usd(decision.estimated_net)}（含预计返佣 ${usd(decision.estimated_rebate)}）；最低净收益 ${decision.require_net_profit?usd(decision.min_net_profit):'未要求'}${Number.isFinite(decision.basket_estimated_net)?'；篮子预估净收益 '+usd(decision.basket_estimated_net):''}。这是下单前估算，实际成交与费用可能改变最终结果。`:'';
-      const exposureDetail=`币安 ${remainingLabel('binance')} XAU；MT5 ${remainingLabel('mt5')} 盎司。${unverified?'当前仅有本机日志，实际持仓须核对平台。':''}${g.reason?'原因：'+g.reason:'暂无额外原因。'}${exitDetail}`;
+      const halt=g.close_halt,haltLeg=halt?.leg==='binance'?'币安':halt?.leg==='mt5'?'MT5':'平台';
+      const haltDetail=halt?` 上次自动减仓停止：${haltLeg}平仓请求达到本组每个平台 ${n(halt.retry_limit)} 次上限；当时剩余币安 ${n(halt.remaining_binance)} XAU、MT5 ${n(halt.remaining_mt5)} 盎司。${g.status==='closed'?'当前已确认本组双边平仓。':'请核对平台后使用重试平仓。'}`:'';
+      const protectionDetail=g.close_protection?` 单边剩余敞口使用本组保护滑点 ${n(g.parameters?.unwind_slippage_usd??g.parameters?.max_slippage_usd)} USD/盎司；价格限制不保证成交。`:'';
+      const exposureDetail=`币安 ${remainingLabel('binance')} XAU；MT5 ${remainingLabel('mt5')} 盎司。${unverified?'当前仅有本机日志，实际持仓须核对平台。':''}${g.reason?'原因：'+g.reason:'暂无额外原因。'}${exitDetail}${haltDetail}${protectionDetail}`;
       const statusCell=recordHint(pending.length?'成交待确认':stateLabel,statusDetail,g.id+'-status');
       const exposureCell=recordHint(`币安 ${unverified?'待核对':unknownLegs.has('binance')?'待确认':n(remaining.binance||0)}`,exposureDetail,g.id+'-binance')+'<br>'+recordHint(`MT5 ${unverified?'待核对':unknownLegs.has('mt5')?'待确认':n(remaining.mt5||0)}`,exposureDetail,g.id+'-mt5');
       const pnlLabel=unverified?'收益待核对':g.status==='closed'?(abnormalClosed?'异常撤回净结果':'平仓净收益')+(g.mode==='paper'?'（纸面模拟）':g.imported?'（含接管历史估算）':v.costs_verified?'':'（估算／待费用复核）'):'实时净收益（估算）';

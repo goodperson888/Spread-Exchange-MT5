@@ -185,7 +185,7 @@ class MaintenanceMonitor:
                 orders = [o for o in state['orders'] if o['group']==group['id']]
                 before_group, before_orders = copy.deepcopy(group), copy.deepcopy(orders)
                 success = result['event'] in ('costs_verified', 'adoption_closing_costs_checked')
-                fields = ('cost_check_ms', 'import_cost_check_ms', 'cost_verification_error')
+                fields = ('cost_check_ms', 'import_cost_check_ms', 'cost_verification_error', 'cost_verification_stage')
                 if success: fields += ('costs_verified', 'mt5_swap_usd', 'binance_funding_usd', 'carry_usd',
                     'live_mt5_swap_usd', 'live_binance_funding_usd', 'import_closing_costs_checked')
                 try:

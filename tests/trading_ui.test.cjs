@@ -802,6 +802,24 @@ test('MT5 confirmation stage is visible only for an active group and never start
  assert.doesNotMatch(f.el('trading-result').textContent,/MT5 成交仍未确认/);
 });
 
+test('close retry exhaustion keeps platform and old exposure in the hover hint after backfill',async()=>{
+ const group={id:'g-retry',status:'attention',qty:1,lots:.01,contract:100,parameters:{unwind_slippage_usd:2},
+  valuation:{remaining:{binance:1,mt5:0}},close_attempts:{binance:3,mt5:1},
+  close_halt:{leg:'binance',retry_limit:3,remaining_binance:1,remaining_mt5:0},
+  close_protection:{remaining_binance:1,remaining_mt5:0}};
+ const snapshot={connected:true,capabilities:{mode:'live',reconciled:true},
+  state:{enabled:false,recovery:false,groups:[group],orders:[]}};
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ assert.match(f.el('groups').innerHTML,/币安平仓请求达到本组每个平台 3 次上限/);
+ assert.match(f.el('groups').innerHTML,/当时剩余币安 1 XAU、MT5 0 盎司/);
+ assert.match(f.el('groups').innerHTML,/保护滑点 2 USD/);
+ assert.match(f.el('groups').innerHTML,/重试平仓/);
+ group.status='closed';group.valuation.remaining={binance:0,mt5:0};await f.refresh();
+ assert.match(f.el('groups').innerHTML,/上次自动减仓停止/);
+ assert.match(f.el('groups').innerHTML,/当前已确认本组双边平仓/);
+ assert.equal(f.calls.filter(c=>c.url==='/api/trading/start'||c.url==='/api/trading/close').length,0);
+});
+
 function changeRecordPage(f,key,page) {
   f.el('view-records').onclick({target:{closest:()=>({disabled:false,dataset:{recordTable:key,recordPage:String(page)}})}});
 }

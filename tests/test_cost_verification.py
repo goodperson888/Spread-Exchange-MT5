@@ -94,5 +94,45 @@ class CostVerificationTests(unittest.TestCase):
         self.r.binance.trades.assert_not_called();self.r.terminal.call.assert_not_called()
         self.assertNotIn('cost_check_ms',self.g)
 
+    def native_query(self):
+        def call(command, **args):
+            if command=='history': return [{**d,'comment':'broker-rewritten'} for d in self.deals]
+            order=args['order'];saved=order['result']
+            return dict(status='done',qty=saved['qty'],price=saved['price'],ticket=saved['ticket'],
+                        fee_verified=True,fee=.04,swap=-.37 if order['action']=='close' else 0)
+        self.r.terminal.call.side_effect=call
+
+    def test_rewritten_comments_use_exact_original_order_for_fees_and_swap(self):
+        self.native_query();self.r._verify_closed_costs()
+        self.assertTrue(self.g['costs_verified']);self.assertEqual(self.g['cost_verification_stage'],'verified')
+        self.assertAlmostEqual(self.g['mt5_swap_usd'],-.37)
+        self.assertAlmostEqual(self.g['valuation']['fees'],.28)
+        closes=[o for o in self.e.state['orders'] if o['leg']=='mt5' and o['action']=='close']
+        self.assertEqual(closes[0]['result']['swap'],-.37)
+        self.assertEqual(sum(c.args[0]=='query' for c in self.r.terminal.call.call_args_list),2)
+
+    def test_exact_native_fallback_rejects_wrong_identity_quantity_price_and_unknown(self):
+        base=dict(status='done',qty=2,price=1,ticket='foreign',fee_verified=True,fee=.04,swap=-.37)
+        for key,value in (('ticket','foreign'),('qty',1),('price',0),('status','unknown'),
+                          ('fee_verified',False),('swap',float('nan')),('fee',True)):
+            with self.subTest(key=key):
+                def call(command,**args):
+                    if command=='history': return []
+                    saved=args['order']['result']
+                    return {**base,'ticket':saved['ticket'],'qty':saved['qty'],'price':saved['price'],key:value}
+                self.g['cost_check_ms']=0;self.r.terminal.call.side_effect=call
+                self.assert_pending_without_overwriting_results()
+                self.assertEqual(self.g['cost_verification_stage'],'mt5_fees')
+
+    def test_native_fallback_never_partially_applies_before_funding_is_verified(self):
+        self.native_query();self.r.binance.income.side_effect=TimeoutError('private upstream')
+        self.assert_pending_without_overwriting_results()
+        self.assertEqual(self.g['cost_verification_stage'],'binance_funding')
+        from execution_diagnostics import build_report
+        report=build_report(self.e.state,self.store.events())
+        self.assertEqual(report['groups'][0]['cost_verification_stage'],'binance_funding')
+        self.assertEqual(report['events'][0]['kind'],'cost_verification_pending')
+        self.assertNotIn('private upstream',str(report))
+
 
 if __name__=='__main__':unittest.main()
