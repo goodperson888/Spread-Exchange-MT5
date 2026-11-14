@@ -519,12 +519,12 @@ class NativeMT5Fills:
     def positions(self, order):
         rows = self.mt.positions_get(symbol=self.symbol)
         if rows is None: raise ValueError('MT5 持仓读取失败')
-        return [p for p in rows if p.magic == self.magic and p.type == 0
+        return [p for p in rows if p.magic == self.magic and p.type == order.get('native_position_side',0)
                 and p.comment == order['id']]
 
     def matches(self, rows, order, ticket=None):
-        side = 0 if order['action'] == 'open' else 1
-        entry = (0,) if side == 0 else (1, 2, 3)
+        side = order.get('native_position_side',0) if order['action']=='open' else 1-order.get('native_position_side',0)
+        entry = (0,) if order['action']=='open' else (1, 2, 3)
         return [d for d in rows or () if d.symbol == self.symbol and d.magic == self.magic
                 and d.type == side and d.entry in entry
                 and (str(d.order) == str(ticket) if ticket else d.comment == order['id'])]
@@ -594,7 +594,7 @@ class NativeMT5Fills:
             info.update(candidate_rows=len(rows),ticket_matches=len(base),
                         symbol_matches=sum(d.symbol==self.symbol for d in base),
                         magic_matches=sum(d.magic==self.magic for d in base),
-                        side_matches=sum(d.type==(0 if order['action']=='open' else 1) for d in base),
+                        side_matches=sum(d.type==(order.get('native_position_side',0) if order['action']=='open' else 1-order.get('native_position_side',0)) for d in base),
                         entry_matches=sum(d.entry in ((0,) if order['action']=='open' else (1,2,3)) for d in base))
             # An exact deal ID from this request may recover a missing order
             # ID even when the broker rewrote the comment. Never match by
@@ -632,7 +632,7 @@ class NativeMT5Fills:
             terminal=read('orders_range',self.mt.history_orders_get,*time_range())
         if not terminal: return finish('order_history_missing')
         terminal = [x for x in terminal if str(x.ticket)==str(ticket) and x.symbol==self.symbol
-                    and x.magic==self.magic and x.type==(0 if order['action']=='open' else 1)]
+                    and x.magic==self.magic and x.type==(order.get('native_position_side',0) if order['action']=='open' else 1-order.get('native_position_side',0))]
         info['order_matches']=len(terminal)
         if len(terminal)!=1: return finish('order_identity_mismatch')
         item = terminal[0]
@@ -698,6 +698,7 @@ def native_external_history(mt, symbol, openings):
         except Exception: return None
 
     for opening in openings:
+        position_side=opening.get('native_position_side',0)
         # A native acknowledgement can contain a deal/position identifier
         # while omitting the order ticket.  Prefer the immutable position
         # identifier in that case; it remains queryable after the position is
@@ -722,7 +723,7 @@ def native_external_history(mt, symbol, openings):
         full_openings=[d for d in (full or ()) if d.symbol==symbol
                        and int(d.position_id)==int(identifier or 0)
                        and (not hasattr(d,'entry') or int(d.entry)==0)
-                       and (not hasattr(d,'type') or int(d.type)==0)]
+                       and (not hasattr(d,'type') or int(d.type)==position_side)]
         if identifier and not full_openings:
             full=None
 
@@ -740,7 +741,7 @@ def native_external_history(mt, symbol, openings):
             comment=str(opening.get('comment') or '').strip()
             try: magic=int(opening.get('magic'))
             except (TypeError,ValueError): magic=None
-            matches=[d for d in rows if d.symbol==symbol and int(d.entry)==0 and int(d.type)==0
+            matches=[d for d in rows if d.symbol==symbol and int(d.entry)==0 and int(d.type)==position_side
                      and (identifier and str(d.position_id)==identifier or
                           ticket>0 and int(d.order)==ticket or
                           not identifier and not ticket and comment and magic is not None
@@ -848,13 +849,39 @@ def worker_main():
                     raise ValueError('先检查并应用 MT5 账户和品种')
                 path=settings.get('terminal_path','');args=[path] if path else []
                 if not mt.initialize(*args,timeout=10000): raise ValueError('MT5 初始化失败')
-                identity(); mt.symbol_select(settings['symbol'],True); data=True
+                identity()
+                for name in settings.get('pair_symbols',[settings['symbol']]):
+                    if not mt.symbol_select(name,True): raise ValueError('MT5 品种不可用：'+name)
+                data=True
             else:
-                if read_only and cmd not in ('snapshot','quote','history','external_history','external_history_probe','query'):
+                if read_only and cmd not in ('snapshot','quote','pair_quotes','history','external_history','external_history_probe','query','pair_spec'):
                     raise ValueError('持仓核对会话只允许读取行情、持仓和成交')
-                a,t=identity(); s=mt.symbol_info(settings['symbol'])
+                a,t=identity()
+                name=r.get('symbol',settings['symbol'])
+                if name not in settings.get('pair_symbols',[settings['symbol']]): raise ValueError('MT5 请求品种不属于当前组合')
+                s=mt.symbol_info(name)
                 if not s: raise ValueError('MT5 品种不可用')
-                if cmd=='quote':
+                if cmd=='pair_quotes':
+                    data={}
+                    for name in settings.get('pair_symbols',[settings['symbol']]):
+                        tick=mt.symbol_info_tick(name)
+                        if not tick: raise ValueError('MT5 报价读取失败：'+name)
+                        data[name]=dict(bid=tick.bid,ask=tick.ask,time_ms=tick.time_msc)
+                elif cmd=='pair_spec':
+                    tick=mt.symbol_info_tick(s.name)
+                    if not tick: raise ValueError('MT5 无报价：'+s.name)
+                    lots=s.volume_min; delta=max(s.point*100,1.)
+                    buy=mt.order_calc_profit(mt.ORDER_TYPE_BUY,s.name,lots,tick.ask,tick.ask+delta)
+                    sell=mt.order_calc_profit(mt.ORDER_TYPE_SELL,s.name,lots,tick.bid,tick.bid-delta)
+                    expected=lots*s.trade_contract_size*delta
+                    if (s.currency_profit!='USD' or not all(isinstance(x,(int,float)) and math.isfinite(x)
+                        and abs(x-expected)<=max(.01,abs(expected)*.001) for x in (buy,sell))):
+                        raise ValueError('当前仅支持已核验按合约大小线性计算 USD 盈亏的品种：'+s.name)
+                    data=dict(name=s.name,contract_size_oz=s.trade_contract_size,volume_min=s.volume_min,
+                              volume_max=s.volume_max,volume_step=s.volume_step,trade_mode=s.trade_mode,
+                              currency_base=s.currency_base,currency_profit=s.currency_profit,
+                              expiration_time=s.expiration_time,linear_usd_verified=True)
+                elif cmd=='quote':
                     tick=mt.symbol_info_tick(s.name)
                     if not tick: raise ValueError('MT5 报价读取失败')
                     data=dict(quote=dict(bid=tick.bid,ask=tick.ask,time_ms=tick.time_msc))
@@ -898,7 +925,9 @@ def worker_main():
                     # An unavailable opening estimate must not strand existing
                     # positions by making an otherwise healthy session unusable.
                     try:
-                        value=mt.order_calc_margin(mt.ORDER_TYPE_BUY,s.name,r['lots'],mt.symbol_info_tick(s.name).ask)
+                        side=r.get('native_position_side',0)
+                        value=mt.order_calc_margin(mt.ORDER_TYPE_SELL if side==1 else mt.ORDER_TYPE_BUY,s.name,r['lots'],
+                            mt.symbol_info_tick(s.name).bid if side==1 else mt.symbol_info_tick(s.name).ask)
                         if not isinstance(value,(int,float)) or not math.isfinite(value): value=None
                     except Exception: value=None
                     data=dict(required=value,available=a.margin_free)
@@ -906,14 +935,19 @@ def worker_main():
                     o=r['order']; opening=o['action']=='open'
                     if not (t.trade_allowed and not t.tradeapi_disabled and a.trade_allowed and a.trade_expert):
                         raise ValueError('MT5 自动交易权限未开启')
-                    tick=mt.symbol_info_tick(s.name); price=tick.ask if opening else tick.bid
-                    if (opening and price>o['limit']) or (not opening and price<o['limit']):
+                    if o.get('symbol',s.name)!=s.name or (settings.get('pair_symbols') and not o.get('symbol')):
+                        raise ValueError('订单品种与 MT5 请求品种不符')
+                    position_side=o.get('native_position_side',0)
+                    if type(position_side) is not int or position_side not in (0,1): raise ValueError('MT5 持仓方向无效')
+                    selling=(position_side==1)==opening
+                    tick=mt.symbol_info_tick(s.name); price=tick.bid if selling else tick.ask
+                    if (not selling and price>o['limit']) or (selling and price<o['limit']):
                         data=dict(status='done',qty=0,price=0,error='MT5 报价已超出滑点预算')
                     else:
                         filling=mt.ORDER_FILLING_IOC if s.filling_mode&2 else mt.ORDER_FILLING_FOK if s.filling_mode&1 else None
                         if filling is None: raise ValueError('该 MT5 合约未提供可用的 IOC/FOK 成交方式')
                         req=dict(action=mt.TRADE_ACTION_DEAL,symbol=s.name,volume=o['requested']/s.trade_contract_size,
-                            type=mt.ORDER_TYPE_BUY if opening else mt.ORDER_TYPE_SELL,price=price,
+                            type=mt.ORDER_TYPE_SELL if selling else mt.ORDER_TYPE_BUY,price=price,
                             deviation=max(1,math.floor(o['slippage']/s.point)),magic=magic,comment=o['id'],
                             type_time=mt.ORDER_TIME_GTC,type_filling=filling)
                         if not opening:
@@ -921,7 +955,7 @@ def worker_main():
                                 current=mt.positions_get(symbol=s.name)
                                 if current is None: raise ValueError('MT5 持仓读取失败')
                                 pos=[p for p in current if p.comment==o['opening_id'] and p.magic==magic
-                                     and p.type==0 and (not o.get('position_identifier') or
+                                     and p.type==position_side and (not o.get('position_identifier') or
                                          str(p.identifier)==str(o['position_identifier']))]
                                 if len(pos)!=1: raise ValueError('MT5 持仓票据未唯一确认，请先对账')
                                 o['position']=str(pos[0].ticket)
@@ -964,7 +998,7 @@ def worker_main():
 
 
 def owned_close_position(position, order, symbol, magic):
-    if position.symbol != symbol or position.type != 0:
+    if position.symbol != symbol or position.type != order.get('native_position_side',0):
         return False
     adopted = order.get('adopted_position')
     if not adopted:

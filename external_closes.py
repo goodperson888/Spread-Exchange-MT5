@@ -62,7 +62,7 @@ def opening_position(order, current, magic):
     result=order['result']
     if result.get('position'): return str(result['position'])
     matches=[str(p['ticket']) for p in current.values() if p.get('magic')==magic
-             and p.get('comment')==order['id'] and p.get('side')==0
+             and p.get('comment')==order['id'] and p.get('side')==order.get('native_position_side',0)
              and (not result.get('position_identifier') or str(p.get('identifier'))==str(result['position_identifier']))]
     if len(matches)>1: raise ValueError('MT5 原持仓未唯一确认')
     return matches[0] if matches else ''
@@ -145,6 +145,7 @@ def mt5_backfill(state, config, group, current, deals):
     if not openings and abs(amounts(state,group)['mt5'])<1e-8: return []
     if len(openings)!=1: raise ValueError('MT5 开仓记录未唯一确认')
     opening = openings[0]; r = opening['result']
+    position_side=opening.get('native_position_side',0)
     position_ticket = opening_position(opening,current,config['execution']['magic'])
     # Prove the immutable position identifier from the original strategy fill.
     # The order ticket is the strongest link when it is available.  Some MT5
@@ -155,7 +156,7 @@ def mt5_backfill(state, config, group, current, deals):
     # below as the final ownership proof.
     order_ticket=str(r.get('ticket') or '')
     identifier=str(r.get('position_identifier') or '')
-    starts = [d for d in deals if d.get('entry')==0 and d.get('type')==0
+    starts = [d for d in deals if d.get('entry')==0 and d.get('type')==position_side
               and (not d.get('symbol') or d.get('symbol')==group['mt5_symbol'])
               and ((identifier and str(d.get('position_id'))==identifier) or
                    (order_ticket and str(d.get('order'))==order_ticket) or
@@ -175,7 +176,7 @@ def mt5_backfill(state, config, group, current, deals):
     if {str(d['ticket']) for d in incoming}!={str(d['ticket']) for d in starts}:
         raise ValueError('MT5 持仓存在其他加仓成交')
     exits = [d for d in history if d['entry'] in (1,2,3)]
-    if any(d['type']!=1 for d in exits): raise ValueError('MT5 平仓方向不符')
+    if any(d['type']!=1-position_side for d in exits): raise ValueError('MT5 平仓方向不符')
     used = set(); refresh=[]
     for o in own:
         if o['action']!='close': continue

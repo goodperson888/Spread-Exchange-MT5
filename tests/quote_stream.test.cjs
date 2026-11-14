@@ -2,6 +2,25 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {QuoteBuffer,ChartBuffer,renderPoints,chartSeries,sameChartMarket,markGroups}=require('../quote-stream.js');
 const q=(t,entry=1,key='a')=>({time_ms:t,entry,exit:entry+.2,key});
+test('same terminal pair chart keeps identity and both symbols isolated on relocation',()=>{
+ const key='mt5_mt5|live|native|C:/old.exe|123|broker|GOLD-FUT|GOLD-SPOT|42|p1';
+ assert.equal(sameChartMarket(key,key.replace('C:/old.exe','D:/new.exe')),true);
+ for(const index of [1,2,4,5,6,7,8,9]) {
+  const parts=key.split('|');parts[index]+='-different';assert.equal(sameChartMarket(key,parts.join('|')),false);
+ }
+});
+test('equal lot MT5 pairs project each contract multiplier and preserve commissions and rebates',()=>{
+ const basis={key:'native',time_ms:100,binance:{ask:100},mt5:{bid:90}};
+ const latest={...basis,time_ms:101,binance:{ask:102},mt5:{bid:93}};
+ const group={key:'native',status:'open',pair:{type:'mt5_mt5'},leg_contracts:{binance:100,mt5:10},costs:{},
+  valuation:{gross:10,net_before_rebate:8,net:8.5,fees:1,estimated_exit_fee:1,estimated_rebate:.5,
+   binance_pnl_usdt:7,mt5_pnl_usd:3,remaining:{binance:.01,mt5:.01}}};
+ const value=markGroups([group],basis,latest)[0].valuation;
+ assert.equal(value.gross,8.3);assert.equal(value.net,6.8);
+ assert.equal(value.fees,1);assert.equal(value.estimated_exit_fee,1);assert.equal(value.estimated_rebate,.5);
+ assert.equal(group.valuation.gross,10);
+ assert.deepEqual(markGroups([{...group,status:'closed'}],basis,latest)[0].valuation,group.valuation);
+});
 test('duplicate timestamps never rewrite history; resync retains received live points',()=>{
  const b=new QuoteBuffer();b.merge([q(100),q(102,2)]);
  const rows=b.replaceHistory([q(100,99),q(101)],0,'a');

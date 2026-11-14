@@ -50,7 +50,7 @@ def liquidated(order):
     return (order.get('source')=='external' and order.get('action')=='close'
             and order.get('result',{}).get('status')=='done' and order['result'].get('qty',0)>0
             and cause.get('kind')=='liquidation'
-            and cause['source']==('mt5_deal_reason' if order.get('leg')=='mt5' else 'binance_force_orders'))
+            and cause['source']==('mt5_deal_reason' if order.get('leg')=='mt5' or order.get('platform')=='mt5' else 'binance_force_orders'))
 
 
 def needs_history(state):

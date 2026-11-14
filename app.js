@@ -68,7 +68,7 @@ function formConfig() {
   const mt5=mt5Form();
   mt5.mcp_token=value('mt5-mcp-token');
   return {
-    mode:'paper', symbol:value('symbol').toUpperCase(), mt5,
+    mode:'paper', symbol:window.GoldPairPairs?.native({pair:window.GoldPairPairs.info()})?window.GoldPairPairs.info().short_symbol:value('symbol').toUpperCase(), mt5,
     risk_alerts:Object.fromEntries(Object.entries(bindings.risk_alerts).map(([key,id])=>[key,Number(value(id))])),
     binance:{recv_window_ms:Number(value('recv-window')),proxy_url:value('binance-proxy'),api_key:value('trading-api-key'),api_secret:value('trading-api-secret')},
     strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),grid_enabled:$('grid-enabled').checked,
@@ -76,12 +76,14 @@ function formConfig() {
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
       total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold'))},
     execution:{mode:value('exec-mode'), quote_source:'market', entry_leg:value('entry-leg'), poll_ms:Number(value('poll-ms')), magic:Number(value('magic')), close_retry_limit:Number(value('close-retries'))},
-    costs:{usdt_usd_auto:$('auto-fx').checked,usdt_usd:Number(value('usdt-fx')),binance_fee_auto:$('auto-binance-fee').checked,binance_taker_percent:Number(value('binance-fee')), mt5_commission_per_lot_side:Number(value('mt5-fee')),binance_rebate_percent:Number(value('binance-rebate')),mt5_rebate_percent:Number(value('mt5-rebate')), mt5_swap_per_lot_day:Number(value('mt5-swap')), paper_funding_percent_day:Number(value('paper-funding'))},
+    costs:{usdt_usd_auto:$('auto-fx').checked,usdt_usd:Number(value('usdt-fx')),binance_fee_auto:$('auto-binance-fee').checked,binance_taker_percent:Number(value('binance-fee')), mt5_commission_per_lot_side:Number(value('mt5-fee')),binance_rebate_percent:Number(value('binance-rebate')),mt5_rebate_percent:Number(value('mt5-rebate')), mt5_swap_per_lot_day:Number(value('mt5-swap')), paper_funding_percent_day:Number(value('paper-funding')),
+      mt5_short_commission_per_lot_side:Number(value('mt5-short-fee')||0),mt5_short_rebate_percent:Number(value('mt5-short-rebate')||0),mt5_short_swap_per_lot_day:Number(value('mt5-short-swap')||0)},
   };
 }
 function editableField(id) {
   const input=$(id);
-  return input && !input.readOnly && !SECRET_IDS.has(id) && id!=='chart-window' && !id.startsWith('adoption-') &&
+  return input && !input.readOnly && !SECRET_IDS.has(id) && id!=='chart-window' && id!=='record-pair-filter' &&
+    !id.startsWith('pair-') && !id.startsWith('exit-rule-') && !id.startsWith('adoption-') &&
     ['INPUT','SELECT'].includes(input.tagName);
 }
 function draftFields() {
@@ -153,15 +155,20 @@ function populate(c) {
   message('mt5-result','已恢复保存的目标账户与规格；连接检查状态需重新验证。');
   credentialsDirty=false; dirtySecrets.clear();
   syncConditionalFields();
+  window.GoldPairPairs?.configure(c);
 }
 function visible(id, show) { $(id).classList.toggle('is-hidden', !show); }
 function syncConditionalFields(source='') {
   let live=value('exec-mode')==='live';
+  const same=window.GoldPairPairs?.info()?.type==='mt5_mt5';
   const mcpAdapter=value('mt5-adapter')==='mcp';
   const incompatible=live && mcpAdapter;
   const compatibility=$('mode-compatibility');
   if (compatibility) {
-    if (incompatible) {
+    if(same) {
+      compatibility.textContent='同一 MT5 双品种使用 Windows 原生终端；纸面模式也需读取该终端的两路真实行情，双腿相同手数。';
+      compatibility.classList.toggle('error',value('mt5-adapter')!=='native');
+    } else if (incompatible) {
       compatibility.textContent='当前组合不能实盘：MT5 MCP 只提供只读行情。页面保留你的选择；需要实盘时请改用 Windows MT5 原生终端。';
       compatibility.classList.add('error');
     } else if (live) {
@@ -177,6 +184,10 @@ function syncConditionalFields(source='') {
   visible('legacy-tools',!live);
   visible('paper-funding-field',!live);visible('mt5-swap-field',!live);
   visible('auto-binance-fee-field',live);visible('mcp-fields',mcpAdapter);visible('native-path-fields',!mcpAdapter);
+  if(same) {
+    visible('paper-funding-field',false);visible('auto-binance-fee-field',false);visible('legacy-tools',false);
+  }
+  visible('mt5-short-swap-field',!live);
   visible('contraction-field',value('target-mode')==='contraction');
   visible('absolute-field',value('target-mode')==='absolute');
   visible('min-net-field',$('require-net').checked);
@@ -325,6 +336,11 @@ function showPlan(p, executable=false) {
   $('plan-state').classList.remove('warning');
 }
 function previewPlan() {
+  if(window.GoldPairPairs?.info()?.type==='mt5_mt5') {
+    const p=window.GoldPairPairs.info();
+    message('plan-result',`卖 ${p.short_symbol} / 买 ${value('mt5-symbol')}：每腿 ${value('lots')} 手。\n连接时分别读取两腿合约大小、手数范围和步长；相同手数可能对应不同名义金额。`);
+    return;
+  }
   ++planGeneration;
   const lots=Number(value('lots')), contract=Number(value('contract'));
   const minimum=Number(value('volume-min')), step=Number(value('volume-step'));
@@ -347,6 +363,7 @@ function previewPlan() {
   message('plan-result',`MT5 ${value('mt5-symbol')}：${lots} 手 ↔ ${value('symbol').toUpperCase()}：${qty} XAU\n黄金数量 ${qty} 盎司${bid>0?' · 名义金额约 '+(qty*bid).toFixed(2)+' USDT':''}\n按已保存的 MT5 规格预览；交易所规则以重新连接后的校验为准。`);
 }
 async function calculatePlan(save=true) {
+  if(window.GoldPairPairs?.info()?.type==='mt5_mt5') { previewPlan();return; }
   if (!hasResult) return;
   const generation=planGeneration, at=revision;
   try {
@@ -459,7 +476,7 @@ $('paper-step').onclick = () => action('paper-step', async () => {
 });
 for(const input of document.querySelectorAll('input:not([readonly]), select')) {
   const changed=()=>{
-    if(input.id==='chart-window'||input.id.startsWith('adoption-')||input.id.startsWith('exit-rule-')) return;
+    if(input.id==='chart-window'||input.id==='record-pair-filter'||input.id.startsWith('pair-')||input.id.startsWith('adoption-')||input.id.startsWith('exit-rule-')) return;
     revision++;
     if(SECRET_IDS.has(input.id)) {
       credentialsDirty=true; dirtySecrets.add(input.id);

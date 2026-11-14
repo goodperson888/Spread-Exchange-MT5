@@ -3,6 +3,8 @@
   function sameChartMarket(a,b) {
     if(a===b)return true;
     const left=String(a||'').split('|'),right=String(b||'').split('|');
+    if(left.length===10&&right.length===10&&left[0]==='mt5_mt5'&&right[0]==='mt5_mt5')
+      return left.every((value,i)=>i===3||value===right[i]);
     return left.length===9&&right.length===9&&left.every((value,i)=>i===4||value===right[i]);
   }
   class QuoteBuffer {
@@ -100,6 +102,14 @@
       const v=g.valuation, c=g.costs;
       if(g.status!=='open'||g.valuation_status==='unverified'||!v||!c||g.key!==q.key)return g;
       const b=Number(v.remaining?.binance||0),m=Number(v.remaining?.mt5||0);
+      if(g.pair?.type==='mt5_mt5') {
+        const shortMove=-b*(q.binance.ask-basis.binance.ask)*g.leg_contracts.binance;
+        const longMove=m*(q.mt5.bid-basis.mt5.bid)*g.leg_contracts.mt5;
+        if(![shortMove,longMove,v.gross,v.net_before_rebate,v.net].every(Number.isFinite))return g;
+        return {...g,valuation:{...v,gross:v.gross+shortMove+longMove,
+          binance_pnl_usdt:v.binance_pnl_usdt+shortMove,mt5_pnl_usd:v.mt5_pnl_usd+longMove,
+          net_before_rebate:v.net_before_rebate+shortMove+longMove,net:v.net+shortMove+longMove}};
+      }
       const fx=q.usdt_usd??c.usdt_usd, oldFx=basis.usdt_usd??c.usdt_usd;
       const decomposed=Number.isFinite(v.binance_pnl_usdt)&&Number.isFinite(v.mt5_pnl_usd);
       const binancePnl=decomposed?v.binance_pnl_usdt-b*(q.binance.ask-basis.binance.ask):undefined;

@@ -10,6 +10,8 @@ def same_chart_market(left, right):
     """A changed terminal path does not change this account's quote history."""
     if left == right: return True
     a,b=str(left).split('|'),str(right).split('|')
+    if len(a)==len(b)==10 and a[0]==b[0]=='mt5_mt5':
+        return a[:3]+a[4:]==b[:3]+b[4:]
     return len(a)==len(b)==9 and a[:4]+a[5:]==b[:4]+b[5:]
 
 
@@ -91,7 +93,7 @@ class Store:
         parts=key.split('|')
         if len(parts)<3 or not parts[2]:
             return [key]
-        symbol=parts[2]
+        symbol=parts[6] if len(parts)==10 and parts[0]=='mt5_mt5' else parts[2]
         pattern=f'%|{symbol}|%'
         rows=db.execute('''
             SELECT DISTINCT symbol FROM quote_minutes WHERE symbol=? OR symbol LIKE ?

@@ -67,9 +67,15 @@ def apply(engine, config, body):
         for g,old,revision,costs in before:
             g['parameters'].update(rules);g['exit_rules_revision']=(revision or 0)+1
             if rates is not None:g['costs'].update(rates)
+            if rates is not None and g.get('pair',{}).get('type')=='mt5_mt5':
+                g['costs']['mt5_short_rebate_percent']=rates['binance_rebate_percent']
+            old_rates=rebate_rates(costs);new_rates=rebate_rates(g['costs'])
+            if g.get('pair',{}).get('type')=='mt5_mt5':
+                old_rates['binance_rebate_percent']=costs.get('mt5_short_rebate_percent',0)
+                new_rates['binance_rebate_percent']=g['costs'].get('mt5_short_rebate_percent',0)
             changes.append({'group':g['id'],'revision':g['exit_rules_revision'],
                             'before':{key:old.get(key) for key in FIELDS},'after':dict(rules),
-                            'rebates_before':rebate_rates(costs),'rebates_after':rebate_rates(g['costs'])})
+                            'rebates_before':old_rates,'rebates_after':new_rates})
         engine.save('exit_rules_updated',{'changes':changes})
     except Exception:
         for g,old,revision,costs in before:

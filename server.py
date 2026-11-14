@@ -41,6 +41,9 @@ import close_cause
 from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, observed_quote
 from entry_preflight import EntryPreflight
 from liquidation_risk import BinanceRiskMonitor, risk_snapshot
+from native_pair import NativePairRuntime, settings_for
+from pair_instruments import native_pair, pair_info, short_symbol
+import pair_profiles
 
 ROOT = Path(__file__).resolve().parent
 DATA = (Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GoldPairLocal') if getattr(sys, 'frozen', False) else ROOT / 'data'
@@ -84,7 +87,7 @@ def stop_legacy_paper_on_boot(path=STATE_PATH):
     return state
 
 
-class TradingRuntime(MaintenanceWork):
+class TradingRuntime(NativePairRuntime, MaintenanceWork):
     """The only component allowed to poll or submit paired trades.
 
     Credentials are loaded from the local config only when needed. They are
@@ -153,6 +156,7 @@ class TradingRuntime(MaintenanceWork):
     def connect(self, config, api_key='', api_secret='', mt5_mcp_token=''):
         config = copy.deepcopy(config)
         validate_trading(config)
+        if native_pair(config): return self._native_connect(config)
         mode = config['execution']['mode']
         
         # 只支持两种模式：paper（纸上交易）和live（实盘交易）
@@ -306,9 +310,7 @@ class TradingRuntime(MaintenanceWork):
             def publish(q):
                 self.store.sample(q)
                 self.quote_events.publish(q)
-            if self.push_bridge is None and (DATA / 'quote-push.json').exists():
-                try: self._start_push_bridge()
-                except OSError as exc: self.market_meta['push_warning']='EA 接收器未启动：'+str(exc)
+            self._restore_push_bridge()
             self.pump = QuotePump(config, new_binance, new_stream, new_terminal, self.push_bridge,
                                   inspect_paper_terminal, publish, self.market_wake, self.mt5_freshness)
             self.pump.last_stamp = self.quote['time_ms']
@@ -570,11 +572,17 @@ class TradingRuntime(MaintenanceWork):
         binance = observed_quote(binance, observed_at)
         return {
             'key': pair_key(c), 'time_ms': now_ms(),
+            'pair':pair_info(c),
             'binance': binance, 'mt5': mt5,
             'usdt_usd': fx,
             'entry': binance['bid'] * fx - mt5['ask'],
             'exit': binance['ask'] * fx - mt5['bid'],
         }
+
+    def _restore_push_bridge(self):
+        if self.push_bridge is None and (DATA / 'quote-push.json').exists():
+            try: self._start_push_bridge()
+            except OSError as exc: self.market_meta['push_warning']='EA 接收器未启动：'+str(exc)
 
     def _start_push_bridge(self):
         if self.push_bridge: return
@@ -600,6 +608,7 @@ class TradingRuntime(MaintenanceWork):
                         binary='/GoldPairQuotes.ex5' if (ROOT/'mt5/GoldPairQuotes.ex5').exists() else None)
 
     def _execution_quote(self):
+        if native_pair(self.config): return self._native_execution_quote()
         """Prefer a very recent background pair before synchronous quote reads."""
         c=self.config
         if getattr(self,'pump',None):
@@ -631,6 +640,7 @@ class TradingRuntime(MaintenanceWork):
         return {**self._quote(mt5,market,c),'execution_quote_source':'refresh'}
 
     def _cached_close_quote(self):
+        if native_pair(self.config): return self._native_cached_quote()
         """Nonblocking cache reads only: no terminal or REST calls between legs."""
         c=self.config
         latest=self.pump.read()[0] if self.pump else None
@@ -680,6 +690,7 @@ class TradingRuntime(MaintenanceWork):
         return True
 
     def _poll(self):
+        if native_pair(self.config): return self._native_poll()
         c = self.config
         q, version, error = self.pump.read()
         if error or q is None:
@@ -838,6 +849,7 @@ class TradingRuntime(MaintenanceWork):
         return report
 
     def start(self, current_config=None):
+        if self.config and native_pair(self.config): return self._native_start(current_config)
         with self.lock:
             if not self.connected:
                 raise ValueError('请先连接并完成双边规格校验')
@@ -988,6 +1000,7 @@ class TradingRuntime(MaintenanceWork):
                 self.binance.open_orders(self.config['symbol']))
 
     def adoption_plan(self, body):
+        if self.config and native_pair(self.config): raise ValueError('同一 MT5 双品种暂只管理本程序创建的交易组，不自动接管外部仓位')
         with self.lock:
             mt5,positions,pending=self._adoption_read()
             tickets=body.get('tickets',[])
@@ -1065,6 +1078,7 @@ class TradingRuntime(MaintenanceWork):
         return True
 
     def reconcile(self):
+        if self.config and native_pair(self.config): return self._native_reconcile()
         with self.lock:
             # 必须先连接才能进行对账
             if not self.connected:
@@ -1191,6 +1205,7 @@ class TradingRuntime(MaintenanceWork):
                     if not unverified:group['valuation'] = self.engine.valuation(group, quote)
             return {
                 'connected': self.connected, 'last_error': self.last_error,
+                'pair':pair_info(self.config or saved_config),
                 'quote': quote, 'plan': self.plan,
                 'state': st, 'events': self.store.events(),
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
@@ -1322,7 +1337,7 @@ def validate_config(config):
     if config.get('mode') != 'paper':
         errors.append('旧纸面接口固定为 paper；自动执行模式请选择 paper 或 live')
     symbol = str(config.get("symbol") or '').upper()
-    if not 5 <= len(symbol) <= 24 or not symbol.isalnum():
+    if not native_pair(config) and (not 5 <= len(symbol) <= 24 or not symbol.isalnum()):
         errors.append('币安合约名称无效')
     mt5 = config.get("mt5", {})
     strategy = config.get("strategy", {})
@@ -1530,7 +1545,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if path in ("/app.js", "/workspace.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
+        if path in ("/app.js", "/workspace.js", "/pair-app.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
             suffix = path[1:]
             data = (ROOT / suffix).read_bytes()
             content_type = "text/javascript; charset=utf-8" if suffix.endswith("js") else "text/css; charset=utf-8"
@@ -1567,6 +1582,10 @@ class Handler(BaseHTTPRequestHandler):
             safe["binance"]["api_secret_configured"] = bool(safe["binance"].get("api_secret"))
             self.send_json({"ok": True, "config": safe, "errors": validate_config(config)})
             return
+        if path == '/api/pairs':
+            with LOCK:
+                result=pair_profiles.catalogue(load_config(),read_json(DATA/'combinations.json',{}))
+            self.send_json({'ok':True,**result});return
         if path == "/api/trading/status":
             self.send_json({"ok": True, **TRADING.snapshot()})
             return
@@ -1605,6 +1624,35 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             body = self.read_body()
+            if path in ('/api/pairs/save','/api/pairs/activate','/api/pairs/delete'):
+                with TRADING.lock, LOCK:
+                    config=load_config();catalogue=pair_profiles.catalogue(config,read_json(DATA/'combinations.json',{}))
+                    rows=catalogue['profiles'];active=catalogue['active_id']
+                    profile=next((x for x in rows if x['id']==body.get('id')),None)
+                    if path=='/api/pairs/delete':
+                        if not profile or profile['id']==active: raise ValueError('只能删除非当前组合')
+                        rows=[x for x in rows if x['id']!=profile['id']]
+                    else:
+                        if path=='/api/pairs/save':
+                            old=profile;profile=pair_profiles.clean_profile(body,config)
+                            if old:
+                                for key in ('strategy','costs','execution'): profile[key]=old[key]
+                            rows=[x for x in rows if x['id']!=profile['id']]+[profile]
+                        if not profile: raise ValueError('组合不存在，请刷新后重试')
+                        if path=='/api/pairs/activate' or profile['id']==active:
+                            if TRADING.engine.state.get('enabled') or TRADING.engine.active() or TRADING.engine.state.get('recovery'):
+                                raise ValueError('已有运行任务、未平组或待确认订单，当前组合继续管理；请先完成处理再切换')
+                            replacement=pair_profiles.activate(config,profile)
+                            errors=validate_config(replacement)
+                            if errors: raise ValueError('；'.join(errors))
+                            write_config(replacement)
+                            TRADING._disconnect_pair_resources()
+                            TRADING.config=None;TRADING.plan=None;TRADING.quote=None;TRADING.position_report=None
+                            TRADING.adoption_preview=None
+                            TRADING.market_meta={};TRADING.external_close_status=None;TRADING.last_error=''
+                    atomic_write_json(DATA/'combinations.json',dict(profiles=rows))
+                    result=pair_profiles.catalogue(load_config(),dict(profiles=rows))
+                self.send_json({'ok':True,**result,**({'saved_id':profile['id']} if path=='/api/pairs/save' else {})});return
             if path == '/api/mt5/push/setup':
                 self.send_json({'ok':True, **TRADING.push_setup()});return
             if path == '/api/mt5/check':
@@ -1613,7 +1661,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 try:
                     with LOCK:
-                        settings = load_config()['mt5']
+                        checked_config=load_config();settings=checked_config['mt5']
                     LAST_PROBE = None
                     token = str(body.get('mcp_token') or settings.get('mcp_token', ''))
                     if settings.get('adapter', 'native') == 'paper':
@@ -1622,6 +1670,19 @@ class Handler(BaseHTTPRequestHandler):
                         result = inspect_mcp_terminal(settings, token)
                     else:
                         result = run_probe(settings)
+                        if native_pair(checked_config) and result.get('identity_matches'):
+                            account=result.get('identity',{})
+                            probe_config=copy.deepcopy(checked_config)
+                            probe_config['mt5'].update(account=account.get('account'),server=account.get('server'))
+                            terminal=Terminal(settings_for(probe_config),probe_config['execution']['magic'],read_only=True)
+                            try:
+                                specs={leg:terminal.call('pair_spec',symbol=name) for leg,name in
+                                       (('binance',short_symbol(probe_config)),('mt5',settings['symbol']))}
+                                snap=terminal.call('snapshot')
+                                result.update(symbol=specs['mt5'],pair_specs=specs,quote=snap['quote'],
+                                              connected=True,identity_matches=True,blockers=[],code='PAIR_CHECKED',
+                                              message='双品种规格已读取并完成 USD 盈亏计算校验；检查不会下单')
+                            finally: terminal.close()
                     with LOCK:
                         LAST_PROBE = dict(key=connection_key(settings), result=result, at=time.monotonic())
                     self.send_json({'ok': True, 'result': result})

@@ -4,6 +4,7 @@ import re
 from decimal import Decimal
 from urllib.parse import urlsplit
 from liquidation_risk import validate_alerts
+from pair_instruments import native_pair, short_symbol
 
 REBATE_FIELDS=('binance_rebate_percent','mt5_rebate_percent')
 
@@ -37,8 +38,18 @@ def validate(c):
     s, e, costs = c['strategy'], c['execution'], c['costs']
     validate_alerts(c.get('risk_alerts', {}))
     validate_proxy_url(c.get('binance', {}).get('proxy_url', ''))
-    if not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
+    if not native_pair(c) and not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
         raise ValueError('币安合约名称无效，请填写平台实际名称，例如 XAUUSDT')
+    if native_pair(c):
+        a,b=short_symbol(c),c['mt5']['symbol']
+        if not all(isinstance(x,str) and re.fullmatch(r'[\w.#+/-]{1,40}',x) for x in (a,b)) or a==b:
+            raise ValueError('请填写两个不同的 MT5 完整品种名')
+        if c['mt5']['adapter'] not in ('native','paper'):
+            raise ValueError('同一 MT5 双品种需要 Windows 原生终端；MCP 暂不支持双品种执行')
+        for field in ('mt5_short_commission_per_lot_side','mt5_short_swap_per_lot_day','mt5_short_rebate_percent'):
+            value=costs.get(field,0)
+            if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or (field!='mt5_short_swap_per_lot_day' and value<0) or (field.endswith('percent') and value>100):
+                raise ValueError('MT5 卖出腿的费用及返佣参数无效')
     if e['mode'] not in ('paper', 'live') or e['quote_source'] != 'market':
         raise ValueError('运行模式或行情来源无效')
     if e.get('entry_leg') not in ('binance', 'mt5'):
@@ -92,6 +103,10 @@ def validate(c):
 
 
 def pair_key(c):
+    if native_pair(c):
+        return 'mt5_mt5|'+ '|'.join(str(x) for x in (c['execution']['mode'],c['mt5']['adapter'],
+            c['mt5'].get('terminal_path'),c['mt5'].get('account'),c['mt5'].get('server'),
+            short_symbol(c),c['mt5']['symbol'],c['execution']['magic'],c.get('pair',{}).get('id','legacy')))
     return '|'.join(str(x) for x in (c['execution']['mode'], c['execution']['quote_source'], c['symbol'],
         c['mt5']['adapter'], c['mt5'].get('terminal_path'), c['mt5'].get('account'), c['mt5'].get('server'),
         c['mt5']['symbol'], c['execution']['magic']))

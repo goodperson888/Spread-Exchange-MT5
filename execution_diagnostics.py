@@ -78,6 +78,7 @@ def build_report(state, events):
         if margin.get('phase') in ('connect','start'): clean['phase']=margin['phase']
         report['runtime']['entry_margin']=clean
     report['notes'].extend([
+        'pair.type=mt5_mt5 表示同一 MT5 的相同手数组合；兼容字段 leg=binance 在此类组中代表 MT5 卖出腿，leg=mt5 代表 MT5 买入腿。quantity_unit=lot 时 requested/qty/remaining 均为手数，leg_contracts 为各自每手合约大小；platform=mt5，native_position_side=1 为空头、0 为多头。价差使用原始同报价单位价格相减，盈亏各乘各自合约大小。并发适配器调用不代表同一 MT5 终端能并发撮合。',
         'result.close_cause为已确认外部成交的固定原因证据：MT5保留原reason数字码，6表示Stop Out；币安仅将已签名LIQUIDATION强平订单与原成交编号、方向、数量、均价精确匹配后标记强平。liquidation_protection_armed仅表示已安排保护性平仓，不证明已经双平；liquidation_recovery记录本机发现/安排时间和当时剩余数量。缺失原因不等于手动平仓，平台原始时间不用于推算本机耗时。',
         'quote_source=cache表示下单前使用后台缓存报价，refresh表示走原同步报价读取路径；不是纯网络耗时。开仓第二腿缓存需两边本机接收时间均在250毫秒内，同时满足用户配置的更严格行情时效和时差限制；缓存不足仍走原查询，不放宽开仓敞口时限。',
         'pnl_schema_version=2将币安线性合约价差盈亏先以USDT计算后换汇；已平仓的换算汇率固定，不对开平两笔名义本金分别换汇。旧记录的价差变化不能直接当作净收益。',
@@ -107,6 +108,10 @@ def build_report(state, events):
              'second_leg':choice(g,'second_leg',('binance','mt5')),
              **numbers(g,'opened_ms closed_ms qty lots contract entry entry_signal exit exit_signal entry_threshold grid_index retry_limit')}
         if g.get('reason'): row.update(safe_reason(g))
+        if g.get('pair',{}).get('type') in ('mt5_mt5','exchange_mt5'):
+            row['pair']={'type':g['pair']['type']}
+        if g.get('quantity_unit')=='lot':
+            row['quantity_unit']='lot';row['leg_contracts']=numbers(g.get('leg_contracts',{}),'binance mt5')
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
         row.update(numbers(g,'exit_rules_revision'))
@@ -122,7 +127,7 @@ def build_report(state, events):
         if type(g.get('costs_verified')) is bool: row['costs_verified']=g['costs_verified']
         if g.get('cost_verification_stage') in ('binance_fees','mt5_fees','binance_funding','verified'):
             row['cost_verification_stage']=g['cost_verification_stage']
-        row['costs']=numbers(g.get('costs',{}),'usdt_usd binance_rebate_percent mt5_rebate_percent')
+        row['costs']=numbers(g.get('costs',{}),'usdt_usd binance_rebate_percent mt5_rebate_percent mt5_short_rebate_percent mt5_short_commission_per_lot_side mt5_commission_per_lot_side')
         row['valuation']=numbers(g.get('valuation',{}),'pnl_schema_version binance_pnl_usdt mt5_pnl_usd valuation_fx gross fees estimated_exit_fee net_before_rebate estimated_rebate estimated_rebate_binance estimated_rebate_mt5 net')
         if isinstance(g.get('exit_decision'),dict):
             decision=g['exit_decision']
@@ -141,6 +146,9 @@ def build_report(state, events):
              'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
              **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms dispatch_queue_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt close_batch')}
         if o.get('dispatch_mode') in ('serial','parallel'): row['dispatch_mode']=o['dispatch_mode']
+        if o.get('platform')=='mt5': row['platform']='mt5'
+        if o.get('quantity_unit')=='lot': row['quantity_unit']='lot'
+        row.update(numbers(o,'contract_size native_position_side'))
         if o.get('slippage_mode') in ('normal','protective'): row['slippage_mode']=o['slippage_mode']
         if o.get('quote_source') in ('cache','refresh'): row['quote_source']=o['quote_source']
         if type(o.get('slippage_exceeded')) is bool: row['slippage_exceeded']=o['slippage_exceeded']

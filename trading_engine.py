@@ -5,6 +5,7 @@ import uuid
 from trading_config import pair_key
 from execution_evidence import reason_code, REASON_LABELS, result_evidence, validation_issues
 from execution_dispatch import dispatch_order, dispatch_pair, not_dispatched
+from pair_instruments import native_pair, pair_info, native_valuation
 
 
 def stamp(): return int(time.time()*1000)
@@ -113,11 +114,11 @@ class Engine:
         if (g.get('status')!='opening' or not self.state['enabled'] or self.state['recovery']
                 or deadline is None or time.monotonic()>=deadline
                 or stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms']
-                or g.get('second_leg')!='mt5'):
+                or (g.get('second_leg')!='mt5' and g.get('pair',{}).get('type')!='mt5_mt5')):
             return False
         orders=[o for o in self.state['orders'] if o['group']==g['id'] and o['action']=='open']
         first=next((o for o in orders if o['leg']==g.get('first_leg')),None)
-        second=next((o for o in orders if o['leg']=='mt5'),None)
+        second=next((o for o in orders if o['leg']==g.get('second_leg')),None)
         if not first or not second: return False
         r=second['result'];ack=second.get('initial_result',{});proof=ack.get('confirmation',{})
         return (first['result'].get('status')=='done' and first['result'].get('qty')==g['qty']
@@ -136,7 +137,7 @@ class Engine:
         # only when we latch the pause, never the fill or resubmission rules.
         if g.get('status')!='closing' or not self.state['enabled'] or self.state['recovery']: return False
         pending=self.uncertain(g)
-        return bool(pending) and all(o['action']=='close' and o['leg']=='mt5'
+        return bool(pending) and all(o['action']=='close' and (o['leg']=='mt5' or o.get('platform')=='mt5')
             and o['result'].get('status')=='unknown' and o['result'].get('qty')==0
             and time.monotonic()<self._close_confirmation_deadlines.get(o['id'],0) for o in pending)
 
@@ -199,8 +200,12 @@ class Engine:
             # The strategy always opens and closes the Binance SHORT leg.
             # The broker adds this only when the account is in Hedge Mode.
             o['position_side']='SHORT'
-        if action=='close' and leg=='mt5':
-            candidates=[x for x in self.state['orders'] if x['group']==g['id'] and x['leg']=='mt5' and x['action']=='open' and x['result'].get('qty',0)>0]
+        if g.get('pair',{}).get('type')=='mt5_mt5':
+            o.update(platform='mt5',quantity_unit='lot',contract_size=g['leg_contracts'][leg],
+                     native_position_side=1 if leg=='binance' else 0)
+            o.pop('position_side',None);o.pop('top_qty',None)
+        if action=='close' and (leg=='mt5' or o.get('platform')=='mt5'):
+            candidates=[x for x in self.state['orders'] if x['group']==g['id'] and x['leg']==leg and x['action']=='open' and x['result'].get('qty',0)>0]
             if g.get('imported'):
                 # Close each adopted ticket separately; never reuse the first ticket for the whole basket.
                 remaining=self.mt5_tickets(g)
@@ -254,7 +259,7 @@ class Engine:
         o['initial_result']={**initial_evidence,**({'request_ms':result['request_ms']} if 'request_ms' in result else {}),
                              'response_received_ms':result['response_received_ms'],'valid':valid}
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
-        if (o['action']=='close' and o['leg']=='mt5' and valid and result.get('status')=='unknown'
+        if (o['action']=='close' and (o['leg']=='mt5' or o.get('platform')=='mt5') and valid and result.get('status')=='unknown'
                 and result.get('retcode')==10009 and result.get('ack_price')==0
                 and result.get('ack_volume')==o['requested']/g['contract'] and result.get('ticket')
                 and isinstance(result.get('confirmation'),dict) and result['confirmation'].get('stage')=='order_pending'
@@ -448,6 +453,7 @@ class Engine:
         return True
 
     def valuation(self, g, q):
+        if g.get('pair',{}).get('type')=='mt5_mt5': return native_valuation(self,g,q)
         c=g['costs'];fx=q.get('usdt_usd',c['usdt_usd']);fees=0
         if g.get('status')=='closed':
             # Freeze historical PnL conversion, including when fees arrive later.
@@ -519,7 +525,7 @@ class Engine:
         """
         first_leg=g.get('first_leg') or ('binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5')
         second_leg=g.get('second_leg') or ('mt5' if first_leg=='binance' else 'binance')
-        first_label='币安' if first_leg=='binance' else 'MT5'
+        first_label=('MT5 卖出腿' if first_leg=='binance' else 'MT5 买入腿') if native_pair(c) else ('币安' if first_leg=='binance' else 'MT5')
         first=next((o for o in self.state['orders']
                     if o['group']==g['id'] and o['leg']==first_leg and o['action']=='open'),None)
         if first is None: return False
@@ -573,7 +579,7 @@ class Engine:
         else:
             error=str(second.get('result',{}).get('error') or '')
             suffix='：'+error if error else ''
-            second_label='币安' if second_leg=='binance' else 'MT5'
+            second_label=('MT5 卖出腿' if second_leg=='binance' else 'MT5 买入腿') if native_pair(c) else ('币安' if second_leg=='binance' else 'MT5')
             g['status']='unwinding';g['reason']=f'{second_label} 拒单、部分成交或状态未知，正在保护性平仓'+suffix;self.pause(g['reason'])
             self.close_group(g,q)
         return True
@@ -601,6 +607,9 @@ class Engine:
             parameters=copy.deepcopy(c['strategy']),costs=copy.deepcopy(c['costs']),attempts=0,
             retry_limit=c['execution']['close_retry_limit'],entry=q['entry'],entry_signal=q['entry'],reason='',key=pair_key(c),
             first_leg=first_leg,second_leg=second_leg,entry_threshold=threshold,grid_index=int(grid_index))
+        g['pair']=pair_info(c)
+        if native_pair(c):
+            g.update(leg_contracts=copy.deepcopy(p['leg_contracts']),quantity_unit='lot')
         self._begin_execution(g,'open',q,entry_started,now)
         self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
         self._entry_deadlines[g['id']]=entry_started+c['strategy']['max_unhedged_ms']/1000
@@ -630,7 +639,8 @@ class Engine:
             if not self.resolve(g): return
             result=first['result']
         if result.get('status')!='done':
-            self.pause(f'{"币安" if first_leg=="binance" else "MT5"} 开仓状态未知，进入分层对账',keep_entry=True);return
+            label=('MT5 卖出腿' if first_leg=='binance' else 'MT5 买入腿') if native_pair(c) else ('币安' if first_leg=='binance' else 'MT5')
+            self.pause(f'{label} 开仓状态未知，进入分层对账',keep_entry=True);return
         self._finish_open(c,p,g,q,threshold)
 
     def request_close(self, group_id=None, reason='用户平仓'):
