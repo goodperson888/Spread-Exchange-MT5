@@ -42,6 +42,13 @@ class Store:
             self.db.execute('INSERT INTO events(time,kind,data) VALUES (?,?,?)',
                             (int(time.time()*1000), kind, json.dumps(data or {}, allow_nan=False)))
 
+    def commit_many(self, state, events):
+        """One durable transaction for a paired intent and both audit events."""
+        with self.lock, self.db:
+            self.db.execute('INSERT OR REPLACE INTO state VALUES (1,?)', (json.dumps(state, allow_nan=False),))
+            self.db.executemany('INSERT INTO events(time,kind,data) VALUES (?,?,?)',
+                [(int(time.time()*1000),kind,json.dumps(data or {},allow_nan=False)) for kind,data in events])
+
     def sample(self, quote):
         with self.lock, self.db:
             # The timestamp is the sample identity. A duplicate timestamp must

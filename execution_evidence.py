@@ -17,6 +17,7 @@ REASON_LABELS = {
     'RESTART': '程序重启，自动开仓保持暂停',
     'CLOSE_RETRIES_EXHAUSTED': '平仓重试达到上限，仍须处理敞口',
     'CLOSE_RESIDUAL': '单边平仓未完成，继续保护性减仓，新开仓暂停',
+    'CLOSE_DISPATCH_FAILED': '并发平仓调度未启动，请检查后重试平仓',
     'RISK_LIMIT': '策略亏损上限触发',
     'RECOVERED_PAUSED': '异常或延迟回报已确认，新开仓仍暂停',
     'PERMISSION_DENIED': '平台交易权限不可用',
@@ -47,6 +48,7 @@ def reason_code(reason):
         ('行情或交易通道异常', 'CHANNEL_ERROR'),
         ('减仓重试达到上限', 'CLOSE_RETRIES_EXHAUSTED'),
         ('单边平仓未完成', 'CLOSE_RESIDUAL'),
+        ('并发平仓调度失败', 'CLOSE_DISPATCH_FAILED'),
         ('亏损上限', 'RISK_LIMIT'),
         ('逐组止盈', 'TARGET_REACHED'),
         ('止盈报价已变化', 'TARGET_DEFERRED'),
@@ -72,7 +74,8 @@ def reason_code(reason):
 
 PLATFORM_STATUSES = {'NEW','PARTIALLY_FILLED','FILLED','CANCELED','PENDING_CANCEL',
                      'REJECTED','EXPIRED','EXPIRED_IN_MATCH'}
-ERROR_CODES = {'NETWORK','TIMEOUT','INVALID_RESPONSE','DEPTH_INSUFFICIENT','DEPTH_CHECK_FAILED'}
+ERROR_CODES = {'NETWORK','TIMEOUT','INVALID_RESPONSE','DEPTH_INSUFFICIENT','DEPTH_CHECK_FAILED',
+               'DISPATCH_NOT_STARTED','STALE_EXECUTION_QUOTE'}
 ERROR_KINDS = {'timeout','network','exchange','invalid_response','local_validation','unknown'}
 MT5_STAGES = {'positions_unavailable','identity_unresolved','deals_missing','pending_unavailable',
               'order_pending','order_history_missing','order_identity_mismatch','order_not_terminal',

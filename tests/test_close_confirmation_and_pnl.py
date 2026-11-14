@@ -34,7 +34,7 @@ class CloseConfirmationTests(unittest.TestCase):
     def test_missing_price_is_confirmed_before_pause_without_resubmission(self):
         self.e.close_group(self.g,quote(self.c))
         self.assertEqual(self.g['status'],'closed');self.assertTrue(self.e.state['enabled'])
-        self.assertEqual([(o['leg'],o['requested']) for o in self.submitted],[('mt5',1),('binance',1)])
+        self.assertCountEqual([(o['leg'],o['requested']) for o in self.submitted],[('mt5',1),('binance',1)])
         self.assertEqual(self.b.query.call_count,1)
         self.assertEqual(self.b.query.call_args.args[0]['query_timeout_ms'],1000)
         order=self.e.state['orders'][-1]
@@ -84,27 +84,40 @@ class CloseConfirmationTests(unittest.TestCase):
         self.e.pause();self.e.close_group(self.g,quote(self.c))
         self.assertEqual(self.g['status'],'closed');self.assertFalse(self.e.state['enabled'])
 
-    def test_binance_close_uses_latest_cache_after_mt5_fills(self):
+    def test_parallel_close_uses_one_latest_cache_before_both_dispatches(self):
         initial=quote(self.c);fresh=quote(self.c,ask=4307.5)
         calls=[]
         def cached():
             calls.append(1)
-            return fresh if self.submitted else initial
+            return fresh
         self.e.close_quote_provider=cached
         self.e.close_group(self.g,initial)
-        self.assertEqual(self.submitted[-1]['reference'],4307.5)
-        self.assertEqual(self.submitted[-1]['quote_context']['binance']['ask'],4307.5)
+        binance=next(o for o in self.submitted if o['leg']=='binance')
+        self.assertEqual(binance['reference'],4307.5)
+        self.assertEqual(binance['quote_context']['binance']['ask'],4307.5)
+        self.assertEqual(len(calls),1)
+        self.assertTrue(all(o['quote_context']==binance['quote_context'] for o in self.submitted))
         self.assertEqual(self.g['execution_close']['signal_spread'],initial['exit'])
 
-    def test_expired_cache_never_submits_and_second_leg_waits_without_resending_mt5(self):
+    def test_expired_cache_blocks_residual_retry_without_resending_mt5(self):
         initial=quote(self.c);stale=copy.deepcopy(initial)
         stale['binance']['time_ms']-=10000
+        def submit(o):
+            self.submitted.append(copy.deepcopy(o))
+            if o['leg']=='binance' and len([x for x in self.submitted if x['leg']=='binance'])==1:
+                return dict(status='done',qty=0,price=0,raw_status='EXPIRED')
+            return PaperBroker.submit(self.b,o)
+        self.b.submit=submit
         self.e.close_quote_provider=lambda:stale if self.submitted else initial
         self.e.close_group(self.g,initial)
-        self.assertEqual([o['leg'] for o in self.submitted],['mt5'])
+        self.assertCountEqual([o['leg'] for o in self.submitted],['mt5','binance'])
+        self.e.close_group(self.g,initial)
+        self.assertEqual(len(self.submitted),2)
         self.e.close_quote_provider=lambda:initial
         self.e.close_group(self.g,initial)
-        self.assertEqual([o['leg'] for o in self.submitted],['mt5','binance'])
+        self.assertEqual(len(self.submitted),3)
+        self.assertEqual(self.submitted[-1]['leg'],'binance')
+        self.assertEqual(self.submitted[-1]['dispatch_mode'],'serial')
         self.assertEqual(self.g['status'],'closed')
 
 
@@ -192,10 +205,19 @@ class LinearPnlTests(unittest.TestCase):
         def cached():
             return worse if any(o['action']=='close' for o in self.e.state['orders']) else signal
         self.e.close_quote_provider=cached
+        sent=[]
+        def submit(o):
+            sent.append(copy.deepcopy(o))
+            if o['leg']=='binance' and len([x for x in sent if x['leg']=='binance'])==1:
+                return dict(status='done',qty=0,price=0,raw_status='EXPIRED')
+            return PaperBroker().submit(o)
+        self.e.broker.submit=submit
+        self.e.tick(self.c,self.p,signal)
+        self.assertEqual(self.g['status'],'closing')
         self.e.tick(self.c,self.p,signal)
         self.assertEqual(self.g['status'],'closed')
         self.assertLess(self.g['valuation']['net'],0)
-        self.assertEqual(len(self.e.state['orders']),4)
+        self.assertEqual(len(self.e.state['orders']),5)
         last=self.e.state['orders'][-1]
         self.assertEqual(last['reference'],4310.1)
 

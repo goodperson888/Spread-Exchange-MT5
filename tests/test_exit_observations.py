@@ -163,7 +163,8 @@ class EngineObservationTests(unittest.TestCase):
         def committed(state, kind, data=None):
             order.append(kind); return commit(state, kind, data)
         def submitted(row):
-            self.assertEqual(order[-1], 'order_intent'); return submit(row)
+            self.assertTrue(any(o['id']==row['id'] for o in self.store.load()['orders']))
+            return submit(row)
         with patch.object(self.store, 'commit', side_effect=committed), patch.object(self.e.broker, 'submit', side_effect=submitted):
             self.e.tick(self.c, self.p, self.q)
         self.assertEqual(self.g['status'], 'closed')

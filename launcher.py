@@ -25,6 +25,19 @@ def main():
             if not (ROOT / name).is_file():
                 raise RuntimeError('Missing bundled asset: ' + name)
         print('Bundled assets and MetaTrader5 import: OK')
+        import time
+        from execution_dispatch import dispatch_pair
+        from trading_brokers import PaperBroker
+        barrier=threading.Barrier(2)
+        class SelfTestBroker(PaperBroker):
+            def submit(self, order):
+                barrier.wait(timeout=5)
+                return super().submit(order)
+        orders=[dict(id='self-test-'+leg,leg=leg,requested=1,reference=1) for leg in ('mt5','binance')]
+        receipts=list(dispatch_pair(SelfTestBroker(),orders,time.monotonic()))
+        if len(receipts)!=2 or any(r['result'].get('qty')!=1 for _,r in receipts):
+            raise RuntimeError('Bundled parallel close self-test failed')
+        print('Bundled parallel paper dispatch: OK')
         return
     stop_legacy_paper_on_boot()
     try:

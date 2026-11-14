@@ -20,7 +20,7 @@ class ResidualBroker(PaperBroker):
     def submit(self, o):
         self.sent.append(copy.deepcopy(o))
         saved=self.store.load()
-        assert saved['orders'][-1]['id']==o['id']
+        assert any(row['id']==o['id'] for row in saved['orders'])
         if o['action']=='close':
             group=next(g for g in saved['groups'] if g['id']==o['group'])
             assert group['close_attempts'][o['leg']]==o['close_attempt']
@@ -62,13 +62,13 @@ class ResidualCloseTests(unittest.TestCase):
     def test_late_mt5_confirmation_leaves_three_binance_attempts(self):
         self.b.mt5_unknown=True;self.b.expired=2
         self.e.tick(self.c,self.p,self.signal)
-        self.assertEqual(self.g['close_attempts'],dict(mt5=1,binance=0))
-        self.assertEqual(len(self.closes('binance')),0)
+        self.assertEqual(self.g['close_attempts'],dict(mt5=1,binance=1))
+        self.assertEqual(len(self.closes('binance')),1)
         pending=self.e.uncertain(self.g)[0];self.b.query_unknown=True
         for _ in range(3):
             pending['reconcile']['next_ms']=0;self.e.tick(self.c,self.p,self.signal)
-        self.assertEqual(self.g['close_attempts'],dict(mt5=1,binance=0))
-        self.assertEqual(len(self.closes()),1)
+        self.assertEqual(self.g['close_attempts'],dict(mt5=1,binance=1))
+        self.assertEqual(len(self.closes()),2)
         self.b.query_unknown=False;pending['reconcile']['next_ms']=0
         for _ in range(3): self.e.tick(self.c,self.p,self.signal)
         self.assertEqual(self.g['status'],'closed')
@@ -76,8 +76,9 @@ class ResidualCloseTests(unittest.TestCase):
         self.assertEqual(len(self.closes('mt5')),1);self.assertEqual(len(self.closes('binance')),3)
         self.assertFalse(self.e.state['enabled'])
         self.assertEqual(self.e.amounts(self.g),dict(mt5=0,binance=0))
-        self.assertTrue(all(o['slippage_mode']=='protective' for o in self.closes('binance')))
-        self.assertTrue(all(o['slippage']==self.g['parameters']['unwind_slippage_usd'] for o in self.closes('binance')))
+        self.assertEqual(self.closes('binance')[0]['slippage_mode'],'normal')
+        self.assertTrue(all(o['slippage_mode']=='protective' for o in self.closes('binance')[1:]))
+        self.assertTrue(all(o['slippage']==self.g['parameters']['unwind_slippage_usd'] for o in self.closes('binance')[1:]))
 
     def test_exact_limit_halts_with_platform_and_exposure_and_never_rearms(self):
         self.b.expired=10
@@ -134,7 +135,7 @@ class ResidualCloseTests(unittest.TestCase):
         self.assertEqual(self.e.amounts(self.g),dict(mt5=.5,binance=.75))
         self.e.close_group(self.g,self.signal)
         self.assertEqual(self.g['status'],'closed')
-        self.assertEqual([o['requested'] for o in self.closes('binance')],[.5,.25,.5])
+        self.assertEqual([o['requested'] for o in self.closes('binance')],[1,.25,.5])
         self.assertEqual(self.g['close_attempts'],dict(mt5=2,binance=3))
 
     def test_legacy_exhausted_group_is_not_automatically_given_more_attempts(self):
@@ -143,13 +144,16 @@ class ResidualCloseTests(unittest.TestCase):
         self.assertEqual(self.g['status'],'attention');self.assertEqual(self.closes(),[])
 
     def test_normal_paired_close_has_no_extra_journal_commit_or_pause(self):
-        with patch.object(self.store,'commit',wraps=self.store.commit) as commits:
+        with patch.object(self.store,'commit',wraps=self.store.commit) as commits, \
+                patch.object(self.store,'commit_many',wraps=self.store.commit_many) as batches:
             self.e.tick(self.c,self.p,self.signal)
         self.assertEqual(self.g['status'],'closed');self.assertTrue(self.e.state['enabled'])
         self.assertEqual(self.closes('mt5')[0]['slippage_mode'],'normal')
-        self.assertEqual(self.closes('binance')[0]['slippage_mode'],'protective')
+        self.assertEqual(self.closes('binance')[0]['slippage_mode'],'normal')
         self.assertEqual([c.args[1] for c in commits.call_args_list],
-                         ['exit_signal','order_intent','order_result','order_intent','order_result','group_closed'])
+                         ['exit_signal','order_result','order_result','group_closed'])
+        self.assertEqual(batches.call_count,1)
+        self.assertEqual([event[0] for event in batches.call_args.args[1]],['order_intent','order_intent'])
 
     def test_brief_native_history_lag_does_not_latch_a_pause_or_repeat_the_close(self):
         self.b.mt5_unknown=self.b.native_ack=True
@@ -170,8 +174,8 @@ class ResidualCloseTests(unittest.TestCase):
             self.e.tick(self.c,self.p,self.signal)
         with patch('trading_engine.time.monotonic',return_value=100.301):
             for _ in range(3): self.e.reconcile_pending(self.c)
-        self.assertFalse(self.e.state['enabled']);self.assertEqual(len(self.closes()),1)
-        self.assertEqual(self.g['close_attempts'],dict(binance=0,mt5=1))
+        self.assertFalse(self.e.state['enabled']);self.assertEqual(len(self.closes()),2)
+        self.assertEqual(self.g['close_attempts'],dict(binance=1,mt5=1))
 
     def test_manual_pause_during_native_grace_cannot_be_automatically_rearmed(self):
         self.b.mt5_unknown=self.b.native_ack=True
@@ -187,7 +191,7 @@ class ResidualCloseTests(unittest.TestCase):
         pending=self.e.uncertain(self.g)[0];pending['reconcile']['next_ms']=0
         self.b.query=lambda o:dict(status='unknown',qty=.5,price=4300,ticket='500')
         self.e.reconcile_pending(self.c)
-        self.assertFalse(self.e.state['enabled']);self.assertEqual(len(self.closes()),1)
+        self.assertFalse(self.e.state['enabled']);self.assertEqual(len(self.closes()),2)
 
 
 if __name__=='__main__': unittest.main()

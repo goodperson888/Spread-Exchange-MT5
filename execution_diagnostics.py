@@ -59,7 +59,7 @@ def build_report(state, events):
             'actual_spread=币安成交均价×记录汇率−MT5成交均价；spread_slippage=实际−触发，平仓正偏移通常更不利。',
             'dispatch_ms是调用交易适配器的本机时间；request_ms包括适配器内部校验及请求，并非纯网络或撮合耗时。',
             'response_received_ms/fill_time_ms为本机收到直接回报时间；reconcile_time_ms为后续查询确认时间。',
-            'execution_open/close.elapsed_ms使用单调时钟，含本机同步日志、双腿串行处理和可能的查询等待，截止组完成确认前；不含最后一次组状态提交。',
+            'execution_open/close.elapsed_ms使用单调时钟，含本机同步日志、双腿执行和可能的查询等待，截止组完成确认前；不含最后一次组状态提交。',
             '缺少的字段表示旧版未记录或无法确定，不能当作零；重启后不推算单调耗时；纸面模式不可用于评估实盘速度。',
             '导出按需读取本机数据库，不调用交易平台、不取得交易线程或写日志的锁。',
             'source=external 表示平台外部平仓回补；platform_time_ms是未经时区推算的平台原始时间，reconcile_time_ms是本机发现时间，组closed_ms为本机确认完成时间；两者差不代表程序下单耗时。',
@@ -88,6 +88,7 @@ def build_report(state, events):
         'query_timeout_ms是适配器请求超时参数，并非严格总耗时上限；多阶段网络请求可能超出该值。1.5秒等敞口配置仍单独决定能否开第二腿。',
         'confirmation为MT5成交核对阶段、各查询返回状态和数量校验字段；has_ticket/has_deal等只表示是否取得编号，不含编号值。first_unconfirmed_query保留第一次未确认的查询；稳定重复事件限频，attempt仍累计实际查询次数。',
         'close_attempts为各平台实际平仓请求次数，retry_limit为每个平台的请求上限；等待报价或查询原订单不占次数。订单close_attempt和slippage_mode记录该次请求计数及普通/保护滑点。close_protection记录发现单边剩余敞口的本机时间和数量，close_halt保留达到重试上限时的平台及剩余数量；后续外部平仓不会抹去这些证据。旧版整轮计数不能还原为每个平台请求次数。',
+        'dispatch_mode=parallel表示已配平程序组双边意图在一个事务中持久化，再并发调用适配器；同一组close_batch标识同批请求。serial表示开仓或逐笔减仓。dispatch_queue_ms为意图全部落盘至该线程调用的单调耗时，last_dispatch_gap_ms为最近一批两个适配器调用的本机时间间隔，不是同时成交保证。未发出的本地拦截记录submitted=false，不计实际请求耗时；线程创建失败须手动重试，报价在落盘后过期则等待新报价。',
         '原生MT5平仓成功回执缺价格、原订单短暂待处理时最多提供300ms本机核对期，期间平仓组继续阻止开新仓；超时或部分成交仍暂停，不恢复已暂停的程序。cost_verification_stage为已平仓后台费用核验的固定步骤分类；缺失或待核验不能视为实际费用为零。',
         'receipt为已有平台回执的白名单字段与原字段类型；missing、null、零值和无法解析分别保留。币安values含avgPrice、cumQuote、executedQty及平台时间，price_source说明归一化价格来源；MT5含直接order_send回执，precheck_receipt单列order_check结果，即使同次调用已由历史确认也保留原回执。编号仅保留有无，不导出请求回显、账户、注释和错误原文。',
         'validation_issues为本机校验失败的固定分类；reconcile.first_cancel/last_cancel记录首次及最近一次撤单调用返回与耗时，returned仅代表调用正常返回，不证明撤单成功；撤单后仍查询原订单。ack_received_ms为MT5原生下单调用返回的本机时间，早于可能的历史补查。所有新增采集复用已有调用和日志提交，不增加查询；平台原始时间不用于推断时区或本机延迟。',
@@ -130,7 +131,7 @@ def build_report(state, events):
             if decision.get('target_mode') in ('contraction','absolute'): row['exit_decision']['target_mode']=decision['target_mode']
         for action in ('open','close'):
             if 'execution_'+action in g:
-                row['execution_'+action]=numbers(g['execution_'+action],'started_ms signal_time_ms signal_spread confirmed_ms elapsed_ms')
+                row['execution_'+action]=numbers(g['execution_'+action],'started_ms signal_time_ms signal_spread confirmed_ms elapsed_ms parallel_batches last_dispatch_gap_ms')
         report['groups'].append(row)
     for o in orders:
         result=o.get('result',{})
@@ -138,7 +139,8 @@ def build_report(state, events):
              'leg':choice(o,'leg',('binance','mt5')),'action':choice(o,'action',('open','close')),
              'symbol':symbol(o.get('symbol')),'imported':bool(o.get('imported')),
              'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
-             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt')}
+             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms dispatch_queue_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt close_batch')}
+        if o.get('dispatch_mode') in ('serial','parallel'): row['dispatch_mode']=o['dispatch_mode']
         if o.get('slippage_mode') in ('normal','protective'): row['slippage_mode']=o['slippage_mode']
         if o.get('quote_source') in ('cache','refresh'): row['quote_source']=o['quote_source']
         if type(o.get('slippage_exceeded')) is bool: row['slippage_exceeded']=o['slippage_exceeded']
@@ -199,7 +201,8 @@ def build_report(state, events):
         oid=order_ids.get(data.get('id'));gid=group_ids.get(data.get('group'))
         if oid is None and gid is None: continue
         row={'kind':event['kind'],**numbers(event,'time'),
-             'data':numbers(data,'attempt close_attempt query_ms query_timeout_ms signal_spread entry qty net_estimate fee entry_spread contraction target_contraction target_spread min_net_profit estimated_net estimated_net_before_rebate estimated_gross estimated_exit_fee estimated_rebate valuation_fx basket_estimated_net')}
+             'data':numbers(data,'attempt close_attempt close_batch query_ms query_timeout_ms signal_spread entry qty net_estimate fee entry_spread contraction target_contraction target_spread min_net_profit estimated_net estimated_net_before_rebate estimated_gross estimated_exit_fee estimated_rebate valuation_fx basket_estimated_net')}
+        if data.get('dispatch_mode') in ('serial','parallel'): row['data']['dispatch_mode']=data['dispatch_mode']
         if data.get('leg') in ('binance','mt5'): row['data']['leg']=data['leg']
         if data.get('slippage_mode') in ('normal','protective'): row['data']['slippage_mode']=data['slippage_mode']
         if isinstance(data.get('result'),dict): row['data']['result']=result_evidence(data['result'])

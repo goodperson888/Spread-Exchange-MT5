@@ -273,17 +273,22 @@ class EngineTests(unittest.TestCase):
         changed['costs']['usdt_usd'] = .997
         self.assertEqual(pair_key(self.c), pair_key(changed))
 
-    def test_mt5_close_rejection_does_not_unhedge_binance(self):
+    def test_mt5_rejection_after_parallel_close_leaves_only_mt5_to_reduce(self):
         engine = Engine(self.store, RejectMt5CloseBroker())
         engine.start(self.c)
         engine.tick(self.c, self.plan, quote(self.c))
         group = engine.active()[0]
         engine.request_close(group['id'])
         engine.tick(self.c, self.plan, quote(self.c))
-        self.assertEqual(engine.amounts(group), {'binance': 2, 'mt5': 2})
+        self.assertEqual(engine.amounts(group), {'binance': 0, 'mt5': 2})
         binance_closes = [o for o in engine.state['orders']
                           if o['leg'] == 'binance' and o['action'] == 'close']
-        self.assertEqual(binance_closes, [])
+        self.assertEqual(len(binance_closes),1)
+        self.assertFalse(engine.state['enabled'])
+        engine.tick(self.c,self.plan,quote(self.c))
+        self.assertEqual(len([o for o in engine.state['orders'] if o['leg']=='binance' and o['action']=='close']),1)
+        mt5_closes=[o for o in engine.state['orders'] if o['leg']=='mt5' and o['action']=='close']
+        self.assertEqual(mt5_closes[-1]['slippage_mode'],'protective')
 
     def test_second_leg_rejection_immediately_unwinds_mt5(self):
         self.c['execution']['entry_leg']='mt5'

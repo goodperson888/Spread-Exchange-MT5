@@ -4,6 +4,7 @@ import time
 import uuid
 from trading_config import pair_key
 from execution_evidence import reason_code, REASON_LABELS, result_evidence, validation_issues
+from execution_dispatch import dispatch_order, dispatch_pair, not_dispatched
 
 
 def stamp(): return int(time.time()*1000)
@@ -140,6 +141,21 @@ class Engine:
             and time.monotonic()<self._close_confirmation_deadlines.get(o['id'],0) for o in pending)
 
     def order(self, g, leg, action, qty, q):
+        o=self._prepare_order(g,leg,action,qty,q)
+        if o is None: return
+        journal_started=time.monotonic()
+        self._journal_order(o)
+        ready=time.monotonic()
+        o['intent_journal_ms']=round((ready-journal_started)*1000,3)
+        self._latency('intent_journal_ms',o['intent_journal_ms'])
+        receipt=dispatch_order(self.broker,copy.deepcopy(o),started=ready,clock_ms=stamp)
+        self._accept_order_result(g,o,receipt)
+        if action=='close' and self._price_only_full_fill(o):
+            o['reconcile']['next_ms']=stamp()
+            self.resolve(g)
+        return o
+
+    def _prepare_order(self, g, leg, action, qty, q):
         if qty<=1e-9: return
         side=q[leg]; sell=(leg=='binance')==(action=='open')
         reference=side['bid' if sell else 'ask']
@@ -160,6 +176,7 @@ class Engine:
                fx=q.get('usdt_usd',g['costs']['usdt_usd']),
                created_ms=stamp(),result={'status':'unknown','qty':0,'price':0})
         o['slippage_mode']='protective' if protective else 'normal'
+        o['dispatch_mode']='serial'
         if action=='close':
             if isinstance(g.get('close_attempts'),dict): o['close_attempt']=g['close_attempts'].get(leg,0)
             if residual:
@@ -196,15 +213,19 @@ class Engine:
             o['position']=opened['result'].get('position')
             o['opening_id']=opened['id']
             o['position_identifier']=opened['result'].get('position_identifier')
-        journal_started=time.monotonic()
-        self.state['orders'].append(o);self.save('order_intent',{'id':o['id'],'group':g['id'],'leg':leg,'action':action,'qty':qty,
-            **({'close_attempt':o['close_attempt']} if 'close_attempt' in o else {}),'slippage_mode':o['slippage_mode']})
-        request_started=time.monotonic()
-        o['intent_journal_ms']=round((request_started-journal_started)*1000,3)
-        self._latency('intent_journal_ms', o['intent_journal_ms'])
-        o['dispatch_ms']=stamp()
-        try: result=self.broker.submit(copy.deepcopy(o))
-        except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
+        return o
+
+    def _journal_order(self, o):
+        self.state['orders'].append(o)
+        self.save('order_intent',self._intent_data(o))
+
+    @staticmethod
+    def _intent_data(o):
+        return {'id':o['id'],'group':o['group'],'leg':o['leg'],'action':o['action'],'qty':o['requested'],
+            **{key:o[key] for key in ('close_attempt','slippage_mode','dispatch_mode','close_batch') if key in o}}
+
+    def _accept_order_result(self, g, o, receipt):
+        result=receipt['result'];qty=o['requested']
         initial_evidence=result_evidence(result)
         valid=self.result_valid(result,qty)
         # Never let an invalid result look like a completed zero-volume fill.
@@ -218,30 +239,27 @@ class Engine:
             result=dict(metadata,status='unknown',qty=0,price=0,error='成交回报无效，等待对账',
                         error_code='INVALID_RESPONSE',error_kind='invalid_response')
             initial_evidence.update(error_code='INVALID_RESPONSE',error_kind='invalid_response')
-        result['request_ms']=round((time.monotonic()-request_started)*1000)
-        self._latency(leg+'_'+action+'_request_ms', result['request_ms'])
-        result['response_received_ms']=stamp()
+        for key in ('dispatch_ms','dispatch_queue_ms'):
+            if key in receipt: o[key]=receipt[key]
+        if 'request_ms' in receipt:
+            result['request_ms']=receipt['request_ms']
+            self._latency(o['leg']+'_'+o['action']+'_request_ms', result['request_ms'])
+        result['response_received_ms']=receipt['response_received_ms']
         if result.get('status')=='done' and float(result.get('qty',0))>0:
-            result['fill_time_ms']=stamp()
+            result['fill_time_ms']=receipt['response_received_ms']
         if result.get('status')!='done':
-            now_ms=stamp()
+            now_ms=receipt['response_received_ms']
             o['reconcile']={'attempts':0,'next_ms':now_ms+100,'started_ms':now_ms,
                             'cancel_sent':False}
-        o['initial_result']={**initial_evidence,'request_ms':result['request_ms'],
+        o['initial_result']={**initial_evidence,**({'request_ms':result['request_ms']} if 'request_ms' in result else {}),
                              'response_received_ms':result['response_received_ms'],'valid':valid}
         o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
-        if (action=='close' and leg=='mt5' and valid and result.get('status')=='unknown'
+        if (o['action']=='close' and o['leg']=='mt5' and valid and result.get('status')=='unknown'
                 and result.get('retcode')==10009 and result.get('ack_price')==0
                 and result.get('ack_volume')==o['requested']/g['contract'] and result.get('ticket')
                 and isinstance(result.get('confirmation'),dict) and result['confirmation'].get('stage')=='order_pending'
                 and result.get('qty')==0 and g.get('status')=='closing' and self.state['enabled']):
-            self._close_confirmation_deadlines[o['id']]=time.monotonic()+self.CLOSE_CONFIRM_GRACE_MS/1000
-        if action=='close' and self._price_only_full_fill(o):
-            # One bounded read, never another order write. Keep the direct
-            # acknowledgement intact and do not re-enable a paused engine.
-            o['reconcile']['next_ms']=stamp()
-            self.resolve(g)
-        return o
+            self._close_confirmation_deadlines[o['id']]=receipt['received_monotonic']+self.CLOSE_CONFIRM_GRACE_MS/1000
 
     @staticmethod
     def _price_only_full_fill(o):
@@ -660,18 +678,8 @@ class Engine:
         if not valid_group_quote(q,g['key'],g['parameters']):
             self.state['alarm']='平仓等待有效新报价；成交查询继续，当前尚未双平'
             return
-        counts=g.get('close_attempts')
-        if counts is None:
-            # Preserve exhausted legacy protection until an explicit manual
-            # retry. Otherwise reconstruct actual writes, not old loop counts.
-            if g['attempts']>=g['retry_limit']:
-                self._halt_close(g,leg);return
-            counts={side:sum(o['group']==g['id'] and o['leg']==side and o['action']=='close'
-                            and o.get('source')!='external'
-                            for o in self.state['orders']) for side in ('binance','mt5')}
-            g['close_attempts']=counts
-        if counts.get(leg,0)>=g['retry_limit']:
-            self._halt_close(g,leg);return
+        counts=self._close_budget(g,(leg,))
+        if counts is None: return
         counts[leg]=counts.get(leg,0)+1
         g['attempts']=max(counts.values())
         # The existing order-intent commit makes these counters durable before
@@ -683,6 +691,92 @@ class Engine:
                 and self.state['enabled']):
             self.pause('单边平仓未完成，继续保护性减仓；新开仓仍暂停')
         return order
+
+    def _close_budget(self, g, legs):
+        counts=g.get('close_attempts')
+        if counts is None:
+            # Preserve exhausted legacy protection until an explicit manual
+            # retry. Otherwise reconstruct actual writes, not old loop counts.
+            if g['attempts']>=g['retry_limit']:
+                self._halt_close(g,legs[0]);return
+            counts={side:sum(o['group']==g['id'] and o['leg']==side and o['action']=='close'
+                            and o.get('source')!='external'
+                            for o in self.state['orders']) for side in ('binance','mt5')}
+            g['close_attempts']=counts
+        for leg in legs:
+            if counts.get(leg,0)>=g['retry_limit']:
+                self._halt_close(g,leg);return
+        return counts
+
+    def _parallel_close(self, g, qty, q):
+        # Only a matched, confirmed, program-owned pair reaches this path.
+        # Complete both durable intents before either worker may call a broker.
+        counts=self._close_budget(g,('mt5','binance'))
+        if counts is None: return
+        orders=[self._prepare_order(g,leg,'close',qty,q) for leg in ('mt5','binance')]
+        previous=counts.copy();previous_attempts=g['attempts']
+        batch=g['execution_close'].get('parallel_batches',0)+1
+        g['execution_close']['parallel_batches']=batch
+        for o in orders:
+            counts[o['leg']]=counts.get(o['leg'],0)+1
+            o.update(close_attempt=counts[o['leg']],dispatch_mode='parallel',close_batch=batch)
+        g['attempts']=max(counts.values())
+        journal_started=time.monotonic()
+        self.state['orders'].extend(orders)
+        try:
+            self.store.commit_many(self.state,[('order_intent',self._intent_data(o)) for o in orders])
+        except Exception:
+            # No dispatch exists yet and the transaction rolled back. Do not
+            # let the runtime persist imaginary unknown orders while pausing.
+            del self.state['orders'][-len(orders):]
+            g['close_attempts']=previous;g['attempts']=previous_attempts
+            g['execution_close']['parallel_batches']=batch-1
+            raise
+        ready=time.monotonic()
+        for o in orders:
+            o['intent_journal_ms']=round((ready-journal_started)*1000,3)
+            self._latency('intent_journal_ms',o['intent_journal_ms'])
+        if not valid_group_quote(q,g['key'],g['parameters']):
+            # Slow durable writes must not authorize a stale pair. No worker
+            # has started; neither platform spends its actual request budget.
+            g['close_attempts']=previous;g['attempts']=previous_attempts
+            for o in orders: self._accept_order_result(g,o,not_dispatched('STALE_EXECUTION_QUOTE',clock_ms=stamp))
+            self.state['alarm']='平仓意图保存后报价过期，等待有效新报价；本批未发送'
+            self._observe_exit(g,q,'CLOSE_QUOTE_UNAVAILABLE')
+            return
+        dispatched=[];startup_failed=False;quote_expired=False
+        for index,receipt in dispatch_pair(self.broker,[copy.deepcopy(o) for o in orders],ready,clock_ms=stamp,
+                can_start=lambda:valid_group_quote(q,g['key'],g['parameters'])):
+            if 'dispatch_monotonic' in receipt:
+                dispatched.append(receipt['dispatch_monotonic'])
+                if len(dispatched)==2:
+                    gap=round(abs(dispatched[1]-dispatched[0])*1000,3)
+                    g['execution_close']['last_dispatch_gap_ms']=gap
+                    self._latency('close_dispatch_gap_ms',gap)
+            code=receipt['result'].get('error_code') if isinstance(receipt['result'],dict) else None
+            startup_failed |= code=='DISPATCH_NOT_STARTED'
+            if code=='STALE_EXECUTION_QUOTE':
+                quote_expired=True
+                g['close_attempts']=previous;g['attempts']=previous_attempts
+            self._accept_order_result(g,orders[index],receipt)
+        if quote_expired:
+            self.state['alarm']='平仓线程就绪时报价过期，等待有效新报价；本批未发送'
+            self._observe_exit(g,q,'CLOSE_QUOTE_UNAVAILABLE');return
+        if startup_failed:
+            g.update(status='attention',reason='并发平仓调度失败，本批未发送；检查后重试平仓')
+            self.pause(g['reason']);return
+        # No original-order reads/cancels until both submit calls returned.
+        # Missing-price confirmation keeps the original order and one bounded read.
+        for o in orders:
+            if self._price_only_full_fill(o): o['reconcile']['next_ms']=stamp()
+        if self.uncertain(g): self.resolve(g)
+        self._pause_parallel_residual(g)
+
+    def _pause_parallel_residual(self, g):
+        if (g.get('execution_close',{}).get('parallel_batches') and not self.uncertain(g)
+                and abs(self.amounts(g)['mt5']-self.amounts(g)['binance'])>1e-8
+                and self.state['enabled']):
+            self.pause('单边平仓未完成，继续保护性减仓；新开仓仍暂停')
 
     def _halt_close(self, g, leg):
         remaining=self.amounts(g)
@@ -702,6 +796,7 @@ class Engine:
         if not self.resolve(g):
             self._observe_exit(g,q,'CLOSE_PENDING')
             return
+        self._pause_parallel_residual(g)
         q=self._close_quote(q)
         if not valid_group_quote(q,g['key'],g['parameters']):
             self.state['alarm']='平仓等待有效新报价；成交查询继续，当前尚未双平'
@@ -747,10 +842,11 @@ class Engine:
             # Excess close was rejected/partial. Retry it before the pair.
             return
 
-        # For the matched portion, close MT5 first and buy back no more Binance
-        # than MT5 actually closed. This prevents a rejected/partial MT5 close
-        # from creating a naked MT5 long.
-        if before_m>1e-8:
+        if before_m>1e-8 and g.get('status')=='closing' and not g.get('imported'):
+            self._parallel_close(g,before_m,q)
+        # Imported tickets and protective opening unwinds retain their strict
+        # per-ticket serial reduction; unmatched exposure is always handled above.
+        elif before_m>1e-8:
             self._close_order(g,'mt5',before_m,q,refresh=False)
             after_m=self.amounts(g)['mt5']
             mt5_closed=max(0,before_m-after_m)

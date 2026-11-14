@@ -690,7 +690,7 @@ class TradingRuntime(MaintenanceWork):
         self.quote = q
         self.market_meta['mt5_transport'] = self.pump.mt5_transport
         self.market_meta['binance_transport'] = self.pump.binance_transport
-        self.market_meta['strategy_trigger'] = '报价事件驱动；订单串行执行'
+        self.market_meta['strategy_trigger'] = '报价事件驱动；正常双边平仓并发，开仓与异常减仓逐笔执行'
         if self.entry_preflight:
             self.market_meta['entry_preflight'] = self.entry_preflight.status()
         if c['execution']['mode']=='live' and not self.reconciled:

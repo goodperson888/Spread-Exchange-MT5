@@ -76,7 +76,7 @@
 <label>兼容轮询间隔（毫秒）<input id="poll-ms" type="number" value="250" min="250" max="5000"></label>
 <label>平仓重试次数<input id="close-retries" type="number" value="3" min="1" max="5"></label>
 <label>MT5 策略识别码（Magic）<input id="magic" type="number" value="9121701" min="1" max="2147483647"></label>
-</div><details class="help-details"><summary>执行与参数说明</summary><p class="note">新报价会唤醒策略；此间隔只控制兼容轮询和无新报价时的定期检查，不限制 EA 推送或图表更新。订单仍串行执行，实际成交受平台撮合、网络和滑点影响。图表仅限制到秒级缩放，不会改变监控、开平仓或成交判断频率。Magic 仅用于识别本策略下的 MT5 订单与持仓，防止程序误处理其他手工单或 EA 订单。正常使用保持默认值即可。</p></details></details>
+</div><details class="help-details"><summary>执行与参数说明</summary><p class="note">新报价会唤醒策略；此间隔只控制兼容轮询和无新报价时的定期检查，不限制 EA 推送或图表更新。正常程序组双边平仓并发发出；开仓、接管票据与异常减仓逐笔处理。实际成交受平台撮合、网络和滑点影响。图表仅限制到秒级缩放，不会改变监控、开平仓或成交判断频率。Magic 仅用于识别本策略下的 MT5 订单与持仓，防止程序误处理其他手工单或 EA 订单。正常使用保持默认值即可。</p></details></details>
 <details><summary>净收益、止损与费用设置</summary><div class="grid">
 <label class="check"><input id="group-loss-on" type="checkbox"> 启用单组亏损退出</label>
 <label id="group-loss-field">单组最大亏损（USD）<input id="group-loss" type="number" value="50" min="0.01" step="0.01"></label>
@@ -99,7 +99,7 @@
 <details class="risk-details"><summary>风控与异常处理</summary><p class="note">系统会在开仓前检查报价年龄、双边时差、最大滑点、单边敞口时间、账户权限、保证金、数量步长、持仓模式和持仓对账。交易组数、总手数、网格次数、冷却时间、最低净收益、单组/总亏损和最长持仓也会限制策略。</p><p class="note">任一边部分成交、拒单、超时或回报不确定时，系统暂停新开仓，查询平台状态并按已成交数量处理，不盲目重发；行情或交易通道异常会自动停开仓。页面的“自动执行”状态、交易结果、订单流水和事件日志会显示告警与处理结果。浏览器关闭后不会发送外部通知。</p></details>
 </section>
 </div><section class="panel" aria-labelledby="chart-heading">
-<div class="heading"><div><p class="eyebrow">行情监控</p><h2 id="chart-heading">实时价差</h2><details class="help-details"><summary>价差计算与历史记录说明</summary><p class="muted">入场线：卖币安 Bid、买 MT5 Ask；退出线：买回币安 Ask、卖出 MT5 Bid。已完成分钟归档点不会被后续采样改写，最右侧当前分钟和实时点会继续增长；缩放最低到 1 秒；EA 接入后由新报价唤醒策略，订单串行执行，图表长连接推送，按浏览器绘制帧更新。历史稀疏展示，最近一分钟保留逐报价曲线。</p></details></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
+<div class="heading"><div><p class="eyebrow">行情监控</p><h2 id="chart-heading">实时价差</h2><details class="help-details"><summary>价差计算与历史记录说明</summary><p class="muted">入场线：卖币安 Bid、买 MT5 Ask；退出线：买回币安 Ask、卖出 MT5 Bid。已完成分钟归档点不会被后续采样改写，最右侧当前分钟和实时点会继续增长；缩放最低到 1 秒；EA 接入后由新报价唤醒策略，正常双边平仓并发发出，图表长连接推送，按浏览器绘制帧更新。历史稀疏展示，最近一分钟保留逐报价曲线。</p></details></div><div class="chart-actions"><button id="chart-latest" type="button">回到最新</button><label>观察窗口<select id="chart-window"><option value="60">1 小时</option><option value="360">6 小时</option><option value="1440" selected>1 天</option><option value="10080">7 天</option><option value="43200">30 天</option></select></label></div></div>
 <p id="quote-latency" class="note">等待行情 · 连接后显示报价年龄与传输方式。</p>
 <p id="quote-summary" class="state">等待双边行情。</p><span id="chart-live-status" class="badge neutral">未连接 · 图表保留历史</span>
 <div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>

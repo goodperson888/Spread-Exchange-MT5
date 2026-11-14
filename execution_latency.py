@@ -10,7 +10,7 @@ class LatencyStats:
     PHASES = frozenset(('quote_wait_ms', 'binance_quote_age_ms', 'mt5_quote_age_ms', 'decision_ms', 'strategy_pass_ms',
         'intent_journal_ms', 'binance_open_request_ms', 'binance_close_request_ms',
         'mt5_open_request_ms', 'mt5_close_request_ms', 'confirmation_query_ms',
-        'pair_open_ms', 'pair_close_ms', 'maintenance_account_ms',
+        'pair_open_ms', 'pair_close_ms', 'close_dispatch_gap_ms', 'maintenance_account_ms',
         'maintenance_fx_ms', 'maintenance_funding_ms', 'maintenance_costs_ms'))
 
     def __init__(self):
