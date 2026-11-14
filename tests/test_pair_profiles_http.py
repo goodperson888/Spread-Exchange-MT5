@@ -30,7 +30,7 @@ class PairProfilesHttpTests(unittest.TestCase):
         config['mt5']['account']='12345';config['mt5']['mcp_token']='PRIVATE-TOKEN';server.write_config(config)
         code,result=self.save();self.assertEqual(code,200,result)
         self.assertEqual(result['active_id'],'legacy');self.assertEqual(server.load_config(),config)
-        text=json.dumps(result)+ (server.DATA/'combinations.json').read_text()
+        text=json.dumps(result)+ (server.DATA/'combinations.json').read_text(encoding='utf-8')
         for secret in ('SECRET-KEY','SECRET-TOKEN','PRIVATE-TOKEN','12345'):self.assertNotIn(secret,text)
 
     def test_activation_persists_pair_and_retains_credentials_without_arming(self):
