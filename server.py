@@ -203,13 +203,13 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
                 elif config['mt5']['adapter'] == 'mcp':
                     if mode != 'paper':
                         raise ValueError('MT5 MCP 只读适配器只能用于纸面模式')
-                    checked_spec(config['mt5'], require_applied=True)
+                    checked_spec(config['mt5'], require_applied=True, config=config)
                     new_terminal = McpTerminal(config['mt5'], mt5_mcp_token)
                     snapshot = new_terminal.call('snapshot')
                     snapshot['quote'] = self.mt5_freshness.observe(snapshot['quote'],config['mt5'])
                     meta['mt5_transport'] = 'MT5 MCP 真实行情（只读轮询）'
                 else:
-                    checked_spec(config['mt5'], require_applied=True)
+                    checked_spec(config['mt5'], require_applied=True, config=config)
                     new_terminal = Terminal(config['mt5'], config['execution']['magic'])
                     mt5_snapshot_started = time.monotonic()
                     snapshot = new_terminal.call('snapshot')
@@ -1315,10 +1315,20 @@ def connection_key(settings):
     ))
 
 
-def checked_spec(settings, require_applied=False):
+def pair_probe_key(config):
+    if not native_pair(config): return None
+    return (config['pair'].get('id'), short_symbol(config), config['mt5']['symbol'],
+            config['strategy']['mt5_lots'], config['execution']['mode'])
+
+
+def checked_spec(settings, require_applied=False, config=None):
     if not LAST_PROBE or LAST_PROBE['key'] != connection_key(settings):
         raise ValueError('请先检查 MT5 连接，并应用读取到的账户及规格。')
     result = LAST_PROBE['result']
+    if config is not None:
+        if (LAST_PROBE.get('pair_key') != pair_probe_key(config) or
+                (native_pair(config) and not result.get('pair_ready'))):
+            raise ValueError('双品种或每腿手数已变更，或双品种检查未通过；请重新检查当前组合。')
     if require_applied and not LAST_PROBE.get('applied'):
         raise ValueError('请先核对并应用读取结果')
     if not result.get('identity_matches') or not result.get('symbol') or time.monotonic() - LAST_PROBE['at'] > 300:
@@ -1381,7 +1391,7 @@ def validate_config(config):
 
 
 def order_plan(config, binance_bid=0.0):
-    spec = checked_spec(config['mt5'], require_applied=True)['symbol']
+    spec = checked_spec(config['mt5'], require_applied=True, config=config)['symbol']
     lots = Decimal(str(config['strategy']['mt5_lots']))
     minimum, maximum, step = (Decimal(str(spec[k])) for k in ('volume_min', 'volume_max', 'volume_step'))
     if not lots.is_finite() or lots < minimum or lots > maximum or lots % step:
@@ -1650,6 +1660,7 @@ class Handler(BaseHTTPRequestHandler):
                             TRADING.config=None;TRADING.plan=None;TRADING.quote=None;TRADING.position_report=None
                             TRADING.adoption_preview=None
                             TRADING.market_meta={};TRADING.external_close_status=None;TRADING.last_error=''
+                            LAST_PROBE=None
                     atomic_write_json(DATA/'combinations.json',dict(profiles=rows))
                     result=pair_profiles.catalogue(load_config(),dict(profiles=rows))
                 self.send_json({'ok':True,**result,**({'saved_id':profile['id']} if path=='/api/pairs/save' else {})});return
@@ -1664,27 +1675,23 @@ class Handler(BaseHTTPRequestHandler):
                         checked_config=load_config();settings=checked_config['mt5']
                     LAST_PROBE = None
                     token = str(body.get('mcp_token') or settings.get('mcp_token', ''))
-                    if settings.get('adapter', 'native') == 'paper':
+                    if native_pair(checked_config) and settings.get('adapter') != 'native':
+                        result = dict(connected=False, identity_matches=False, pair_check=True, pair_ready=False,
+                                      message='同一 MT5 双品种需要 Windows 原生终端；纸面模式也需读取两路真实行情。',
+                                      blockers=['请选择 Windows MT5 原生终端后重新检查'], real_order_enabled=False)
+                    elif settings.get('adapter', 'native') == 'paper':
                         result = inspect_paper_terminal(settings)
                     elif settings.get('adapter') == 'mcp':
                         result = inspect_mcp_terminal(settings, token)
                     else:
-                        result = run_probe(settings)
-                        if native_pair(checked_config) and result.get('identity_matches'):
-                            account=result.get('identity',{})
-                            probe_config=copy.deepcopy(checked_config)
-                            probe_config['mt5'].update(account=account.get('account'),server=account.get('server'))
-                            terminal=Terminal(settings_for(probe_config),probe_config['execution']['magic'],read_only=True)
-                            try:
-                                specs={leg:terminal.call('pair_spec',symbol=name) for leg,name in
-                                       (('binance',short_symbol(probe_config)),('mt5',settings['symbol']))}
-                                snap=terminal.call('snapshot')
-                                result.update(symbol=specs['mt5'],pair_specs=specs,quote=snap['quote'],
-                                              connected=True,identity_matches=True,blockers=[],code='PAIR_CHECKED',
-                                              message='双品种规格已读取并完成 USD 盈亏计算校验；检查不会下单')
-                            finally: terminal.close()
+                        probe_settings = settings
+                        if native_pair(checked_config):
+                            probe_settings = {**settings_for(checked_config), 'pair_lots':checked_config['strategy']['mt5_lots'],
+                                              'pair_execution_mode':checked_config['execution']['mode']}
+                        result = run_probe(probe_settings)
                     with LOCK:
-                        LAST_PROBE = dict(key=connection_key(settings), result=result, at=time.monotonic())
+                        LAST_PROBE = dict(key=connection_key(settings), pair_key=pair_probe_key(checked_config),
+                                          result=result, at=time.monotonic())
                     self.send_json({'ok': True, 'result': result})
                 finally:
                     PROBE_LOCK.release()
@@ -1692,13 +1699,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/mt5/apply':
                 with LOCK:
                     config = load_config()
-                    result = checked_spec(config['mt5'])
+                    result = checked_spec(config['mt5'], config=config)
                     spec = result['symbol']
                     config['mt5'].update(account=result['identity']['account'], server=result['identity']['server'],
                                          symbol=spec['name'], **{k: spec[k] for k in ('contract_size_oz', 'volume_min', 'volume_step', 'volume_max')})
                     config['mt5'].pop('bridge_url', None)
                     write_config(config)
                     LAST_PROBE['key'] = connection_key(config['mt5'])
+                    LAST_PROBE['pair_key'] = pair_probe_key(config)
                     LAST_PROBE['applied'] = True
                 self.send_json({'ok': True, 'mt5': config['mt5']})
                 return

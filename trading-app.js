@@ -915,7 +915,8 @@
     const link=document.createElement('a');link.href=url;link.download='GoldPairQuotes.set';link.click();
     setTimeout(()=>URL.revokeObjectURL(url),10000);
     const asset=r.binary||r.source;
-    el('push-result').innerHTML=`本机接收器已启动（127.0.0.1:${Number(r.port)}），参数文件已下载。<a href="${escape(asset)}" download>下载${r.binary?'已编译 EA':'EA 源码'}</a>。将 EA 放入 MT5 数据目录的 MQL5/Experts，挂到当前黄金图表，在“输入”中载入刚下载的 .set 文件。`;
+    const charts=window.GoldPairPairs?.info()?.type==='mt5_mt5'?'分别挂到卖出腿和买入腿的两个图表，两处均在“输入”中载入同一个 .set 文件':'挂到当前黄金图表，在“输入”中载入刚下载的 .set 文件';
+    el('push-result').innerHTML=`本机接收器已启动（127.0.0.1:${Number(r.port)}），参数文件已下载。<a href="${escape(asset)}" download>下载${r.binary?'已编译 EA':'EA 源码'}</a>。将 EA 放入 MT5 数据目录的 MQL5/Experts，${charts}。`;
   },'push-setup','正在准备 EA 接收器和本机参数…');
   window.addEventListener('offline',()=>{stream?.close();stream=null;streamReady=false;streamLabel();});
   window.addEventListener('online',startStream);

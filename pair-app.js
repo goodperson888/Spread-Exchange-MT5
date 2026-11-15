@@ -18,6 +18,22 @@
     node('exchange-symbol-field').hidden=same;node('exchange-network').hidden=same;
     node('exchange-heading').textContent=same?'执行模式与优先腿':'币安连接配置';
     node('exchange-settings').querySelector('.eyebrow').textContent=same?'02 · 执行设置':'02 · 币安永续';
+    node('setup-heading').textContent=same?'核对同一账户的两个 MT5 品种':'选择验证方式，然后检查';
+    node('check-mt5').textContent=same?'检查 MT5 双品种':'检查 MT5 连接';
+    node('mt5-short-symbol-field').hidden=!same;node('mt5-pair-help').hidden=!same;
+    node('mt5-short-symbol').value=same?a:'';
+    node('long-symbol-label').textContent=same?'MT5 买入品种（组合内设置）':'MT5 买入品种';
+    node('mt5-symbol').placeholder=same?'请在组合管理中填写完整品种名':'留空尝试识别，如 XAUUSDm';
+    node('mt5-adapter').options[0].disabled=same;
+    node('exec-mode').options[0].textContent=same?'纸面模拟（原生 MT5 真实行情）':'纸面模拟（可用 MCP）';
+    for(const [id,text] of [
+      ['connection-notice','检查连接不会下单。同一 MT5 双品种的纸面与实盘均须在 Windows 原生 MT5 运行。'],
+      ['mt5-push-help','EA 只推送行情，不下单。双品种需在卖出腿、买入腿各自图表挂载 EA，载入同一个 .set 参数文件；未接入的腿继续使用原生轮询。']]) {
+      const item=node(id);item.dataset.original??=item.textContent;item.textContent=same?text:item.dataset.original;
+    }
+    const help=node('mt5-connection-help');help.dataset.original??=help.textContent;
+    help.textContent=same?'两腿共用一个已登录的 Windows MT5 终端及 USD 对冲账户。纸面模式也读取两路真实行情。':help.dataset.original;
+    node('mt5-spec-help').textContent=same?'下方只读规格为买入腿；检查结果分别列出两腿规格与共同手数规则。':'最小手数、步长和每手盎司数均从真实 MT5 读取。';
     node('risk-heading').textContent=same?'MT5 账户保证金风险':'双边强平风险';
     const costs=node('cost-source');costs.dataset.original??=costs.textContent;
     costs.textContent=same?'实盘两腿成交佣金与 Swap 分别后台核验；预计平仓佣金按各腿每手单边设置计算，返佣按填写比例预计。纸面持仓费正值为成本、负值为收入。':costs.dataset.original;
@@ -33,6 +49,8 @@
     label('mt5-bid',same?'买入腿 Bid（USD）':'MT5 Bid（USD）');
     label('mt5-ask',same?'买入腿 Ask（USD）':'MT5 Ask（USD）');
     label('contract',same?'买入腿每手合约数量':'每手盎司');
+    label('volume-min',same?'买入腿最小手数':'最小手数');
+    label('volume-step',same?'买入腿手数步长':'手数步长');
     label('lots',same?'每组每腿手数（两腿相同）':'每组 MT5 手数');
     label('mt5-fee',same?'买入腿佣金预估（USD/手/单边）':'MT5 佣金预估（USD/手/单边）');
     label('mt5-rebate',same?'买入腿佣金返佣比例（%）':'MT5 佣金返佣比例（%）');

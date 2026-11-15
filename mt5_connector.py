@@ -10,8 +10,9 @@ import re
 import subprocess
 import sys
 import time
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
+from pair_instruments import equal_lot_plan
 
 
 def failure(code, message):
@@ -88,15 +89,16 @@ def quote_diagnostics(tick):
                 valid_time=valid_time, valid_price=bid is not None and ask is not None and 0 < bid <= ask)
 
 
-def verify_cfd_profit(api, info, account, tick, spec):
+def verify_cfd_profit(api, info, account, tick, spec, *, linear=False):
     """Connection-time read-only check; never used by the execution worker."""
-    result = dict(method='gold_cfd_profit', passed=False,
+    label = '合约' if linear else '黄金'
+    result = dict(method='linear_usd_profit' if linear else 'gold_cfd_profit', passed=False,
                   account_currency=str(getattr(account, 'currency', '')), checks=[])
     def reject(reason):
         result['reason'] = reason
         return result
     if result['account_currency'].upper() != 'USD':
-        return reject('黄金 CFD 兼容校验目前要求美元账户，避免把账户币种换算误当成黄金数量。')
+        return reject(f'{label}盈亏校验目前要求美元账户，避免把账户币种换算误当成合约数量。')
     try:
         reference = quote_diagnostics(tick)
         bid, ask = reference['bid'], reference['ask']
@@ -125,10 +127,86 @@ def verify_cfd_profit(api, info, account, tick, spec):
                 result['checks'].append(dict(side=side, price_open=opening, price_close=closing,
                                              expected_usd=expected, actual_usd=actual))
                 if not math.isclose(actual, expected, rel_tol=1e-4, abs_tol=min(.005, abs(expected) * .005)):
-                    return reject('MT5 盈亏预估与每手合约量的黄金换算不一致，不能自动配平。')
+                    return reject(f'MT5 盈亏预估与每手合约量的{label}换算不一致，不能自动配平。')
     except Exception:
         return reject('无法完成 MT5 盈亏预估校验；请检查终端连接及组件版本后重试。')
     result['passed'] = True
+    return result
+
+
+def inspect_pair_terminal(settings, api, terminal, account, result):
+    """Inspect both symbols in this bounded, read-only probe, including failures."""
+    names = settings['pair_symbols']
+    result.update(pair_check=True, pair_ready=False, pair_checks={}, pair_specs={}, candidates=[],
+                  code='PAIR_BLOCKED', message='双品种检查未通过；此次检查不下单。')
+    if not isinstance(names, list) or len(names) != 2 or not all(isinstance(n, str) and n.strip() for n in names):
+        result['blockers'].append('请先在组合管理中填写卖出腿和买入腿的完整品种名')
+        return result
+    if names[0] == names[1]: result['blockers'].append('两条腿必须选择不同品种')
+    if result['identity']['currency'] != 'USD' or result['identity']['margin_mode'] != 2:
+        result['blockers'].append('同一 MT5 双品种目前仅支持 USD 对冲账户')
+    permitted = (getattr(terminal, 'trade_allowed', False) and not getattr(terminal, 'tradeapi_disabled', True)
+                 and getattr(account, 'trade_allowed', False) and getattr(account, 'trade_expert', False))
+    result['trade_allowed'] = bool(permitted)
+    if not permitted:
+        target = result['blockers'] if settings.get('pair_execution_mode') == 'live' else result['warnings']
+        target.append('MT5 程序交易权限未开启，请检查 Algo Trading、外部 Python API 和账户交易权限')
+    for leg, side, name in zip(('binance', 'mt5'), ('卖出腿', '买入腿'), names):
+        row = dict(name=name, side=side, passed=False, errors=[])
+        result['pair_checks'][leg] = row
+        try:
+            info = api.symbol_info(name)
+            if info is None: raise ValueError('终端未找到完整品种名，请核对经纪商后缀')
+            if not api.symbol_select(name, True): raise ValueError('无法在市场报价中启用该品种')
+            row['diagnostics'] = {k:v for k,v in symbol_diagnostics(info).items() if k != 'reasons'}
+            spec = dict(name=info.name, contract_size_oz=info.trade_contract_size, volume_min=info.volume_min,
+                        volume_max=info.volume_max, volume_step=info.volume_step, trade_mode=info.trade_mode,
+                        currency_profit=info.currency_profit, expiration_time=getattr(info, 'expiration_time', 0))
+            for key in ('contract_size_oz', 'volume_min', 'volume_max', 'volume_step'):
+                v = spec[key]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+                    raise ValueError('合约大小或手数规则无效：'+key)
+            row['spec'] = spec
+            if spec['volume_min'] > spec['volume_max']: raise ValueError('最小手数大于最大手数')
+            if getattr(info, 'custom', False): raise ValueError('自定义品种不能用于实盘双品种组合')
+            if info.currency_profit != 'USD': raise ValueError('盈亏币种不是 USD')
+            if info.trade_mode != getattr(api, 'SYMBOL_TRADE_MODE_FULL', 4): raise ValueError('品种未开放完整双向交易')
+            if spec['expiration_time'] and spec['expiration_time'] <= time.time(): raise ValueError('该合约已到期')
+            tick = api.symbol_info_tick(name)
+            quote = quote_diagnostics(tick)
+            row['quote'] = quote
+            if not quote['valid_price'] or not quote['valid_time']: raise ValueError('尚无有效 Bid/Ask 或报价时间，请检查市场报价和休市时间')
+            verification = verify_cfd_profit(api, info, account, tick, spec, linear=True)
+            row['verification'] = verification
+            if not verification['passed']: raise ValueError(verification['reason'])
+            spec['linear_usd_verified'] = True
+            result['pair_specs'][leg] = spec
+            if quote['age_ms'] > 5000 or quote['age_ms'] < -1000:
+                result['warnings'].append(f'{side} {name} 原始时间与本机有偏差；这不是网络延迟，需连接实时行情核对持续更新')
+            lots = Decimal(str(settings['pair_lots']))
+            if not lots.is_finite() or not Decimal(str(spec['volume_min'])) <= lots <= Decimal(str(spec['volume_max'])) or lots % Decimal(str(spec['volume_step'])):
+                raise ValueError(f'当前每腿 {lots} 手不符合该品种最小/最大手数或步长')
+            row['passed'] = True
+        except Exception as exc:
+            row['errors'].append(str(exc) or '品种检查失败')
+            result['blockers'].append(f'{side} {name}：{row["errors"][-1]}')
+    specs = result['pair_specs']
+    if len(specs) == 2:
+        steps = [Decimal(str(s['volume_step'])) for s in specs.values()]
+        scale = 10 ** max(max(0, -s.as_tuple().exponent) for s in steps)
+        step = Decimal(math.lcm(*(int(s * scale) for s in steps))) / scale
+        minimum = (max(Decimal(str(s['volume_min'])) for s in specs.values()) / step).to_integral_value(rounding=ROUND_CEILING) * step
+        maximum = (min(Decimal(str(s['volume_max'])) for s in specs.values()) / step).to_integral_value(rounding=ROUND_FLOOR) * step
+        result['pair_lot_rules'] = dict(min=float(minimum), max=float(maximum), step=float(step))
+    if not result['blockers'] and len(specs) == 2:
+        config = dict(pair=dict(type='mt5_mt5', short_symbol=names[0]), symbol=names[0], mt5=dict(symbol=names[1]),
+                      strategy=dict(mt5_lots=settings['pair_lots']))
+        try:
+            plan = equal_lot_plan(config, specs)
+            result.update(pair_ready=True, pair_lots=plan['lots'], symbol=specs['mt5'], quote=result['pair_checks']['mt5']['quote'],
+                          code='PAIR_CHECKED', message='双品种规格、相同手数及 USD 盈亏计算校验通过；检查不会下单。')
+        except ValueError as exc:
+            result['blockers'].append(str(exc))
     return result
 
 
@@ -168,6 +246,8 @@ def inspect_terminal(settings, api=None, platform=None):
             result['blockers'].append(result['message'])
             return result
         result['identity_matches'] = True
+        if 'pair_symbols' in settings:
+            return inspect_pair_terminal(settings, api, terminal, account, result)
         symbols = api.symbols_get()
         if symbols is None:
             return failure('SYMBOLS_UNAVAILABLE', '无法读取 MT5 品种列表，请检查终端连接后重试。')

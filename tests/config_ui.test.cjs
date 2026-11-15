@@ -93,6 +93,43 @@ test('failed MT5 check shows raw symbol fields and never applies unverified cont
   assert.match(f.el('mt5-result').textContent,/custom：未返回/);
 });
 
+function nativeCheckResult() {
+  const row=(name,contract,bid,ask)=>({name,passed:true,errors:[],
+    spec:{name,contract_size_oz:contract,volume_min:.01,volume_step:.01,volume_max:10,currency_profit:'USD'},
+    quote:{bid,ask,age_ms:-7200000,valid_price:true},verification:{passed:true}});
+  const checks={binance:row('GOLD-FUT',100,4301,4301.1),mt5:row('GOLD-SPOT',10,4300,4300.2)};
+  return {connected:true,identity_matches:true,pair_check:true,pair_ready:true,message:'双品种校验通过',
+    identity:{account:'123',server:'Demo',currency:'USD',margin_mode:2},pair_lots:.1,
+    pair_checks:checks,symbol:checks.mt5.spec,pair_lot_rules:{min:.1,max:10,step:.1},blockers:[],warnings:[]};
+}
+function nativeUi(f) {
+  f.context.window.GoldPairPairs={info:()=>({type:'mt5_mt5',short_symbol:'GOLD-FUT'}),native:()=>true};
+}
+test('native check saves latest lots, renders both legs, and applies common step',async()=>{
+  const f=await fixture({'/api/mt5/check':()=>({result:nativeCheckResult()})});nativeUi(f);
+  f.edit('lots','.1');
+  await f.el('check-mt5').onclick();
+  const saved=f.calls.filter(c=>c.url==='/api/config'&&c.body).at(-1);
+  assert.equal(saved.body.strategy.mt5_lots,.1);
+  const text=f.el('mt5-result').textContent;
+  assert.match(text,/卖出腿 GOLD-FUT：通过/);assert.match(text,/买入腿 GOLD-SPOT：通过/);
+  assert.match(text,/共同手数规则：最小 0.1 \/ 步长 0.1/);assert.doesNotMatch(text,/黄金品种|盎司/);
+  assert.match(text,/不代表持续行情已就绪/);
+  assert.equal(f.el('bid').value,'4301');assert.equal(f.el('mt5-bid').value,'4300');
+  assert.equal(f.el('lots').step,.1);assert.equal(f.el('lots').min,.1);
+  assert.ok(f.calls.some(c=>c.url==='/api/mt5/apply'));assert.equal(f.run('hasResult'),true);
+  f.edit('lots','.2');assert.equal(f.run('hasResult'),false);
+});
+test('native one-leg failure cannot auto-apply a usable long-leg symbol',async()=>{
+  const result=nativeCheckResult();result.pair_ready=false;
+  result.pair_checks.binance.passed=false;result.pair_checks.binance.errors=['不支持当前手数'];
+  const f=await fixture({'/api/mt5/check':()=>({result})});nativeUi(f);
+  await f.el('check-mt5').onclick();
+  assert.match(f.el('mt5-result').textContent,/卖出腿 GOLD-FUT：未通过/);
+  assert.match(f.el('mt5-result').textContent,/买入腿 GOLD-SPOT：通过/);
+  assert.equal(f.run('hasResult'),false);assert.ok(!f.calls.some(c=>c.url==='/api/mt5/apply'));
+});
+
 test('empty symbol auto detection renders candidate diagnosis without applying hints',async()=>{
   const result={connected:true,identity_matches:true,symbol:null,code:'SELECT_SYMBOL',message:'自动识别未找到通过校验的黄金品种',
     symbol_scan:{total_symbols:123,validated_candidates:0,diagnostic_matches:1,shown:1},

@@ -66,5 +66,61 @@ class PairProfilesHttpTests(unittest.TestCase):
             code,_=self.request('/api/pairs/activate',{'id':selected['id']});self.assertEqual(code,400)
         self.assertEqual(server.load_config(),original);self.assertEqual((server.DATA/'combinations.json').read_bytes(),rows)
 
+    def activate_native(self):
+        _, result = self.save()
+        selected = next(p['id'] for p in result['profiles'] if p['id'] != 'legacy')
+        self.assertEqual(self.request('/api/pairs/activate', {'id':selected})[0], 200)
+        self.assertEqual(self.request('/api/config', {'mt5':{'adapter':'native'}, 'strategy':{'mt5_lots':.1}})[0], 200)
+
+    def test_native_check_uses_one_bounded_probe_for_both_symbols_and_current_lots(self):
+        from test_native_pair_probe import PairTerminal
+        self.activate_native()
+        with patch.object(server, 'run_probe', side_effect=lambda s: test_connection.connector.inspect_terminal(s, PairTerminal())) as probe, \
+             patch.object(server, 'Terminal') as terminal:
+            code, body = self.request('/api/mt5/check', {})
+        self.assertEqual(code, 200); self.assertTrue(body['result']['pair_ready'], body)
+        probe.assert_called_once(); terminal.assert_not_called()
+        args = probe.call_args.args[0]
+        self.assertEqual(args['pair_symbols'], ['GOLD-FUT','GOLD-SPOT']); self.assertEqual(args['pair_lots'], .1)
+        self.assertEqual(self.request('/api/mt5/apply', {})[0], 200)
+        saved = server.load_config()
+        self.assertEqual(saved['mt5']['account'], '123'); self.assertEqual(saved['pair']['short_symbol'], 'GOLD-FUT')
+        self.assertEqual(saved['mt5']['contract_size_oz'], 10)
+
+    def test_failed_either_leg_cannot_apply_only_the_other_leg(self):
+        from test_native_pair_probe import PairTerminal
+        self.activate_native(); fake = PairTerminal(); fake.symbols.pop(0)
+        with patch.object(server, 'run_probe', side_effect=lambda s: test_connection.connector.inspect_terminal(s, fake)):
+            code, body = self.request('/api/mt5/check', {})
+        self.assertEqual(code, 200); self.assertFalse(body['result']['pair_ready'])
+        self.assertTrue(body['result']['pair_checks']['mt5']['passed'])
+        before = server.load_config()
+        self.assertEqual(self.request('/api/mt5/apply', {})[0], 400)
+        self.assertEqual(server.load_config(), before)
+
+    def test_short_symbol_or_lots_change_invalidates_native_probe(self):
+        from test_native_pair_probe import PairTerminal
+        self.activate_native()
+        for change in ('short','lots','mode'):
+            with patch.object(server, 'run_probe', side_effect=lambda s: test_connection.connector.inspect_terminal(s, PairTerminal())):
+                self.request('/api/mt5/check', {})
+            original = server.load_config(); changed = copy.deepcopy(original)
+            if change == 'short': changed['pair']['short_symbol'] = 'GOLD-OTHER'; changed['symbol'] = 'GOLD-OTHER'
+            elif change == 'lots': changed['strategy']['mt5_lots'] = .2
+            else: changed['execution']['mode'] = 'live' if original['execution']['mode'] == 'paper' else 'paper'
+            server.write_config(changed)
+            self.assertEqual(self.request('/api/mt5/apply', {})[0], 400, change)
+            server.write_config(original)
+
+    def test_native_pair_never_treats_legacy_paper_probe_as_dual_symbol_check(self):
+        self.activate_native()
+        self.assertEqual(self.request('/api/config', {'mt5':{'adapter':'paper'}})[0], 200)
+        with patch.object(server, 'run_probe') as native, patch.object(server, 'inspect_paper_terminal') as paper:
+            code, body = self.request('/api/mt5/check', {})
+        self.assertEqual(code, 200); self.assertFalse(body['result']['pair_ready'])
+        self.assertIn('Windows 原生', body['result']['message'])
+        native.assert_not_called(); paper.assert_not_called()
+        self.assertEqual(self.request('/api/mt5/apply', {})[0], 400)
+
 
 if __name__=='__main__':unittest.main()

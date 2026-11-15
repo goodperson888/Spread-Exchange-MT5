@@ -107,27 +107,29 @@
 
 <div id="native-pair-costs" hidden><h3>MT5 卖出腿费用</h3><div class="grid"><label>卖出腿单边每手佣金（USD）<input id="mt5-short-fee" type="number" min="0" step="0.01" value="0"></label><label>卖出腿预计手续费返佣（%）<input id="mt5-short-rebate" type="number" min="0" max="100" step="0.1" value="0"></label><label id="mt5-short-swap-field">纸面卖出腿每日每手成本（USD，可为负）<input id="mt5-short-swap" type="number" step="0.01" value="0"></label></div><p class="note">买入腿使用上方 MT5 费用设置；两腿已发生成交佣金、费用和 Swap 分别后台核验。平仓佣金及返佣仍为预估。</p></div><details class="risk-details"><summary>风控与异常处理</summary><p class="note">系统会在开仓前检查报价年龄、双边时差、最大滑点、单边敞口时间、账户权限、保证金、数量步长、持仓模式和持仓对账。交易组数、总手数、网格次数、冷却时间、最低净收益、单组/总亏损和最长持仓也会限制策略。</p><p class="note">任一边部分成交、拒单、超时或回报不确定时，系统暂停新开仓，查询平台状态并按已成交数量处理，不盲目重发；行情或交易通道异常会自动停开仓。页面的“自动执行”状态、交易结果、订单流水和事件日志会显示告警与处理结果。浏览器关闭后不会发送外部通知。</p></details>
 </section></details>
-</div></div><div id="view-settings" class="workspace-view" role="tabpanel" aria-labelledby="tab-settings" hidden><p class="notice">检查连接不会下单。Mac 仅支持 MCP 纸面验证；实盘须在 Windows 原生 MT5 运行。</p><section class="panel" aria-labelledby="setup-heading">
+</div></div><div id="view-settings" class="workspace-view" role="tabpanel" aria-labelledby="tab-settings" hidden><p id="connection-notice" class="notice">检查连接不会下单。Mac 仅支持 MCP 纸面验证；实盘须在 Windows 原生 MT5 运行。</p><section class="panel" aria-labelledby="setup-heading">
 <div class="heading"><div><p class="eyebrow">01 · MT5 适配器</p><h2 id="setup-heading">选择验证方式，然后检查</h2></div><button id="check-mt5" class="primary" disabled>检查 MT5 连接</button></div>
-<p class="note">Mac 使用本机 MT5 MCP 真实行情（只读）；Windows 实盘使用原生终端。原生模式使用已登录的 MT5，不接收 MT5 密码。</p>
+<p id="mt5-connection-help" class="note">Mac 使用本机 MT5 MCP 真实行情（只读）；Windows 实盘使用原生终端。原生模式使用已登录的 MT5，不接收 MT5 密码。</p>
 <div class="grid">
 <label>适配器<select id="mt5-adapter"><option value="mcp">MT5 MCP 真实行情（仅纸面）</option><option value="native">Windows MT5 原生终端</option></select></label>
+<label id="mt5-short-symbol-field" hidden>MT5 卖出品种<input id="mt5-short-symbol" readonly aria-describedby="mt5-pair-help"></label>
 <label><span id="long-symbol-label">MT5 买入品种</span><input id="mt5-symbol" list="mt5-symbols" placeholder="留空尝试识别，如 XAUUSDm" maxlength="80"><datalist id="mt5-symbols"></datalist></label>
 <label>目标账号（选填，用于核对）<input id="account" inputmode="numeric" maxlength="30" placeholder="留空先读取，再应用"></label>
 <label>目标服务器（选填，用于核对）<input id="mt5-server" maxlength="120" placeholder="留空先读取，再应用"></label>
 </div>
+<p id="mt5-pair-help" class="note" hidden>品种在顶部组合管理中修改。一次检查同时核对两腿规格、报价、USD 盈亏计算及相同手数规则；不会下单，也不以新仓保证金是否充足阻止读取账户。</p>
 <div class="grid" id="mcp-fields">
 <label>MT5 MCP 地址<input id="mcp-url" value="http://127.0.0.1:22346/mcp" spellcheck="false"></label>
 <label>MCP Token（本机保存，刷新后保留）<span class="secret-input"><input id="mt5-mcp-token" type="password" autocomplete="off" placeholder="或启动前设置 MT5_TERMINAL_MCP_TOKEN"><button class="secret-toggle" type="button" data-toggle-secret="mt5-mcp-token" aria-controls="mt5-mcp-token" aria-label="显示 MCP Token" aria-pressed="false" title="显示 MCP Token"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 </div>
 <details id="native-path-fields"><summary>多个 Windows MT5 终端时指定路径</summary><label>MT5终端路径<input id="terminal-path" placeholder="C:\Program Files\经纪商 MT5\terminal64.exe" maxlength="1000"></label></details>
-<details class="risk-details"><summary>加速行情：MT5 EA 实时推送</summary><p class="note">EA 只推送行情，不下单。挂到对应黄金图表后，有新报价就发送到本机应用；未接入时继续使用轮询兼容。Mac 可配合 MCP 做纸面验证；Windows 仍使用原生适配器执行订单。</p><button id="push-setup" type="button">准备 EA 与本机参数</button><p id="push-result" class="note" role="status">先检查并应用 MT5 账号和品种，再准备参数。MT5 → 工具 → 选项 → EA 交易中允许访问 http://127.0.0.1；参数文件包含本机行情口令，请勿分享。</p></details>
+<details class="risk-details"><summary>加速行情：MT5 EA 实时推送</summary><p id="mt5-push-help" class="note">EA 只推送行情，不下单。挂到对应黄金图表后，有新报价就发送到本机应用；未接入时继续使用轮询兼容。Mac 可配合 MCP 做纸面验证；Windows 仍使用原生适配器执行订单。</p><button id="push-setup" type="button">准备 EA 与本机参数</button><p id="push-result" class="note" role="status">先检查并应用 MT5 账号和品种，再准备参数。MT5 → 工具 → 选项 → EA 交易中允许访问 http://127.0.0.1；参数文件包含本机行情口令，请勿分享。</p></details>
 <div id="mt5-result" class="result" role="status" aria-live="polite">尚未检查。检查会保存上方 MT5 配置，然后读取本机终端；不会提交交易。</div>
 <div class="grid" aria-label="MT5自动读取规格">
 <label>每手盎司<input id="contract" readonly placeholder="检查后自动读取"></label>
 <label>最小手数<input id="volume-min" readonly placeholder="检查后自动读取"></label>
 <label>手数步长<input id="volume-step" readonly placeholder="检查后自动读取"></label>
-</div><p class="note">最小手数、步长和每手盎司数均从真实 MT5 读取。API Key、Secret 和 MCP Token 会保存到本机配置文件，不写入浏览器草稿、SQLite 交易记录或 Git；请勿共享 data 目录。MCP 适配器不会调用任何交易工具。</p>
+</div><p class="note"><span id="mt5-spec-help">最小手数、步长和每手盎司数均从真实 MT5 读取。</span>API Key、Secret 和 MCP Token 会保存到本机配置文件，不写入浏览器草稿、SQLite 交易记录或 Git；请勿共享 data 目录。MCP 适配器不会调用任何交易工具。</p>
 </section>
 <section class="panel" id="exchange-settings" aria-labelledby="exchange-heading">
 <div class="heading"><div><p class="eyebrow">02 · 币安永续</p><h2 id="exchange-heading">币安连接配置</h2></div><div><button id="check-binance" class="primary" disabled>检查币安连接</button></div></div>

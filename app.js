@@ -13,6 +13,8 @@ const sectionFields = {
   mt5: new Set([...Object.values(bindings.mt5), 'mt5-mcp-token']),
   binance: new Set(['symbol','recv-window','binance-proxy','trading-api-key','trading-api-secret']),
   execution: new Set(['exec-mode','entry-leg','poll-ms','magic','close-retries']),
+  strategy: new Set([...Object.values(bindings.strategy),'grid-enabled','cooldown','max-total','exit-mode','target-mode',
+    'absolute-exit','require-net','min-net','group-loss-on','group-loss','total-loss-on','total-loss','max-hold']),
   risk_alerts: new Set(Object.values(bindings.risk_alerts)),
 };
 let credentialsDirty = false;
@@ -270,6 +272,7 @@ $('clear-credentials').onclick=()=>action('clear-credentials',async()=>{
   message('config-status','已清除本机保存的 API Key、Secret 和 MCP Token。');
 });
 function showResult(r) {
+  if(r.pair_check) { showPairResult(r);return; }
   const lines = [r.message];
   if (r.identity) lines.push('实际账户：' + r.identity.account + ' · ' + r.identity.server + ' · ' + r.identity.currency);
   if (r.symbol_resolution) lines.push('品种名称已按终端匹配：'+r.symbol_resolution.requested+' → '+r.symbol_resolution.resolved);
@@ -328,6 +331,34 @@ function showResult(r) {
   
   // 设置hasResult状态
   hasResult = Boolean(r.connected && r.identity_matches && r.symbol);
+}
+function showPairResult(r) {
+  const lines=[r.message];
+  if(r.identity)lines.push(`实际账户：${r.identity.account} · ${r.identity.server} · ${r.identity.currency} · ${r.identity.margin_mode===2?'对冲账户':'不支持的账户模式'}`);
+  for(const [leg,side,bid,ask] of [['binance','卖出腿','bid','binance-ask'],['mt5','买入腿','mt5-bid','mt5-ask']]) {
+    const row=r.pair_checks?.[leg];
+    if(!row)continue;
+    lines.push(`${side} ${row.name}：${row.passed?'通过':'未通过'}`);
+    const s=row.spec,q=row.quote;
+    if(s)lines.push(`每手合约数量 ${s.contract_size_oz}；最小 ${s.volume_min} / 步长 ${s.volume_step} / 最大 ${s.volume_max} 手；盈亏币种 ${s.currency_profit}`);
+    if(q) {
+      lines.push(`检查时 Bid ${q.bid??'无效'} / Ask ${q.ask??'无效'}；原始时间与本机差 ${q.age_ms??'未知'} 毫秒`);
+      if(q.valid_price){$(bid).value=q.bid;$(ask).value=q.ask;}
+    }
+    if(row.verification?.passed)lines.push('USD 线性盈亏计算：多空、涨跌四项校验通过');
+    for(const error of row.errors||[])lines.push(`${side}待处理：${error}`);
+  }
+  if(r.pair_lot_rules) {
+    const rule=r.pair_lot_rules;
+    lines.push(`两腿共同手数规则：最小 ${rule.min} / 步长 ${rule.step} / 最大 ${rule.max} 手${r.pair_lots!==undefined?'；当前每腿 '+r.pair_lots+' 手':''}`);
+    $('lots').min=rule.min;$('lots').max=rule.max;$('lots').step=rule.step;
+  }
+  for(const reason of r.blockers||[])lines.push('待处理：'+reason);
+  for(const warning of r.warnings||[])lines.push('提示：'+warning);
+  lines.push('单次检查不代表持续行情已就绪；连接行情与对账后会继续检查报价更新。');
+  hasResult=Boolean(r.connected&&r.identity_matches&&r.pair_ready);
+  message('mt5-result',lines.join('\n'),!hasResult);
+  $('mt5-symbols').replaceChildren();
 }
 function showPlan(p, executable=false) {
   const notional=p.binance_notional_usdt;
@@ -418,7 +449,8 @@ $('check-mt5').onclick = () => action('check-mt5', async () => {
   const at = revision;
   // Persist the selected execution mode with the adapter. Otherwise changing
   // live/native to paper/paper would be validated against the stale mode.
-  await saveConfigSections(['mt5','execution']);
+  const same=window.GoldPairPairs?.info()?.type==='mt5_mt5';
+  await saveConfigSections(same?['mt5','execution','strategy']:['mt5','execution']);
   const {result} = await api('/api/mt5/check', {mcp_token:$('mt5-mcp-token').value.trim()});
   if (at !== revision) {
     message('mt5-result', '检查期间连接配置有修改，请重新检查当前配置。');
@@ -427,7 +459,7 @@ $('check-mt5').onclick = () => action('check-mt5', async () => {
   showResult(result);
   
   // 检查成功后自动应用结果
-  if (result.connected && result.identity_matches && result.symbol) {
+  if (result.connected && result.identity_matches && result.symbol && (!same||result.pair_ready)) {
     await api('/api/mt5/apply', {});
     const mt5 = result.symbol;
     // 应用账户和服务器信息
@@ -441,8 +473,9 @@ $('check-mt5').onclick = () => action('check-mt5', async () => {
     }
     // 应用规格信息
     for (const [key,id] of [['contract_size_oz','contract'], ['volume_min','volume-min'], ['volume_step','volume-step']]) $(id).value = mt5[key];
-    $('lots').step = mt5.volume_step; $('lots').min = mt5.volume_min; $('lots').max = mt5.volume_max;
-    message('config-status', '已自动应用终端账户、服务器和黄金规格。仍未启用交易。');
+    const rule=same?result.pair_lot_rules:null;
+    $('lots').step = rule?.step??mt5.volume_step; $('lots').min = rule?.min??mt5.volume_min; $('lots').max = rule?.max??mt5.volume_max;
+    message('config-status', same?'已核对两腿并应用终端账户与规格；两腿按共同手数规则校验，仍未启用交易。':'已自动应用终端账户、服务器和黄金规格。仍未启用交易。');
     await calculatePlan(true);
   }
 });
@@ -496,7 +529,8 @@ for(const input of document.querySelectorAll('input:not([readonly]), select')) {
       $('public-ip-result').classList.remove('ok');
       message('public-ip-result','代理配置已修改，请重新检测币安出口 IP。');
     }
-    if(Object.values(bindings.mt5).includes(input.id) || input.id==='mt5-mcp-token') {
+    if(Object.values(bindings.mt5).includes(input.id) || input.id==='mt5-mcp-token' ||
+       (window.GoldPairPairs?.info()?.type==='mt5_mt5'&&['lots','exec-mode'].includes(input.id))) {
       hasResult=false; controls();
       message('mt5-result','连接配置已修改，请重新检查 MT5；显示的规格为上次保存值。');
     }
