@@ -89,9 +89,17 @@ class Engine:
         if self.state['recovery']: raise ValueError('请先完成持仓对账')
         if any(g['status'] in ('opening','unwinding','closing','attention') for g in self.active()):
             raise ValueError('尚有未完成或异常交易组')
+        before={key:self.state[key] for key in ('key','mode','last_start_ms') if key in self.state}
         self.state.update(enabled=True,key=pair_key(c),mode=c['execution']['mode'],alarm='')
         self.state['last_start_ms']=stamp()
-        self.save('start',{'mode':self.state['mode']})
+        try:
+            self.save('start',{'mode':self.state['mode']})
+        except Exception:
+            # A failed durable start must never leave entries armed in memory.
+            self.state.update(before)
+            self.state.update(enabled=False,alarm='启动记录写入失败，未启动新开仓；请检查数据磁盘空间后重试')
+            if 'last_start_ms' not in before: self.state.pop('last_start_ms',None)
+            raise
 
     def amounts(self, g):
         amounts={'binance':0.,'mt5':0.}

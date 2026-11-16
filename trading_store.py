@@ -1,9 +1,34 @@
 """Durable order intents and state. Never store credentials in the journal."""
 import json
+import shutil
 import sqlite3
 import threading
 import time
 from pathlib import Path
+
+
+def storage_error_message(exc):
+    if (getattr(exc, 'sqlite_errorcode', None) == getattr(sqlite3, 'SQLITE_FULL', 13) or
+            'database or disk is full' in str(exc).lower()):
+        return ('交易数据写入失败：数据所在磁盘空间不足或数据库容量受限。新开仓无法安全启动；'
+                '请释放该磁盘空间，或退出程序后迁移整个数据目录。不要删除数据库及 -wal 文件。')
+    return str(exc)
+
+
+def storage_snapshot(path):
+    """On-demand diagnostics only; never called by the execution hot path."""
+    path=Path(path)
+    result={}
+    try:
+        usage=shutil.disk_usage(path.parent)
+        result.update(disk_total_bytes=usage.total,disk_free_bytes=usage.free)
+    except OSError:
+        result['disk_usage_unavailable']=True
+    for label,suffix in (('database_bytes',''),('wal_bytes','-wal'),('shm_bytes','-shm')):
+        try: result[label]=Path(str(path)+suffix).stat().st_size
+        except FileNotFoundError: result[label]=0
+        except OSError: result[label.replace('_bytes','_unavailable')]=True
+    return result
 
 
 def same_chart_market(left, right):

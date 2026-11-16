@@ -295,6 +295,15 @@ class NativePairConnectionTests(unittest.TestCase):
         self.assertNotIn('双品种已连接',self.r.engine.state['alarm'])
         self.assertTrue(all(t.close.called for t in self.created));self.assertIsNone(self.r.pump)
 
+    def test_full_disk_during_pause_still_releases_both_prepared_workers(self):
+        import sqlite3
+        with patch.object(self.store,'commit',side_effect=sqlite3.OperationalError('database or disk is full')):
+            with self.assertRaisesRegex(ValueError,'disk is full'):self.r._native_connect(self.c)
+        self.assertFalse(self.r.connected);self.assertIsNone(self.r.pump)
+        self.assertFalse(self.r.engine.state['enabled'])
+        self.assertEqual(self.r.connection_attempt['state'],'failed')
+        self.assertTrue(all(t.close.called for t in self.created))
+
     def test_prepared_quote_reader_is_closed_if_bridge_setup_fails_before_install(self):
         self.r._restore_push_bridge.side_effect=ValueError('bridge unavailable')
         with self.assertRaisesRegex(ValueError,'启用行情与后台观察'):self.r._native_connect(self.c)

@@ -47,6 +47,12 @@ def main():
             with urllib.request.urlopen(url + 'api/status', timeout=2) as response:
                 status = json.load(response)
             if status.get('app') == 'GoldPairLocal':
+                active_data=status.get('data_directory')
+                if active_data is None or str(DATA.resolve()).casefold()!=active_data.casefold():
+                    print('Another GoldPairLocal process is already running with a different or unknown data directory.')
+                    print('Close the running application and its console before changing the data directory.')
+                    print('Requested data directory: ' + str(DATA))
+                    return
                 webbrowser.open(url)
                 return
         except Exception:

@@ -14,5 +14,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 & '.\dist\GoldPairLocal\GoldPairLocal.exe' --self-test
 if ($LASTEXITCODE -ne 0) { throw 'Executable self-test failed.' }
 Copy-Item README.md '.\dist\GoldPairLocal\README.md'
+Copy-Item Start-Portable.bat '.\dist\GoldPairLocal\Start-Portable.bat'
 Compress-Archive -Path '.\dist\GoldPairLocal' -DestinationPath '.\dist\GoldPairLocal-Windows.zip' -Force
 Write-Host 'Built dist\GoldPairLocal-Windows.zip. Test with a logged-in MT5 terminal before distributing.'

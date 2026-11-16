@@ -378,6 +378,9 @@ class NativePairRuntime:
                 if any(g['key']!=pair_key(c) or g.get('leg_contracts')!=plan['leg_contracts'] for g in self.engine.active()):
                     raise ValueError('未平交易组与当前组合或合约大小不符，禁止重新绑定')
                 self.connection_attempt['stage']='启用行情与后台观察'
+                # Keep the previous connection intact if storage is unavailable.
+                self.engine.pause('双品种已连接；启动新开仓前请核对持仓')
+                self.store.sample(quote)
                 self._disconnect_pair_resources();installed=True
                 self.config=c;self.plan=plan;self.terminal=terminal;self.spec=None;self.binance=None
                 self._native_snapshots={};self._last_mt5_snapshot=snap;self._last_mt5_snapshot_at=time.monotonic();self._mt5_risk_error=''
@@ -394,7 +397,6 @@ class NativePairRuntime:
                 self.pump.publish(quote);self.pump.start()
                 if mode=='live':
                     self.maintenance=NativePairObserver(self);self.maintenance.start()
-                self.engine.pause('双品种已连接；启动新开仓前请核对持仓')
                 self.connected=True;self.reconciled=mode=='paper'
                 self.connection_attempt.update(state='connected',stage='双品种行情已连接',elapsed_ms=round((time.monotonic()-self._connection_started)*1000))
                 self.engine.save('native_pair_connect',self._connection_status())
@@ -405,20 +407,27 @@ class NativePairRuntime:
                 self.connection_attempt.update(state='failed',message=message,elapsed_ms=round((time.monotonic()-self._connection_started)*1000))
                 if installed:
                     self._disconnect_pair_resources()
-                    self.engine.pause(message)
+                    try: self.engine.pause(message)
+                    except Exception: self.engine.state.update(enabled=False,alarm=message)
                 self.last_error=message
-                self.engine.save('native_pair_connect',self._connection_status())
+                if not self.engine.state.get('enabled'): self.engine.state['alarm']=message
+                try: self.engine.save('native_pair_connect',self._connection_status())
+                except Exception: pass  # Never skip worker cleanup if the disk is full.
             # Prepared, uninstalled workers have no trading side effects.
-            if reader and not pump_installed: reader.close()
-            if terminal and not installed: terminal.close()
+            for resource,uninstalled in ((reader,not pump_installed),(terminal,not installed)):
+                if resource and uninstalled:
+                    try: resource.close()
+                    except Exception: pass
             raise ValueError(message) from exc
 
     def _disconnect_pair_resources(self):
+        self.connected=False;self.reconciled=False
         for name in ('maintenance','external_monitor','pump','terminal','market_stream','entry_preflight','risk_monitor'):
             resource=getattr(self,name,None)
-            if resource: resource.close()
             setattr(self,name,None)
-        self.connected=False;self.reconciled=False
+            if resource:
+                try: resource.close()
+                except Exception: pass
 
     def _native_cached_quote(self):
         q=self.pump.read()[0] if self.pump else self.quote

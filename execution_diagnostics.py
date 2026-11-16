@@ -231,6 +231,7 @@ def build_report(state, events):
 
 
 def export_report(path):
+    from trading_store import storage_snapshot
     # Separate read connection: never enter Store.lock or TradingRuntime.lock.
     # WAL readers do not block order-intent commits. Only one click reads data.
     db=sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro',uri=True,timeout=1)
@@ -243,6 +244,8 @@ def export_report(path):
     finally:
         db.close()
     report=build_report(state,events)
+    report['storage']=storage_snapshot(path)
+    report['notes'].append('storage为导出时数据所在磁盘的可用空间及数据库/WAL/SHM大小，单位字节；按需读取，不增加下单路径的磁盘检查，不含数据目录路径。')
     aliases={g['id']:'G'+str(i+1) for i,g in enumerate(state.get('groups',[])[-200:])}
     report['exit_observations']=PROCESS_EXIT_OBSERVATIONS.snapshot(aliases)
     report['notes'].append('exit_observations为本次连接内策略实际检查过的退出条件，最多512段；原因、规则或报价有效性改变及每30秒开启新段，first/latest为该段首末证据，samples累计检查次数，min_exit_spread/max_net为段内极值，极值未必同时出现。仅用限量内存，不增加平台请求或日志提交；重启/重新连接清空。报价无效、恢复等待等提前返回不重新估值，缺少net不能当作零。规则中revision对应当时锁定版本，整篮子按加权入场与篮子净收益检查。图表记录与策略取样独立；未被策略取用的瞬时行情、导出前旧版未采集的瞬间及已淘汰段无法还原。内存与持久化快照不是原子快照，未映射组仅统计数量。')

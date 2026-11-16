@@ -28,7 +28,7 @@ from paper_engine import default_state, step as paper_step
 from trading_brokers import Binance, BinanceBookTicker, Terminal, LiveBroker, PaperBroker
 from trading_config import validate as validate_trading, plan as executable_plan, pair_key
 from trading_engine import Engine, valid_group_quote
-from trading_store import Store
+from trading_store import Store, storage_error_message
 from maintenance_work import MaintenanceWork
 from runtime_maintenance import MaintenanceMonitor
 from execution_latency import PROCESS_LATENCY
@@ -188,6 +188,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             new_stream = None
             new_preflight = None
             new_risk_monitor = None
+            new_pump = new_external = new_maintenance = None
             mt5_snapshot_started = None
             meta = {'mt5_transport':'工作进程持久会话 + tick 轮询'}
             try:
@@ -257,29 +258,48 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
                                           recv_window_ms=config['binance']['recv_window_ms'],
                                           proxy_url=config['binance'].get('proxy_url', ''))
                     new_risk_monitor = BinanceRiskMonitor(risk_client, config['symbol'])
-            except Exception:
-                if new_stream:
-                    new_stream.close()
-                if new_terminal:
-                    new_terminal.close()
-                if new_preflight:
-                    new_preflight.close()
-                if new_risk_monitor:
-                    new_risk_monitor.close()
+                # Verify durable storage before replacing a working connection.
+                # A failed connection must not advertise readiness without intake.
+                self.engine.state.pop('entry_margin',None)
+                if meta.get('mt5_margin_check'):
+                    self.engine.state['entry_margin']={**meta['mt5_margin_check'],'phase':'connect'}
+                self.engine.pause('实盘连接已建立，启动前必须完成持仓对账' if mode=='live'
+                                  else '纸面行情已连接，新开仓尚未启动')
+                self.store.sample(new_quote)
+                self._restore_push_bridge()
+                def publish(q):
+                    self.store.sample(q)
+                    self.quote_events.publish(q)
+                new_pump = QuotePump(config,new_binance,new_stream,new_terminal,self.push_bridge,
+                                     inspect_paper_terminal,publish,self.market_wake,self.mt5_freshness)
+                new_pump.last_stamp=new_quote['time_ms']
+                if mode=='live':
+                    observer=Binance(production=True,key=api_key,secret=api_secret,
+                                     recv_window_ms=config['binance']['recv_window_ms'],
+                                     proxy_url=config['binance'].get('proxy_url',''))
+                    new_external=external_closes.ExternalCloseMonitor(
+                        self,observer,lambda:Terminal(config['mt5'],config['execution']['magic'],read_only=True),start=False)
+                maintenance_config=copy.deepcopy(config)
+                new_maintenance=MaintenanceMonitor(self,
+                    Binance(production=True,key=api_key,secret=api_secret,
+                            recv_window_ms=config['binance']['recv_window_ms'],
+                            proxy_url=config['binance'].get('proxy_url','')),
+                    lambda:Terminal(maintenance_config['mt5'],maintenance_config['execution']['magic'],read_only=True))
+            except Exception as exc:
+                self.last_error=storage_error_message(exc)
+                if 'database or disk is full' in str(exc).lower():
+                    self.engine.state.update(enabled=False,alarm=self.last_error)
+                self._close_resources((new_pump,new_external,new_maintenance,new_preflight,
+                                       new_risk_monitor,new_stream,new_terminal))
                 raise
 
-            if self.pump: self.pump.close()
-            old_terminal = self.terminal
-            old_stream = self.market_stream
-            old_preflight = self.entry_preflight
-            old_risk_monitor = getattr(self, 'risk_monitor', None)
-            old_external_monitor = getattr(self, 'external_monitor', None)
-            old_maintenance = getattr(self, 'maintenance', None)
+            old_resources=tuple(getattr(self,name,None) for name in
+                ('pump','external_monitor','maintenance','entry_preflight','risk_monitor','market_stream','terminal'))
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
             self.entry_preflight = new_preflight
             self.risk_monitor = new_risk_monitor
-            self.external_monitor = None
-            self.maintenance = None
+            self.external_monitor = new_external
+            self.maintenance = new_maintenance
             self.external_close_status = None
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.latency.reset(mode)
@@ -290,7 +310,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             self._last_mt5_snapshot = snapshot if config['mt5']['adapter']=='native' else None
             self._last_mt5_snapshot_at = mt5_snapshot_started
             self._mt5_risk_error = ''
-            self.quote, self.connected, self.last_error = new_quote, True, ''
+            self.quote, self.connected, self.last_error = new_quote, False, ''
             self.market_meta = meta
             self.position_report = None
             self.adoption_preview = None
@@ -300,48 +320,33 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             self._last_carry_refresh = 0
             self._last_rest_market = market
             self._last_rest_market_at = time.monotonic()
-            self.reconciled = mode == 'paper'
-            self.engine.state.pop('entry_margin',None)
-            if meta.get('mt5_margin_check'):
-                self.engine.state['entry_margin']={**meta['mt5_margin_check'],'phase':'connect'}
-            if mode == 'live':
-                self.engine.pause('实盘连接已建立，启动前必须完成持仓对账')
-            self.store.sample(self.quote)
-            self.quote_events.publish(self.quote)
-            # Intake persists/pushes quotes without taking the order execution lock.
-            def publish(q):
-                self.store.sample(q)
-                self.quote_events.publish(q)
-            self._restore_push_bridge()
-            self.pump = QuotePump(config, new_binance, new_stream, new_terminal, self.push_bridge,
-                                  inspect_paper_terminal, publish, self.market_wake, self.mt5_freshness)
-            self.pump.last_stamp = self.quote['time_ms']
-            self.pump.start()
-            if old_terminal and old_terminal is not new_terminal:
-                old_terminal.close()
-            if old_stream and old_stream is not new_stream:
-                old_stream.close()
-            if old_preflight and old_preflight is not new_preflight:
-                old_preflight.close()
-            if old_risk_monitor and old_risk_monitor is not new_risk_monitor:
-                old_risk_monitor.close()
-            if old_maintenance: old_maintenance.close()
-            if old_external_monitor: old_external_monitor.close()
-            if mode=='live':
-                observer = Binance(production=True,key=api_key,secret=api_secret,
-                                   recv_window_ms=config['binance']['recv_window_ms'],
-                                   proxy_url=config['binance'].get('proxy_url',''))
-                self.external_monitor = external_closes.ExternalCloseMonitor(
-                    self,observer,lambda: Terminal(config['mt5'],config['execution']['magic'],read_only=True),start=False)
-                self.external_monitor.start()
-            maintenance_config = copy.deepcopy(config)
-            self.maintenance = MaintenanceMonitor(self,
-                Binance(production=True,key=api_key,secret=api_secret,
-                        recv_window_ms=config['binance']['recv_window_ms'],
-                        proxy_url=config['binance'].get('proxy_url','')),
-                lambda: Terminal(maintenance_config['mt5'],maintenance_config['execution']['magic'],read_only=True))
-            self.maintenance.start()
+            self.reconciled = False
+            self.pump=new_pump
+            try:
+                self.pump.start()
+                if self.external_monitor: self.external_monitor.start()
+                self.maintenance.start()
+                self.quote_events.publish(new_quote)
+                self.connected=True
+                self.reconciled=mode=='paper'
+            except Exception as exc:
+                self.last_error=storage_error_message(exc)
+                self.engine.state['enabled']=False
+                self.engine.state['alarm']='连接未完成：'+self.last_error
+                self._disconnect_pair_resources()
+                raise
+            finally:
+                current=(new_pump,new_external,new_maintenance,new_preflight,new_risk_monitor,new_stream,new_terminal)
+                self._close_resources(resource for resource in old_resources
+                                      if not any(resource is item for item in current))
             return self.snapshot()
+
+    @staticmethod
+    def _close_resources(resources):
+        for resource in resources:
+            if resource is not None:
+                try: resource.close()
+                except Exception: pass
 
     def _external_capture(self, monitor):
         # A background observer never waits for paired execution or borrows its
@@ -693,6 +698,9 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
 
     def _poll(self):
         if native_pair(self.config): return self._native_poll()
+        if self.pump is None:
+            self.connected=False;self.reconciled=False
+            raise ValueError('行情连接未完成，请处理连接错误后重新保存并连接')
         c = self.config
         q, version, error = self.pump.read()
         if error or q is None:
@@ -793,12 +801,19 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
                     self._poll()
                     self.last_error = ''
                 except Exception as exc:
-                    self.last_error = str(exc)
+                    self.last_error = storage_error_message(exc)
                     # Fail closed even when there is no current position:
                     # a transient channel failure must not leave an armed
                     # live engine that resumes opening by itself later.
                     if self.engine.state.get('enabled'):
-                        self.engine.pause('行情或交易通道异常：' + self.last_error)
+                        try:
+                            self.engine.pause('行情或交易通道异常：' + self.last_error)
+                        except Exception as pause_exc:
+                            # pause disarms memory before writing. A full disk
+                            # must not terminate the market/recovery worker.
+                            self.engine.state['enabled']=False
+                            self.last_error += '；暂停记录也未能写入：' + storage_error_message(pause_exc)
+                            self.engine.state['alarm']=self.last_error
 
     def config_changed(self, current_config):
         incoming=copy.deepcopy(current_config);effective=copy.deepcopy(self.config)
@@ -856,6 +871,8 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             if self._native_connection_pending(): raise ValueError('双品种行情仍在连接，暂不能启动新开仓')
             if not self.connected:
                 raise ValueError('请先连接并完成双边规格校验')
+            if self.pump is None:
+                raise ValueError('行情连接未完成，请重新保存并连接')
             if current_config is not None:
                 if self.config_changed(current_config):
                     raise ValueError('配置已修改，请重新点击“保存并连接”')
@@ -1586,7 +1603,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 config = load_config()
                 state = read_json(STATE_PATH, {"mode": "paper", "running": False, "position": None})
-            self.send_json({"ok": True, "app": "GoldPairLocal", "host": HOST, "port": PORT, "time_ms": now_ms(), "capabilities": {"mt5_native": sys.platform == 'win32', "mt5_paper": True, "binance_testnet": False, "real_orders": False, "paired_live_orders": True, "paper_engine": True}, "config": {"mode": config.get("mode"), "symbol": config.get("symbol")}, "state": state, "config_errors": validate_config(config)})
+            self.send_json({"ok": True, "app": "GoldPairLocal", "data_directory": str(DATA.resolve()), "host": HOST, "port": PORT, "time_ms": now_ms(), "capabilities": {"mt5_native": sys.platform == 'win32', "mt5_paper": True, "binance_testnet": False, "real_orders": False, "paired_live_orders": True, "paper_engine": True}, "config": {"mode": config.get("mode"), "symbol": config.get("symbol")}, "state": state, "config_errors": validate_config(config)})
             return
         if path == "/api/config":
             with LOCK:
@@ -1841,7 +1858,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": False, "error": "未找到"}, 404)
         except Exception as exc:
-            self.send_json({"ok": False, "error": str(exc)}, 400)
+            self.send_json({"ok": False, "error": storage_error_message(exc)}, 400)
 
 
 if __name__ == "__main__":

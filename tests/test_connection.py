@@ -256,6 +256,15 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(self.request('/api/trading/exit-rules',body)[0],200)
             runtime.apply_exit_rules.assert_called_once_with(body)
 
+    def test_full_disk_returns_actionable_message_instead_of_raw_sqlite_error(self):
+        import sqlite3
+        with patch.object(server,'TRADING') as runtime:
+            runtime.start.side_effect=sqlite3.OperationalError('database or disk is full')
+            code,body=self.request('/api/trading/start',{})
+        self.assertEqual(code,400)
+        self.assertIn('数据所在磁盘空间不足',body['error'])
+        self.assertIn('不要删除数据库',body['error'])
+
     def test_usd_base_gold_cfd_check_apply_and_quantity_plan(self):
         self.request('/api/config', {'mt5':{'adapter':'native', 'symbol':'xauusdm'},
                                     'strategy':{'mt5_lots':.01}})

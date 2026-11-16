@@ -201,6 +201,18 @@ MT5 平仓返回成功码 10009、完整请求手数但价格为 0，且原订�
 
 源码运行：项目 data/。
 Windows 构建包：%LOCALAPPDATA%\GoldPairLocal\，升级应用不会覆盖数据。
+
+Windows 默认将配置、交易记录和行情历史写到上面的用户数据目录，通常在 C 盘。仅把 exe 或解压包移动到 D 盘，不会改变默认数据位置。若提示 `database or disk is full`，请先检查数据所在盘的剩余空间，不要删除 `trading.sqlite3`、`trading.sqlite3-wal` 或 `trading.sqlite3-shm` 来解锁交易。
+
+**迁移到 D 盘（保留全部交易与对账记录）：**
+
+1. 退出应用并关闭黑色运行窗口，确认任务管理器中没有 `GoldPairLocal.exe` 进程；复制期间保持程序关闭。
+2. 将新版本解压到 D 盘，例如 `D:\GoldPairApp`。在其中新建 `data` 文件夹。
+3. 在资源管理器地址栏输入 `%LOCALAPPDATA%\GoldPairLocal`，把该目录的**全部内容**复制到 `D:\GoldPairApp\data`。如有 `-wal`、`-shm` 文件，也一起复制；保留 C 盘原目录作备份。
+4. 今后使用包内 **`Start-Portable.bat`** 启动，控制台显示的 `Data directory` 应为 D 盘新目录。直接双击 exe 仍使用默认目录，请不要混用。先确认原配置、交易组和记录均在，再重新连接、持仓对账；新开仓仍需手动启动。
+5. 升级时只替换程序文件，保留此 `data` 文件夹。移动整个程序目录时，`Start-Portable.bat` 会使用它旁边的 `data`。目录含本机凭据，请不要上传或分享。
+
+`Start-Portable.bat` 发现 C 盘有交易数据库而新目录没有时会停止，要求先复制旧数据，不会直接创建空的交易记录。已有版本也支持在命令提示符设置 `set "GOLD_PAIR_DATA_DIR=D:\GoldPairLocal"` 后从同一窗口运行 exe；需先把旧数据完整复制到指定目录。环境变量只影响从该窗口启动的进程。
 配置写入采用临时文件加原子替换。币安 API Key/Secret 和 MT5 MCP Token 会写入本机 `data/config.json`，用于页面刷新、重启后的连接；不会写入 SQLite 交易日志或事件记录。配置文件是本机明文 JSON，请限制电脑账户权限，不要复制或上传 `data` 目录，并为此应用单独创建最小权限的币安正式网 API Key、关闭提币权限。页面可清除已保存凭据。本版没有混合测试网下单模式；`paper` 模式只读正式网公开行情且不下单。
 本机服务检查 Host 与写请求来源，不开放局域网；不提供任意文件下载接口。分发包通过明确资源清单构建，不打入 data/ 和个人密钥。
 
