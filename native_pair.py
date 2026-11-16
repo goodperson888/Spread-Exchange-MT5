@@ -53,9 +53,9 @@ class NativePairBroker:
 
 
 class NativePairPump:
-    def __init__(self, runtime, terminal):
+    def __init__(self, runtime, terminal, config=None):
         self.runtime=runtime;self.terminal=terminal;self.bridge=runtime.push_bridge
-        self.config=copy.deepcopy(runtime.config)
+        self.config=copy.deepcopy(config if config is not None else runtime.config)
         self.changed=threading.Event();self.stopped=threading.Event();self.lock=threading.Lock()
         self.latest=None;self.version=0;self.error='';self.last_stamp=0
         self.mt5_transport='MT5 双品种报价轮询';self.binance_transport='MT5 卖出腿'
@@ -68,7 +68,7 @@ class NativePairPump:
     def read(self):
         with self.lock: return self.latest,self.version,self.error
 
-    def refresh(self,publish=True):
+    def refresh(self,publish=True,timeout_seconds=None):
         r=self.runtime;c=self.config
         names={'binance':short_symbol(c),'mt5':c['mt5']['symbol']}
         quotes={leg:self.bridge.quote({**c['mt5'],'symbol':name},c['strategy']['max_quote_age_ms'])
@@ -76,17 +76,21 @@ class NativePairPump:
         self.binance_transport='EA Socket 推送' if quotes['binance'] else '原生双品种报价轮询'
         self.mt5_transport='EA Socket 推送' if quotes['mt5'] else '原生双品种报价轮询'
         if not all(quotes.values()):
-            rows=self.terminal.call('pair_quotes')
+            rows=self.terminal.call('pair_quotes',**({'timeout_seconds':timeout_seconds} if timeout_seconds is not None else {}))
             for leg,name in names.items():
                 if quotes[leg] is None:
                     quotes[leg]=r.mt5_freshness.observe(rows[name],{**c['mt5'],'symbol':name})
         q=dict(key=pair_key(c),time_ms=stamp(),usdt_usd=1.,**quotes,
                pair=pair_info(c),entry=quotes['binance']['bid']-quotes['mt5']['ask'],
                exit=quotes['binance']['ask']-quotes['mt5']['bid'])
-        if not publish or self.stopped.is_set(): return q
+        return self.publish(q) if publish else q
+
+    def publish(self,q):
+        if self.stopped.is_set(): return q
+        r=self.runtime
         with self.lock:
             previous=self.latest
-            changed=not previous or any(previous[leg]!=q[leg] for leg in names)
+            changed=not previous or any(previous[leg]!=q[leg] for leg in ('binance','mt5'))
             self.error=''
             if not changed: return self.latest
             q['time_ms']=max(q['time_ms'],self.last_stamp+1);self.last_stamp=q['time_ms']
@@ -319,52 +323,95 @@ class NativePairObserver:
 
 
 class NativePairRuntime:
+    def _native_connection_pending(self):
+        return (getattr(self,'connection_attempt',None) or {}).get('state')=='connecting'
+
+    def _connection_status(self):
+        with self.lock:
+            result=copy.deepcopy(getattr(self,'connection_attempt',None))
+            if result and result['state']=='connecting':
+                result['elapsed_ms']=round((time.monotonic()-self._connection_started)*1000)
+            return result
+
     def _native_connect(self,config):
         c=copy.deepcopy(config);c['symbol']=short_symbol(c)
         c['costs'].update(usdt_usd=1.,usdt_usd_auto=False,binance_fee_auto=False)
-        mode=c['execution']['mode'];terminal=None;reader=None
+        mode=c['execution']['mode'];terminal=None;reader=None;installed=False;pump_installed=False
         with self.lock:
+            if self._native_connection_pending(): raise ValueError('双品种行情仍在连接，请等待当前检查完成')
             if self.engine.state.get('enabled'): raise ValueError('先暂停新开仓，再重新连接')
             if any(g['key']!=pair_key(c) for g in self.engine.active()): raise ValueError('仍有其他组合未平仓，禁止切换连接')
             if c['mt5']['adapter']!='native': raise ValueError('同一 MT5 双品种需要 Windows 原生终端；可使用真实行情进行纸面验证')
-            try:
-                terminal=Terminal(settings_for(c),c['execution']['magic'])
-                specs={leg:terminal.call('pair_spec',symbol=name) for leg,name in
-                       (('binance',short_symbol(c)),('mt5',c['mt5']['symbol']))}
-                plan=equal_lot_plan(c,specs)
-                if any(g.get('leg_contracts')!=plan['leg_contracts'] for g in self.engine.active()):
-                    raise ValueError('当前合约大小与未平交易组绑定不符，禁止重新绑定')
-                snap=terminal.call('snapshot')
-                if snap['account']['currency']!='USD' or snap['account']['margin_mode']!=2:
-                    raise ValueError('当前仅支持 USD 对冲账户，无法按票据安全管理其他账户模式')
-                if mode=='live' and not snap['allowed']: raise ValueError('MT5 自动交易权限未开启')
-                reader=Terminal(settings_for(c),c['execution']['magic'],read_only=True)
-            except Exception:
-                if reader: reader.close()
-                if terminal: terminal.close()
-                raise
-            self._disconnect_pair_resources()
-            self.config=c;self.plan=plan;self.terminal=terminal;self.spec=None;self.binance=None
-            self._native_snapshots={};self._last_mt5_snapshot=snap;self._last_mt5_snapshot_at=time.monotonic();self._mt5_risk_error=''
-            self.engine.broker=PaperBroker() if mode=='paper' else NativePairBroker(terminal,plan['leg_contracts'])
-            self.engine.quote_provider=self._native_execution_quote
-            self.engine.close_quote_provider=self._native_cached_quote
-            self.engine.entry_preflight=self._native_entry_guard if mode=='live' else None
-            self.connected=True;self.reconciled=mode=='paper';self.quote=None;self.last_error=''
-            self.engine.state.pop('entry_margin',None)
-            self.position_report=None;self.adoption_preview=None;self.external_close_status=None
-            self.market_meta=dict(pair=pair_info(c),strategy_trigger='双品种报价驱动；同一 MT5 请求由持久会话有序发送')
-            self.latency.reset(mode);self.engine.pause('双品种已连接；启动新开仓前请核对持仓')
-            self._restore_push_bridge()
-            self.pump=NativePairPump(self,reader)
-            try:
-                self.quote=self.pump.refresh();self.pump.start()
+            self._connection_started=time.monotonic()
+            self.connection_attempt=dict(state='connecting',stage='准备连接',started_ms=stamp(),elapsed_ms=0,timings=[])
+        deadline=self._connection_started+25
+        def remaining():
+            seconds=deadline-time.monotonic()
+            if seconds<=0: raise ValueError('双品种连接检查累计超过 25 秒')
+            return min(12,seconds)
+        def stage(label,work):
+            with self.lock: self.connection_attempt['stage']=label
+            remaining();started=time.monotonic()
+            try: return work()
+            finally:
+                with self.lock:
+                    self.connection_attempt['timings'].append(dict(stage=label,elapsed_ms=round((time.monotonic()-started)*1000)))
+        try:
+            # Slow native reads must not hold the trading/status lock. Keep any
+            # existing connection managing its owned positions until all new
+            # sessions, both specs and the first pair quote have been prepared.
+            terminal=stage('初始化 MT5 执行会话',lambda:Terminal(settings_for(c),c['execution']['magic'],timeout_seconds=remaining()))
+            specs={leg:stage(label,lambda name=name:terminal.call('pair_spec',symbol=name,timeout_seconds=remaining()))
+                   for leg,name,label in (('binance',short_symbol(c),'核验卖出品种规格'),('mt5',c['mt5']['symbol'],'核验买入品种规格'))}
+            plan=equal_lot_plan(c,specs)
+            snap=stage('读取账户与交易权限',lambda:terminal.call('snapshot',timeout_seconds=remaining()))
+            if snap['account']['currency']!='USD' or snap['account']['margin_mode']!=2:
+                raise ValueError('当前仅支持 USD 对冲账户，无法按票据安全管理其他账户模式')
+            if mode=='live' and not snap['allowed']: raise ValueError('MT5 自动交易权限未开启')
+            reader=stage('初始化 MT5 行情会话',lambda:Terminal(settings_for(c),c['execution']['magic'],read_only=True,timeout_seconds=remaining()))
+            pump=NativePairPump(self,reader,c)
+            quote=stage('读取双品种首轮报价',lambda:pump.refresh(publish=False,timeout_seconds=remaining()))
+            remaining()
+            with self.lock:
+                if self.stop_event.is_set(): raise ValueError('程序正在退出，连接已取消')
+                if self.engine.state.get('enabled'): raise ValueError('自动开仓状态发生变化，请先暂停后重新连接')
+                if any(g['key']!=pair_key(c) or g.get('leg_contracts')!=plan['leg_contracts'] for g in self.engine.active()):
+                    raise ValueError('未平交易组与当前组合或合约大小不符，禁止重新绑定')
+                self.connection_attempt['stage']='启用行情与后台观察'
+                self._disconnect_pair_resources();installed=True
+                self.config=c;self.plan=plan;self.terminal=terminal;self.spec=None;self.binance=None
+                self._native_snapshots={};self._last_mt5_snapshot=snap;self._last_mt5_snapshot_at=time.monotonic();self._mt5_risk_error=''
+                self.engine.broker=PaperBroker() if mode=='paper' else NativePairBroker(terminal,plan['leg_contracts'])
+                self.engine.quote_provider=self._native_execution_quote
+                self.engine.close_quote_provider=self._native_cached_quote
+                self.engine.entry_preflight=self._native_entry_guard if mode=='live' else None
+                self.quote=quote;self.last_error=''
+                self.engine.state.pop('entry_margin',None)
+                self.position_report=None;self.adoption_preview=None;self.external_close_status=None
+                self.market_meta=dict(pair=pair_info(c),strategy_trigger='双品种报价驱动；同一 MT5 请求由持久会话有序发送')
+                self.latency.reset(mode);self._restore_push_bridge()
+                self.pump=pump;pump_installed=True;self.pump.bridge=self.push_bridge
+                self.pump.publish(quote);self.pump.start()
                 if mode=='live':
                     self.maintenance=NativePairObserver(self);self.maintenance.start()
-            except Exception:
-                self._disconnect_pair_resources()
-                raise
-            return self.snapshot()
+                self.engine.pause('双品种已连接；启动新开仓前请核对持仓')
+                self.connected=True;self.reconciled=mode=='paper'
+                self.connection_attempt.update(state='connected',stage='双品种行情已连接',elapsed_ms=round((time.monotonic()-self._connection_started)*1000))
+                self.engine.save('native_pair_connect',self._connection_status())
+                return self.snapshot()
+        except Exception as exc:
+            with self.lock:
+                message='双品种连接失败（'+self.connection_attempt['stage']+'）：'+str(exc)
+                self.connection_attempt.update(state='failed',message=message,elapsed_ms=round((time.monotonic()-self._connection_started)*1000))
+                if installed:
+                    self._disconnect_pair_resources()
+                    self.engine.pause(message)
+                self.last_error=message
+                self.engine.save('native_pair_connect',self._connection_status())
+            # Prepared, uninstalled workers have no trading side effects.
+            if reader and not pump_installed: reader.close()
+            if terminal and not installed: terminal.close()
+            raise ValueError(message) from exc
 
     def _disconnect_pair_resources(self):
         for name in ('maintenance','external_monitor','pump','terminal','market_stream','entry_preflight','risk_monitor'):
@@ -403,6 +450,7 @@ class NativePairRuntime:
 
     def _native_start(self,current_config):
         with self.lock:
+            if self._native_connection_pending(): raise ValueError('双品种行情仍在连接，暂不能启动新开仓')
             if not self.connected or (current_config is not None and self.config_changed(current_config)):
                 raise ValueError('请先保存并连接当前组合')
             if not self.reconciled: raise ValueError('请先完成双品种持仓对账')

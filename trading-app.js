@@ -120,7 +120,9 @@
       const offset=node.scrollTop;node.textContent=content;node.scrollTop=offset;
     }
   }
-  let chart, timer, busy=false, pauseBusy=false, last=null, resetChartZoom=true, actionError='', reconcileError=false;
+  let chart, timer, busy=false, pauseBusy=false, last=null, resetChartZoom=true, actionError='', reconcileError=false, connectionUncertain=false, connectionRequestBusy=false;
+  let connectionRequestedAt=0;
+  const currentConnection=attempt=>Number(attempt?.started_ms)>=connectionRequestedAt;
   let chartView=null, stream=null, streamReady=false, paintPending=false, lastPaintAt=0, chartSamples=[], plotGeneration=0, latestLive=null, statusBusy=false;
   let pendingQuotes=[], paintTimer=null, paintFrame=null, plotController=null;
   let historyDirty=true, historyKey=null, historyLoadedAt=0, historyRevision=0;
@@ -193,7 +195,10 @@
       if (!response.ok || result.ok===false) throw Error((result.errors || [result.error || '请求失败']).join('；'));
       return result;
     } catch(error) {
-      if(error.name==='AbortError') throw Error('请求超过 30 秒，请检查网络或 MT5 终端后重试。');
+      if(error.name==='AbortError') {
+        const timeoutError=Error('请求超过 30 秒，操作结果尚未确认，请检查网络或 MT5 终端。');
+        timeoutError.requestTimedOut=true;throw timeoutError;
+      }
       throw error;
     } finally { clearTimeout(timeout); }
   }
@@ -336,22 +341,23 @@
   }
   function updateWorkflow() {
     const state=last?.state||{}, connected=Boolean(last?.connected), reconciled=last?.capabilities?.reconciled===true;
+    const connecting=last?.connection_attempt?.state==='connecting';
     const blocked=(state.groups||[]).some(g=>['opening','unwinding','closing','attention'].includes(g.status))||(state.orders||[]).some(o=>o.result?.status!=='done');
     const pending=connected&&(last?.config_pending===true || typeof dirtyFields!=='undefined'&&[...dirtyFields].some(id=>!id.startsWith('risk-')));
-    if(!connected)el('trading-mode').textContent=(el('exec-mode').value==='live'?'实盘配置':'纸面配置')+' · 未连接';
+    if(!connected)el('trading-mode').textContent=(el('exec-mode').value==='live'?'实盘配置':'纸面配置')+(connecting?' · 正在连接':' · 未连接');
     const status=el('workflow-status');
-    if(status)status.textContent=!connected?'下一步：连接双边行情（首次使用先完成连接设置）':pending?'参数有变更：当前引擎继续使用连接时配置；暂停新开仓后重新连接生效。':!reconciled?'下一步：持仓对账，通过后可启动自动开仓。':state.recovery?'等待持仓对账，通过前不能启动自动开仓':blocked?'成交或平仓尚未完成，暂不能启动自动开仓':state.enabled?'自动开仓运行中 · 暂停只停止新开仓，已有仓位继续管理。':last?.auto_values?.mt5_margin_check?.ready===false?'已连接 · 新开仓保证金受限；已有仓位可管理，点击启动时重新核验':'准备就绪 · 可启动自动开仓';
+    if(status)status.textContent=connecting?'正在连接：'+last.connection_attempt.stage+'；请等待检查完成。':!connected?'下一步：连接双边行情（首次使用先完成连接设置）':pending?'参数有变更：当前引擎继续使用连接时配置；暂停新开仓后重新连接生效。':!reconciled?'下一步：持仓对账，通过后可启动自动开仓。':state.recovery?'等待持仓对账，通过前不能启动自动开仓':blocked?'成交或平仓尚未完成，暂不能启动自动开仓':state.enabled?'自动开仓运行中 · 暂停只停止新开仓，已有仓位继续管理。':last?.auto_values?.mt5_margin_check?.ready===false?'已连接 · 新开仓保证金受限；已有仓位可管理，点击启动时重新核验':'准备就绪 · 可启动自动开仓';
     if(!busy) {
-      el('trading-connect').disabled=Boolean(state.enabled||window.goldPairUiBusy);
-      el('trading-toggle').disabled=Boolean(state.enabled||pauseBusy||!connected||!reconciled||state.recovery||blocked||pending||window.goldPairUiBusy);
+      el('trading-connect').disabled=Boolean(connecting||state.enabled||window.goldPairUiBusy);
+      el('trading-toggle').disabled=Boolean(connecting||state.enabled||pauseBusy||!connected||!reconciled||state.recovery||blocked||pending||window.goldPairUiBusy);
       el('trading-reconcile').disabled=!connected||window.goldPairUiBusy;
       el('trading-close').disabled=!connected||!(state.groups||[]).some(g=>g.status!=='closed');
-      el('apply-entry').disabled=!connected;
+      el('apply-entry').disabled=!connected||connecting;
       for(const button of el('groups').querySelectorAll('[data-close]'))button.disabled=Boolean(window.goldPairUiBusy);
     }
     el('trading-pause').disabled=pauseBusy||!connected||!state.enabled;
     el('trading-pause').textContent=pauseBusy?'正在暂停新开仓…':'暂停新开仓';
-    text('new-entry-status',pauseBusy?'新开仓：正在暂停，等待服务端确认':!connected?'新开仓：未连接':state.enabled?'新开仓：运行中':state.recovery||connected&&!reconciled?'新开仓：已暂停 · 等待持仓核对，已有仓位管理暂未恢复':'新开仓：已暂停 · 已有仓位继续按规则管理');
+    text('new-entry-status',connecting?'新开仓：等待连接完成':pauseBusy?'新开仓：正在暂停，等待服务端确认':!connected?'新开仓：未连接':state.enabled?'新开仓：运行中':state.recovery||connected&&!reconciled?'新开仓：已暂停 · 等待持仓核对，已有仓位管理暂未恢复':'新开仓：已暂停 · 已有仓位继续按规则管理');
     el('new-entry-status').dataset.state=pauseBusy?'pending':state.enabled?'running':'paused';
     const pendingNode=el('config-pending');
     if(pendingNode){pendingNode.hidden=!pending;pendingNode.textContent='已保存 ≠ 已生效。手数、止盈等交易参数须重新连接；开仓阈值可单独点击「应用」，风险提醒阈值保存即生效。已有组保留原规则。';}
@@ -439,6 +445,11 @@
   function render(result) {
     riskSample=result.liquidation_risk||null;riskReceivedAt=Date.now();renderRisk();
     last=result;
+    const connection=result.connection_attempt, connecting=connection?.state==='connecting';
+    if(connectionUncertain&&currentConnection(connection)&&['connected','failed'].includes(connection?.state)) {
+      actionError=connection.state==='failed'?connection.message||'双品种连接失败，请查看检查阶段。':'';
+      connectionUncertain=false;
+    }
     window.GoldPairPairs?.status(result);
     const incomingKey=result.quote?.key;
     if(incomingKey&&incomingKey!==historyKey){
@@ -480,7 +491,9 @@
     }
     const pause=state.last_pause;
     const currentPause=pause&&Number(pause.time_ms)>=Math.max(Number(state.boot_ms)||0,Number(state.last_start_ms)||0);
-    const rawAlarm=state.alarm||result.last_error||(currentPause?pause.reason_label:'');
+    const rawAlarm=connection?.state==='failed'?connection.message||result.last_error
+      :(connecting||!result.connected)&&/双品种已连接/.test(state.alarm||'')?result.last_error||''
+      :state.alarm||result.last_error||(currentPause?pause.reason_label:'');
     // A rollback can finish after the pause alarm was written. Keep the
     // durable group reason in the history, but do not present the old
     // "正在保护性平仓" text as if an exposure were still open.
@@ -492,7 +505,8 @@
     const manualPause=currentPause&&pause.reason_code==='USER_PAUSE';
     const pausedAt=currentPause&&Number.isFinite(Number(pause.time_ms))
       ? `（${new Date(Number(pause.time_ms)).toLocaleTimeString('zh-CN',{hour12:false})}）` : '';
-    const stateText = !result.connected ? '未连接，不能开仓'
+    const stateText = connecting ? `正在连接：${connection.stage}（已用 ${(Number(connection.elapsed_ms||0)/1000).toFixed(1)} 秒）`
+      :!result.connected ? '未连接，不能开仓'
       : (!reconciled || state.recovery) ? '已连接，等待持仓对账'
       : protectionPending ? `已连接，自动开仓已暂停：${closeLabel}处理中（尚未确认双平）`
       : state.enabled ? '自动开仓运行中'+(oldManaging?' · 旧仓管理运行中':'')
@@ -507,7 +521,8 @@
       ? `\nMT5 成交仍未确认：${confirmationLabels[confirmationStage]||'仍在查询真实成交回报'}；当前不能认定已双边平仓。` : '';
     const recovered=currentPause&&pause.reason_code==='ORDER_UNCONFIRMED'&&!state.enabled&&!state.recovery
       &&(state.groups||[]).some(g=>g.status==='open')&&!(state.orders||[]).some(o=>activeGroupIds.has(o.group)&&o.result?.status!=='done');
-    const next=(!result.connected ? '请先连接行情。'
+    const next=(connecting ? '连接检查进行中，请等待后台返回结果；当前不能启动新开仓。'
+      :!result.connected ? '请先连接行情。'
       : ((!reconciled||state.recovery) ? (result.external_close_status?.message||'请先点击“持仓对账”，对账通过后才能启动自动开仓。')
       : protectionPending ? '平仓完成前不能启动自动开仓；若有成交待确认，先核对再处理已有敞口。'
       : recovered ? '本次延迟回报已确认，两边已开仓，已有仓位继续按退出规则管理；新开仓保持暂停，核对后可手动启动。'
@@ -516,7 +531,8 @@
       : '纸面模式不会发送真实订单。'));
     const marginNotice=result.connected&&result.auto_values?.mt5_margin_check?.ready===false
       ? '\n'+result.auto_values.mt5_margin_check.message+'。连接已建立；先完成持仓对账，原程序仓位按原规则管理，外部仓位按接管流程登记。启动新开仓时会重新检查。' : '';
-    text('trading-result', `${actionError? actionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${marginNotice}${result.plan?isNative(result)?`\n每组：卖出腿 ${result.plan.lots} 手 / 买入腿 ${result.plan.lots} 手。`:`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError||marginNotice));
+    const visibleActionError=actionError&&!(alarm&&actionError.endsWith(String(alarm)))?actionError:'';
+    text('trading-result', `${visibleActionError? visibleActionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${marginNotice}${result.plan?isNative(result)?`\n每组：卖出腿 ${result.plan.lots} 手 / 买入腿 ${result.plan.lots} 手。`:`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError||marginNotice));
     const auto=result.auto_values||{}, details=[];
     if(auto.fx?.value) {
       if(loaded && el('auto-fx').checked && !dirtyFields.has('usdt-fx')) el('usdt-fx').value=Number(auto.fx.value).toFixed(6);
@@ -870,8 +886,20 @@
   }
   async function connect() {
     await saveBeforeTrading();
-    const r=await request('/api/trading/connect',{api_key:el('trading-api-key').value.trim(),api_secret:el('trading-api-secret').value.trim(),mt5_mcp_token:el('mt5-mcp-token').value.trim()});
-    render(r);await plot();
+    connectionUncertain=false;connectionRequestBusy=true;connectionRequestedAt=Date.now();
+    try {
+      render(await request('/api/trading/connect',{api_key:el('trading-api-key').value.trim(),api_secret:el('trading-api-secret').value.trim(),mt5_mcp_token:el('mt5-mcp-token').value.trim()}));
+    } catch(error) {
+      if(error.requestTimedOut)connectionUncertain=true;
+      await status(false).catch(()=>{});
+      if(error.requestTimedOut) {
+        if(currentConnection(last?.connection_attempt)&&last.connection_attempt.state==='connected'){connectionUncertain=false;return;}
+        if(currentConnection(last?.connection_attempt)&&last.connection_attempt.state==='failed')throw Error(last.connection_attempt.message||'双品种连接失败。');
+        throw Error('页面等待已超时，后台连接结果尚待确认；请等待状态更新。');
+      }
+      throw error;
+    } finally {connectionRequestBusy=false;}
+    await plot();
   }
   async function closeOne(group) { render(await request('/api/trading/close',{group,reason:'用户请求平仓'})); }
   el('trading-connect').onclick=()=>action(connect,'trading-connect','正在检查行情、账户和合约规则…');
@@ -947,6 +975,6 @@
   window.addEventListener('gold-config-ready',updateWorkflow);
   window.addEventListener('gold-busy-changed',updateWorkflow);
   setTimeout(()=>status().then(startStream).catch(error=>text('trading-result',error.message,true)),400);
-  timer=setInterval(()=>{if(!document.hidden&&!busy&&!window.goldPairUiBusy)status().catch(error=>text('trading-result',error.message,true));},3000);
+  timer=setInterval(()=>{if(!document.hidden&&(connectionRequestBusy||!busy&&!window.goldPairUiBusy))status(!connectionRequestBusy).catch(error=>text('trading-result',error.message,true));},3000);
   setInterval(()=>{if(!document.hidden){renderRisk();renderPositionFreshness();}},1000);
 })();

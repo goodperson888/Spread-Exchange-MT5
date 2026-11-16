@@ -476,7 +476,7 @@ class BinanceBookTicker:
 
 class Terminal:
     """Persistent isolated MT5 session; a blocked native call cannot freeze the web UI."""
-    def __init__(self, settings, magic, read_only=False):
+    def __init__(self, settings, magic, read_only=False, timeout_seconds=12):
         if sys.platform != 'win32':
             raise ValueError('真实 MT5 行情及执行需要 Windows 64 位')
         command=[sys.executable,'--mt5-worker'] if getattr(sys,'frozen',False) else [sys.executable,str(Path(__file__).resolve()),'--mt5-worker']
@@ -484,7 +484,7 @@ class Terminal:
             text=True,encoding='utf-8',creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         self.responses=queue.Queue(); self.lock=threading.Lock()
         threading.Thread(target=self._read,daemon=True).start()
-        try: self.call('init',settings=settings,magic=magic,read_only=read_only)
+        try: self.call('init',settings=settings,magic=magic,read_only=read_only,timeout_seconds=timeout_seconds)
         except Exception:
             self.close(); raise
 
@@ -494,11 +494,11 @@ class Terminal:
             except ValueError: pass
         self.responses.put({'ok':False,'error':'MT5 工作进程已退出'})
 
-    def call(self, command, **args):
+    def call(self, command, *, timeout_seconds=12, **args):
         with self.lock:
             if self.process.poll() is not None: raise ValueError('MT5 会话已断开，需要重新连接及对账')
             self.process.stdin.write(json.dumps(dict(command=command,**args))+'\n'); self.process.stdin.flush()
-            try: result=self.responses.get(timeout=12)
+            try: result=self.responses.get(timeout=timeout_seconds)
             except queue.Empty:
                 self.close(); raise ValueError('MT5 请求超时，若涉及下单则成交状态未知，必须对账') from None
             if not result.get('ok'): raise ValueError(result.get('error','MT5 请求失败'))

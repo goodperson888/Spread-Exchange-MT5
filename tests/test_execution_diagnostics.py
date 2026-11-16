@@ -33,6 +33,17 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(report['events'][0]['data'],{'order':'O1','query_ms':15})
         self.assertEqual(len(report['events']),1)
 
+    def test_native_connection_failure_exports_fixed_phase_timings_without_private_error(self):
+        secret='PRIVATE-DO-NOT-EXPORT'
+        report=build_report({'groups':[],'orders':[]},[{'kind':'native_pair_connect','time':123,'data':{
+            'state':'failed','stage':'读取双品种首轮报价','started_ms':10,'elapsed_ms':25000,
+            'message':secret,'account':secret,'timings':[{'stage':'初始化 MT5 执行会话','elapsed_ms':200,'path':secret},
+                {'stage':secret,'elapsed_ms':300}]}}])
+        self.assertNotIn(secret,json.dumps(report))
+        data=report['events'][0]['data']
+        self.assertEqual(data['state'],'failed');self.assertEqual(data['stage'],'读取双品种首轮报价')
+        self.assertEqual(data['timings'],[{'stage':'初始化 MT5 执行会话','elapsed_ms':200}])
+
     def test_group_limit_and_missing_legacy_fields(self):
         report=build_report({'groups':[{'id':str(i)} for i in range(205)],
                              'orders':[{'id':'old','group':'0'},{'id':'new','group':'204'}]},[])

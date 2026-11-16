@@ -180,6 +180,15 @@ def build_report(state, events):
            'group_opening','group_opened','group_closed','exit_signal','exit_deferred','entry_skipped','close_attempt','entry_recovered','opening_fee_verified'}
     for event in events:
         data=event.get('data') or {}
+        if event.get('kind')=='native_pair_connect':
+            stages=('准备连接','初始化 MT5 执行会话','核验卖出品种规格','核验买入品种规格',
+                    '读取账户与交易权限','初始化 MT5 行情会话','读取双品种首轮报价','启用行情与后台观察','双品种行情已连接')
+            clean={**numbers(data,'started_ms elapsed_ms'),'state':choice(data,'state',('connecting','connected','failed'))}
+            if data.get('stage') in stages: clean['stage']=data['stage']
+            clean['timings']=[{'stage':row['stage'],**numbers(row,'elapsed_ms')}
+                              for row in data.get('timings',[])[:10] if isinstance(row,dict) and row.get('stage') in stages]
+            report['events'].append({'kind':event['kind'],**numbers(event,'time'),'data':clean})
+            continue
         if event.get('kind') in ('boot','start','pause','reconciled','paper_reconciled','auto_reconciled_flat','close_requested'):
             row={'kind':event['kind'],**numbers(event,'time'),'data':{}}
             if event['kind']=='pause': row['data'].update(pause_evidence(data))

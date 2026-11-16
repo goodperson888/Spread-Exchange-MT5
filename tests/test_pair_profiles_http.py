@@ -16,7 +16,8 @@ class PairProfilesHttpTests(unittest.TestCase):
     def setUp(self):
         test_connection.HttpTests.setUp(self)
         self.runtime=NS(lock=threading.RLock(),engine=NS(state={'enabled':False,'recovery':False},active=Mock(return_value=[])),
-                        _disconnect_pair_resources=Mock(),config=None,plan=None,quote=None,position_report=None,adoption_preview=None)
+                        _disconnect_pair_resources=Mock(),_native_connection_pending=Mock(return_value=False),
+                        config=None,plan=None,quote=None,position_report=None,adoption_preview=None)
         self.runtime_patch=patch.object(server,'TRADING',self.runtime);self.runtime_patch.start()
 
     def tearDown(self):
@@ -58,6 +59,13 @@ class PairProfilesHttpTests(unittest.TestCase):
         code,result=self.save(id=profile['id']);self.assertEqual(code,200,result)
         edited=next(p for p in result['profiles'] if p['id']==profile['id'])
         for key in ('strategy','execution','costs'):self.assertEqual(edited[key],profile[key])
+
+    def test_connecting_pair_blocks_activation_without_disconnecting_or_writing_config(self):
+        _,result=self.save();selected=next(p['id'] for p in result['profiles'] if p['id']!='legacy')
+        original=server.load_config();self.runtime._native_connection_pending.return_value=True
+        code,result=self.request('/api/pairs/activate',{'id':selected})
+        self.assertEqual(code,400);self.assertIn('仍在连接',result['error'])
+        self.assertEqual(server.load_config(),original);self.runtime._disconnect_pair_resources.assert_not_called()
 
     def test_validation_failure_keeps_config_and_saved_presets(self):
         _,result=self.save();selected=next(p for p in result['profiles'] if p['id']!='legacy')

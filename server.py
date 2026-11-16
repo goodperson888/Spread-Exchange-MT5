@@ -168,6 +168,8 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             raise ValueError('实盘连接需要币安 API Key 和 Secret Key；请先保存本机连接配置')
         
         with self.lock:
+            if self._native_connection_pending():
+                raise ValueError('双品种行情仍在连接，请等待当前检查完成')
             if self.engine.state.get('enabled'):
                 raise ValueError('自动开仓运行中，请先暂停新开仓，再保存并重新连接；已有仓位继续按原规则管理')
             new_key = pair_key(config)
@@ -851,6 +853,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
     def start(self, current_config=None):
         if self.config and native_pair(self.config): return self._native_start(current_config)
         with self.lock:
+            if self._native_connection_pending(): raise ValueError('双品种行情仍在连接，暂不能启动新开仓')
             if not self.connected:
                 raise ValueError('请先连接并完成双边规格校验')
             if current_config is not None:
@@ -1205,6 +1208,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
                     if not unverified:group['valuation'] = self.engine.valuation(group, quote)
             return {
                 'connected': self.connected, 'last_error': self.last_error,
+                'connection_attempt': self._connection_status(),
                 'pair':pair_info(self.config or saved_config),
                 'quote': quote, 'plan': self.plan,
                 'state': st, 'events': self.store.events(),
@@ -1650,6 +1654,7 @@ class Handler(BaseHTTPRequestHandler):
                             rows=[x for x in rows if x['id']!=profile['id']]+[profile]
                         if not profile: raise ValueError('组合不存在，请刷新后重试')
                         if path=='/api/pairs/activate' or profile['id']==active:
+                            if TRADING._native_connection_pending(): raise ValueError('双品种行情仍在连接，请完成后再修改或切换组合')
                             if TRADING.engine.state.get('enabled') or TRADING.engine.active() or TRADING.engine.state.get('recovery'):
                                 raise ValueError('已有运行任务、未平组或待确认订单，当前组合继续管理；请先完成处理再切换')
                             replacement=pair_profiles.activate(config,profile)
@@ -1660,6 +1665,7 @@ class Handler(BaseHTTPRequestHandler):
                             TRADING.config=None;TRADING.plan=None;TRADING.quote=None;TRADING.position_report=None
                             TRADING.adoption_preview=None
                             TRADING.market_meta={};TRADING.external_close_status=None;TRADING.last_error=''
+                            TRADING.connection_attempt=None
                             LAST_PROBE=None
                     atomic_write_json(DATA/'combinations.json',dict(profiles=rows))
                     result=pair_profiles.catalogue(load_config(),dict(profiles=rows))

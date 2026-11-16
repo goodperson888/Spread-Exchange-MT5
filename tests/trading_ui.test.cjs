@@ -80,7 +80,7 @@ function pageFixture(reconcileFails = false, handlers = {}) {
   });
   return {el, calls, charts, streams, doc, listeners,windowListeners,
     async refresh(){for(const interval of intervals)if(interval.ms===3000)await interval.fn();await flushUI();},
-    ageRisk(ms){testNow+=ms;for(const interval of intervals)if(interval.ms===1000)interval.fn();}};
+    now:()=>testNow,ageRisk(ms){testNow+=ms;for(const interval of intervals)if(interval.ms===1000)interval.fn();}};
 }
 
 test('risk cards show both platforms and expire even when status polling stops',async()=>{
@@ -896,4 +896,73 @@ test('closed group reason hint shows trigger profit separately from final result
  const html=f.el('groups').innerHTML;
  assert.match(html,/data-record-hint="[^"]*原因：逐组止盈[^"]*触发时[^"]*预估净收益/);
  assert.match(html,/实际成交与费用可能改变最终结果/);
+});
+
+
+test('native connection phase stays visible while connect request is in flight',async()=>{
+ let finish;
+ const snapshot={connected:false,connection_attempt:{state:'connecting',stage:'读取双品种首轮报价',elapsed_ms:12000},
+   state:{enabled:false,groups:[],orders:[],alarm:''},capabilities:{mode:'live',reconciled:false}};
+ const f=pageFixture(false,{'/api/trading/connect':()=>new Promise(resolve=>{finish=resolve;}),'/api/trading/status':()=>snapshot});
+ const pending=f.el('trading-connect').onclick();await flushUI();await f.refresh();
+ assert.match(f.el('trading-result').textContent,/正在连接：读取双品种首轮报价.*12.0 秒/);
+ assert.match(f.el('new-entry-status').textContent,/等待连接完成/);
+ assert.equal(f.el('trading-toggle').disabled,true);
+ finish({...snapshot,connected:true,connection_attempt:{state:'connected'},state:{enabled:false,groups:[],orders:[]}});
+ await pending;
+ assert.match(f.el('trading-result').textContent,/等待持仓对账/);
+});
+
+test('connect timeout refreshes final backend outcome and does not claim a failed connection',async()=>{
+ const f=pageFixture(false,{
+   '/api/trading/connect':()=>{throw Object.assign(Error('aborted'),{name:'AbortError'});},
+   '/api/trading/status':()=>({connected:true,connection_attempt:{state:'connected',started_ms:f.now()},state:{enabled:false,groups:[],orders:[]},capabilities:{mode:'live',reconciled:false}})
+ });
+ await f.el('trading-connect').onclick();
+ assert.match(f.el('trading-result').textContent,/已连接，等待持仓对账/);
+ assert.doesNotMatch(f.el('trading-result').textContent,/本次操作未完成|超过 30 秒/);
+ assert.equal(f.el('trading-reconcile').disabled,false);
+});
+
+test('timed out native connection remains pending then clears timeout after backend completion',async()=>{
+ const snapshot={connected:false,connection_attempt:{state:'connecting',stage:'初始化 MT5 行情会话',elapsed_ms:23000},state:{groups:[],orders:[]}};
+ const f=pageFixture(false,{
+   '/api/trading/connect':()=>{throw Object.assign(Error('aborted'),{name:'AbortError'});},
+   '/api/trading/status':()=>snapshot
+ });
+ await f.el('trading-connect').onclick();
+ assert.match(f.el('trading-result').textContent,/后台连接结果尚待确认/);
+ assert.equal(f.el('trading-connect').disabled,true);assert.equal(f.el('trading-toggle').disabled,true);
+ snapshot.connected=true;snapshot.connection_attempt={state:'connected',started_ms:f.now()};
+ await f.refresh();
+ assert.doesNotMatch(f.el('trading-result').textContent,/本次操作未完成|超时/);
+ assert.equal(f.el('trading-connect').disabled,false);
+});
+
+test('failed native first quote shows phase and suppresses stale connected alarm',async()=>{
+ const snapshot={connected:false,connection_attempt:{state:'failed',message:'双品种连接失败（读取双品种首轮报价）：MT5 请求超时'},
+   state:{enabled:false,groups:[],orders:[],alarm:'双品种已连接；启动新开仓前请核对持仓'}};
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,'/api/trading/connect':()=>{throw Error(snapshot.connection_attempt.message);}});
+ await f.el('trading-connect').onclick();await f.refresh();
+ assert.match(f.el('trading-result').textContent,/未连接，不能开仓.*读取双品种首轮报价/);
+ assert.equal(f.el('trading-result').textContent.split('读取双品种首轮报价').length,2);
+ assert.doesNotMatch(f.el('trading-result').textContent,/双品种已连接/);
+ assert.equal(f.el('trading-toggle').disabled,true);
+ delete snapshot.connection_attempt;await f.refresh();
+ assert.doesNotMatch(f.el('trading-result').textContent,/双品种已连接/);
+});
+
+
+test('connect timeout never treats the previous successful attempt as this request success',async()=>{
+ const snapshot={connected:true,connection_attempt:{state:'connected',started_ms:1},state:{groups:[],orders:[]}};
+ const f=pageFixture(false,{
+   '/api/trading/connect':()=>{throw Object.assign(Error('aborted'),{name:'AbortError'});},
+   '/api/trading/status':()=>snapshot
+ });
+ await f.el('trading-connect').onclick();
+ assert.match(f.el('trading-result').textContent,/后台连接结果尚待确认/);
+ snapshot.connection_attempt={state:'failed',started_ms:f.now(),message:'双品种连接失败（读取账户与交易权限）：读取超时'};
+ await f.refresh();
+ assert.match(f.el('trading-result').textContent,/读取账户与交易权限/);
+ assert.doesNotMatch(f.el('trading-result').textContent,/后台连接结果尚待确认/);
 });

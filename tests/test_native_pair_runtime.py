@@ -190,4 +190,122 @@ class NativePairRuntimeTests(unittest.TestCase):
         self.assertEqual(q['pair']['type'],'mt5_mt5')
 
 
+class NativePairConnectionTests(unittest.TestCase):
+    def setUp(self):
+        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
+        self.store=Store(Path(tmp.name)/'connect.db');self.addCleanup(self.store.close)
+        r=self.r=TradingRuntime.__new__(TradingRuntime)
+        r.lock=threading.RLock();r.store=self.store;r.engine=Engine(self.store,PaperBroker())
+        r.connected=False;r.reconciled=False;r.config=None;r.quote=None;r.plan=None;r.last_error=''
+        for key in ('terminal','pump','maintenance','external_monitor','market_stream','entry_preflight','risk_monitor',
+                    'push_bridge','binance','position_report','adoption_preview','external_close_status'):
+            setattr(r,key,None)
+        r.market_meta={};r.stop_event=threading.Event();r.market_wake=threading.Event()
+        r.mt5_freshness=TickFreshness();r.quote_events=QuoteEvents();r.latency=LatencyStats()
+        r._restore_push_bridge=Mock()
+        self.c=native_config();self.c['strategy']['mt5_lots']=.01;self.c['execution']['mode']='live'
+        self.created=[];self.commands=[];self.clock=0
+        self.factory=self.patch('native_pair.Terminal',side_effect=self.make_terminal)
+        self.patch('native_pair.NativePairPump.start')
+        self.patch('native_pair.NativePairObserver.start')
+        self.patch('server.load_config',return_value=self.c)
+        self.addCleanup(r._disconnect_pair_resources)
+
+    def patch(self,name,**kw):
+        p=patch(name,**kw);result=p.start();self.addCleanup(p.stop);return result
+
+    def make_terminal(self,*args,**kw):
+        terminal=Mock();terminal.call.side_effect=self.call;self.created.append(terminal);return terminal
+
+    def call(self,command,**kw):
+        self.commands.append((command,kw))
+        if command=='pair_spec':return next(s for s in specs().values() if s['name']==kw['symbol'])
+        if command=='snapshot':return dict(account=dict(currency='USD',margin_mode=2),allowed=True,positions=[],orders=[])
+        if command=='pair_quotes':return {s['name']:dict(bid=100,ask=101,time_ms=self.clock+1000) for s in specs().values()}
+        raise AssertionError('Unexpected native operation: '+command)
+
+    def test_pending_quote_keeps_status_responsive_and_blocks_start_or_duplicate_connect(self):
+        entered=threading.Event();release=threading.Event();result=[];errors=[];original=self.call
+        def call(command,**kw):
+            if command=='pair_quotes':
+                entered.set()
+                if not release.wait(3):raise ValueError('test quote timed out')
+            return original(command,**kw)
+        self.call=call
+        def connect():
+            try:result.append(self.r._native_connect(self.c))
+            except Exception as exc:errors.append(exc)
+        t=threading.Thread(target=connect);t.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            read=[];reader=threading.Thread(target=lambda:read.append(self.r.snapshot()));reader.start();reader.join(.5)
+            self.assertFalse(reader.is_alive(),'status must not wait for native quote retrieval')
+            self.assertFalse(read[0]['connected'])
+            self.assertEqual(read[0]['connection_attempt']['stage'],'读取双品种首轮报价')
+            self.assertNotIn('双品种已连接',read[0]['state']['alarm'])
+            with self.assertRaisesRegex(ValueError,'仍在连接'):self.r._native_connect(self.c)
+            with self.assertRaisesRegex(ValueError,'仍在连接'):self.r.start(self.c)
+        finally:release.set();t.join(3)
+        self.assertFalse(errors);self.assertTrue(result[0]['connected']);self.assertFalse(result[0]['capabilities']['reconciled'])
+        self.assertEqual(result[0]['connection_attempt']['state'],'connected')
+        self.assertEqual([x[0] for x in self.commands],['pair_spec','pair_spec','snapshot','pair_quotes'])
+        self.assertFalse(self.r.engine.state['enabled'])
+
+    def test_first_quote_failure_releases_both_workers_and_keeps_truthful_status(self):
+        original=self.call
+        def call(command,**kw):
+            if command=='pair_quotes':raise ValueError('quote timeout')
+            return original(command,**kw)
+        self.call=call
+        with self.assertRaisesRegex(ValueError,'读取双品种首轮报价.*quote timeout'):self.r._native_connect(self.c)
+        status=self.r.snapshot()
+        self.assertFalse(status['connected']);self.assertEqual(status['connection_attempt']['state'],'failed')
+        self.assertNotIn('双品种已连接',status['state']['alarm'])
+        self.assertTrue(all(t.close.called for t in self.created));self.assertIsNone(self.r.pump)
+        self.call=original
+        self.assertTrue(self.r._native_connect(self.c)['connected'])
+
+    def test_failed_replacement_keeps_existing_owned_position_management(self):
+        old_terminal=Mock();old_pump=Mock();old_broker=self.r.engine.broker
+        self.r.terminal=old_terminal;self.r.pump=old_pump;self.r.config=copy.deepcopy(self.c);self.r.connected=True
+        self.call=lambda command,**kw:(_ for _ in ()).throw(ValueError('spec unavailable'))
+        with self.assertRaisesRegex(ValueError,'核验卖出品种规格'):self.r._native_connect(self.c)
+        self.assertTrue(self.r.connected);self.assertIs(self.r.terminal,old_terminal);self.assertIs(self.r.pump,old_pump)
+        self.assertIs(self.r.engine.broker,old_broker);old_terminal.close.assert_not_called();old_pump.close.assert_not_called()
+        self.created[0].close.assert_called_once()
+
+    def test_initialization_calls_share_budget_without_changing_order_timeouts(self):
+        original=self.call
+        def make(*args,**kw):
+            self.clock+=9;return self.make_terminal(*args,**kw)
+        def call(command,**kw):
+            self.clock+=9;return original(command,**kw)
+        self.factory.side_effect=make;self.call=call
+        self.patch('native_pair.time',new=NS(monotonic=lambda:self.clock))
+        with self.assertRaisesRegex(ValueError,'读取账户与交易权限.*25 秒'):self.r._native_connect(self.c)
+        self.assertEqual(len(self.created),1);self.created[0].close.assert_called_once()
+        self.assertEqual([kw['timeout_seconds'] for _,kw in self.commands],[12,7])
+        self.assertEqual(self.r.connection_attempt['elapsed_ms'],27000)
+        self.assertFalse(self.r.connected)
+
+    def test_failure_during_publish_does_not_leave_success_alarm_or_workers(self):
+        with patch.object(self.store,'sample',side_effect=ValueError('disk unavailable')):
+            with self.assertRaisesRegex(ValueError,'启用行情与后台观察'):self.r._native_connect(self.c)
+        self.assertFalse(self.r.connected);self.assertEqual(self.r.connection_attempt['state'],'failed')
+        self.assertNotIn('双品种已连接',self.r.engine.state['alarm'])
+        self.assertTrue(all(t.close.called for t in self.created));self.assertIsNone(self.r.pump)
+
+    def test_prepared_quote_reader_is_closed_if_bridge_setup_fails_before_install(self):
+        self.r._restore_push_bridge.side_effect=ValueError('bridge unavailable')
+        with self.assertRaisesRegex(ValueError,'启用行情与后台观察'):self.r._native_connect(self.c)
+        self.assertTrue(all(t.close.called for t in self.created));self.assertFalse(self.r.connected)
+
+    def test_owned_group_contracts_are_checked_again_before_replacing_runtime(self):
+        from trading_config import pair_key
+        self.r.engine.active=Mock(side_effect=[[],[dict(key=pair_key(self.c),leg_contracts={'binance':1,'mt5':1})]])
+        with self.assertRaisesRegex(ValueError,'合约大小不符'):self.r._native_connect(self.c)
+        self.assertTrue(all(t.close.called for t in self.created));self.assertFalse(self.r.connected)
+        self.assertIsNone(self.r.pump)
+
+
 if __name__=='__main__':unittest.main()
