@@ -129,7 +129,19 @@
         net_before_rebate:before,net:before+rebateBinance+rebateMt5}};
     });
   }
-  const api={QuoteBuffer,ChartBuffer,renderPoints,chartSeries,sameChartMarket,markGroups};
+  function referenceSeries(reference,localRows,since) {
+    const interval=Number(reference?.interval_ms);
+    if(!Number.isFinite(interval)||interval<=0)return [];
+    const covered=new Set(localRows.filter(q=>q.valid!==false).map(q=>Math.floor(q.time_ms/interval)));
+    const rows=(reference.samples||[]).filter(q=>q.time_ms>=since&&Number.isFinite(q.spread)&&!covered.has(Math.floor(q.time_ms/interval))).sort((a,b)=>a.time_ms-b.time_ms);
+    const lines=[];let previous=null;
+    for(const row of rows){
+      if(previous!==null&&row.time_ms-previous>interval*1.5)lines.push([previous+interval,null]);
+      lines.push([row.time_ms,row.spread]);previous=row.time_ms;
+    }
+    return lines;
+  }
+  const api={QuoteBuffer,ChartBuffer,renderPoints,chartSeries,referenceSeries,sameChartMarket,markGroups};
   if(typeof module!=='undefined')module.exports=api;
   else root.GoldPairQuotes=api;
 })(typeof window!=='undefined'?window:globalThis);

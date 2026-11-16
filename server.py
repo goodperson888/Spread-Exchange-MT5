@@ -34,6 +34,7 @@ from runtime_maintenance import MaintenanceMonitor
 from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
 from execution_diagnostics import export_report
+from chart_reference import ReferenceHistory
 import position_adoption
 import exit_rules
 import external_closes
@@ -111,6 +112,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
         self.connected = False
         self.reconciled = False
         self.last_error = ''
+        self.reference_history=ReferenceHistory(DATA/'chart-reference')
         self.market_meta = {}
         self.quote_events = QuoteEvents()
         self.mt5_freshness = TickFreshness()
@@ -138,6 +140,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
 
     def close(self):
         self.stop_event.set()
+        if getattr(self,'reference_history',None): self.reference_history.close()
         self.market_wake.set()
         if self.maintenance: self.maintenance.close()
         if self.external_monitor: self.external_monitor.close()
@@ -1256,6 +1259,15 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             key = pair_key(config) if config else ''
         return self.store.read_samples(key, since)
 
+    def chart_reference(self,minutes,samples,enabled=True):
+        if not enabled:
+            self.reference_history.suspend()
+            return {'state':'disabled','samples':[],'message':'历史参考补取已关闭。'}
+        with self.lock:
+            config=copy.deepcopy(self.config or load_config())
+            connected=self.connected
+        return self.reference_history.request(config,minutes,samples,connected=connected)
+
 
 TRADING = TradingRuntime()
 
@@ -1644,7 +1656,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self.send_json({'ok': False, 'error': 'minutes 参数无效'}, 400)
                 return
-            self.send_json({'ok': True, 'samples': TRADING.chart(now_ms() - minutes * 60000)})
+            samples=TRADING.chart(now_ms() - minutes * 60000)
+            reference=TRADING.chart_reference(minutes,samples,enabled='reference=0' not in query.split('&'))
+            self.send_json({'ok': True, 'samples': samples,'reference':reference})
             return
         self.send_json({"ok": False, "error": "未找到"}, 404)
 

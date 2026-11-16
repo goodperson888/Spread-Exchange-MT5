@@ -1,7 +1,15 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {QuoteBuffer,ChartBuffer,renderPoints,chartSeries,sameChartMarket,markGroups}=require('../quote-stream.js');
+const {QuoteBuffer,ChartBuffer,renderPoints,chartSeries,referenceSeries,sameChartMarket,markGroups}=require('../quote-stream.js');
 const q=(t,entry=1,key='a')=>({time_ms:t,entry,exit:entry+.2,key});
+test('reference lines preserve gaps, yield to local quotes and never change executable samples',()=>{
+ const reference={interval_ms:60000,samples:[{time_ms:60000,spread:10},{time_ms:120000,spread:11},{time_ms:240000,spread:12}]};
+ const local=[q(120100,2)],before=JSON.stringify(local);
+ assert.deepEqual(referenceSeries(reference,local,0),[[60000,10],[120000,null],[240000,12]]);
+ assert.equal(JSON.stringify(local),before);
+ assert.deepEqual(referenceSeries(reference,[{...local[0],valid:false}],100000),[[120000,11],[180000,null],[240000,12]]);
+ assert.deepEqual(referenceSeries(null,local,0),[]);
+});
 test('same terminal pair chart keeps identity and both symbols isolated on relocation',()=>{
  const key='mt5_mt5|live|native|C:/old.exe|123|broker|GOLD-FUT|GOLD-SPOT|42|p1';
  assert.equal(sameChartMarket(key,key.replace('C:/old.exe','D:/new.exe')),true);

@@ -318,3 +318,15 @@ test('editing while save-and-connect is in flight prevents connecting with old i
   assert.equal(f.calls.some(x=>x.url==='/api/trading/connect'),false);
   assert.match(f.el('trading-result').textContent,/保存期间参数又有修改/);
 });
+
+test('chart reference checkbox never dirties, drafts or saves trading configuration',async()=>{
+ const f=await fixture();
+ const before=f.run('revision'),configBefore=JSON.stringify(f.run('formConfig()'));
+ f.el('chart-reference-enabled').checked=false;
+ for(const changed of f.el('chart-reference-enabled').listeners.change||[])changed();
+ assert.equal(f.run('revision'),before);
+ assert.equal(f.run('dirtyFields.size'),0);
+ assert.equal(JSON.stringify(f.run('formConfig()')),configBefore);
+ assert.equal(f.calls.filter(c=>c.url==='/api/config'&&c.body!==undefined).length,0);
+ assert.equal(f.run('editableField("chart-reference-enabled")'),false);
+});

@@ -76,3 +76,5 @@ section[aria-labelledby=plan-heading]>.grid{grid-template-columns:1fr}
 
 .rebate-note{grid-column:1/-1;margin:0}
 @media(min-width:1100px){#pnl-stats{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}}
+
+.reference-control{display:flex;flex-direction:row;align-items:center;gap:8px;min-height:40px;white-space:nowrap}.reference-control input{width:18px;height:18px;margin:0;accent-color:#8063a8}.reference-stats{color:#665184;font-variant-numeric:tabular-nums}.reference-stats:empty{display:none}

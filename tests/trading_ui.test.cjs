@@ -966,3 +966,57 @@ test('connect timeout never treats the previous successful attempt as this reque
  assert.match(f.el('trading-result').textContent,/读取账户与交易权限/);
  assert.doesNotMatch(f.el('trading-result').textContent,/后台连接结果尚待确认/);
 });
+
+test('historical reference stays separate from executable prices and order decisions',async()=>{
+ const now=Date.now();
+ const reference={state:'ready',period:'M5',interval_ms:300000,source:'MT5 双品种收盘价',
+  samples:[{time_ms:now-600000,spread:500}],coverage_start:now-600000,coverage_end:now-300000,
+  stats:{count:1,minimum:500,maximum:500,median:500,p10:500,p90:500}};
+ const f=pageFixture(false,{'/api/trading/chart?minutes=10080':()=>({samples:[],reference})});
+ f.el('chart-window').value='10080';await f.el('chart-window').onchange();
+ const chart=f.charts.at(-1);
+ assert.equal(chart.series.find(s=>s.id==='reference').data[0][1],500);
+ assert.equal(chart.series.find(s=>s.id==='entry').data.length,0);
+ assert.equal(chart.series.find(s=>s.id==='exit').data.length,0);
+ assert.ok(!f.el('spread-stats').innerHTML.includes('500'));
+ assert.match(f.el('chart-reference-stats').textContent,/历史收盘参考区间.*500/);
+ assert.match(f.el('chart-reference-status').textContent,/MT5 双品种收盘价/);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+test('pending reference fetch refreshes until ready and errors do not pause execution',async()=>{
+ let loading=true;
+ const f=pageFixture(false,{'/api/trading/chart?minutes=1440':()=>({samples:[],reference:loading?
+  {state:'loading',message:'正在后台补取平台历史',samples:[]}:
+  {state:'error',message:'历史时基尚未确认',samples:[]}})});
+ f.el('chart-window').value='1440';await f.refresh();
+ assert.match(f.el('chart-reference-status').textContent,/后台补取/);
+ f.listeners.visibilitychange();await flushUI();f.streams.at(-1).onopen();
+ loading=false;await f.refresh();
+ assert.match(f.el('chart-reference-status').textContent,/历史时基尚未确认/);
+ const reads=f.calls.filter(c=>c.url.includes('chart?')).length;
+ await f.refresh();assert.equal(f.calls.filter(c=>c.url.includes('chart?')).length,reads);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+test('disabling history reference clears the line without changing trading state',async()=>{
+ const f=pageFixture(false,{'/api/trading/chart?minutes=60&reference=0':()=>({samples:[],reference:{state:'disabled',message:'已关闭',samples:[]}})});
+ f.el('chart-window').value='60';f.el('chart-reference-enabled').checked=false;
+ await f.el('chart-reference-enabled').onchange();
+ assert.match(f.el('chart-reference-status').textContent,/已关闭/);
+ assert.equal(f.charts.at(-1).series.find(s=>s.id==='reference').data.length,0);
+ assert.equal(f.calls.at(-1).url,'/api/trading/chart?minutes=60&reference=0');
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+test('late reference result cannot overwrite a newly selected observation window',async()=>{
+ let finish;
+ const f=pageFixture(false,{
+  '/api/trading/chart?minutes=10080':()=>new Promise(r=>{finish=r;}),
+  '/api/trading/chart?minutes=60':()=>({samples:[],reference:{state:'ready',message:'新窗口',samples:[]}})});
+ f.el('chart-window').value='10080';const old=f.el('chart-window').onchange();
+ f.el('chart-window').value='60';await f.el('chart-window').onchange();
+ finish({samples:[],reference:{state:'ready',message:'旧窗口',samples:[]}});await old;
+ assert.match(f.el('chart-reference-status').textContent,/新窗口/);
+ assert.equal(f.charts.at(-1).xAxis.max-f.charts.at(-1).xAxis.min,3600000);
+});

@@ -84,7 +84,7 @@ function formConfig() {
 }
 function editableField(id) {
   const input=$(id);
-  return input && !input.readOnly && !SECRET_IDS.has(id) && id!=='chart-window' && id!=='record-pair-filter' &&
+  return input && !input.readOnly && !SECRET_IDS.has(id) && !id.startsWith('chart-') && id!=='record-pair-filter' &&
     !id.startsWith('pair-') && !id.startsWith('exit-rule-') && !id.startsWith('adoption-') &&
     ['INPUT','SELECT'].includes(input.tagName);
 }
@@ -509,7 +509,7 @@ $('paper-step').onclick = () => action('paper-step', async () => {
 });
 for(const input of document.querySelectorAll('input:not([readonly]), select')) {
   const changed=()=>{
-    if(input.id==='chart-window'||input.id==='record-pair-filter'||input.id.startsWith('pair-')||input.id.startsWith('adoption-')||input.id.startsWith('exit-rule-')) return;
+    if(input.id.startsWith('chart-')||input.id==='record-pair-filter'||input.id.startsWith('pair-')||input.id.startsWith('adoption-')||input.id.startsWith('exit-rule-')) return;
     revision++;
     if(SECRET_IDS.has(input.id)) {
       credentialsDirty=true; dirtySecrets.add(input.id);

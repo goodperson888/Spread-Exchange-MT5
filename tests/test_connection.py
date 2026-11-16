@@ -265,6 +265,19 @@ class HttpTests(unittest.TestCase):
         self.assertIn('数据所在磁盘空间不足',body['error'])
         self.assertIn('不要删除数据库',body['error'])
 
+    def test_chart_reference_is_separate_and_can_be_disabled_without_trading_action(self):
+        with patch.object(server,'TRADING') as runtime:
+            runtime.chart.return_value=[{'time_ms':123,'entry':1,'exit':2}]
+            runtime.chart_reference.return_value={'state':'loading','samples':[]}
+            code,body=self.request('/api/trading/chart?minutes=43200')
+            self.assertEqual(code,200)
+            self.assertEqual(body['samples'][0]['entry'],1)
+            self.assertEqual(body['reference']['state'],'loading')
+            runtime.chart_reference.assert_called_with(43200,runtime.chart.return_value,enabled=True)
+            self.request('/api/trading/chart?minutes=60&reference=0')
+            runtime.chart_reference.assert_called_with(60,runtime.chart.return_value,enabled=False)
+            runtime.start.assert_not_called();runtime.pause.assert_not_called()
+
     def test_usd_base_gold_cfd_check_apply_and_quantity_plan(self):
         self.request('/api/config', {'mt5':{'adapter':'native', 'symbol':'xauusdm'},
                                     'strategy':{'mt5_lots':.01}})
