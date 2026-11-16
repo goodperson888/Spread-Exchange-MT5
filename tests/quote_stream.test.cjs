@@ -169,3 +169,15 @@ test('USDT futures PnL projection converts price differences, never contract not
  delete legacy.valuation.binance_pnl_usdt;delete legacy.valuation.mt5_pnl_usd;
  assert.equal(markGroups([legacy],basis,latest)[0].valuation.gross,1);
 });
+
+
+test('reverse MT5 profit projection uses A bid and B ask with their own multipliers',()=>{
+ const basis={key:'a',time_ms:1000,binance:{bid:90,ask:90.1},mt5:{bid:99.9,ask:100}};
+ const latest={...basis,time_ms:1100,binance:{bid:93,ask:94},mt5:{bid:97,ask:98}};
+ const group={key:'a',status:'open',pair:{type:'mt5_mt5'},direction:'reverse',costs:{},leg_contracts:{binance:100,mt5:10},
+   valuation:{gross:0,net_before_rebate:-.1,net:-.08,binance_pnl_usdt:0,mt5_pnl_usd:0,remaining:{binance:.01,mt5:.01}}};
+ const v=markGroups([group],basis,latest)[0].valuation;
+ assert.ok(Math.abs(v.gross-3.2)<1e-8);assert.ok(Math.abs(v.net-3.12)<1e-8);
+ assert.ok(Math.abs(v.binance_pnl_usdt-3)<1e-8);assert.ok(Math.abs(v.mt5_pnl_usd-.2)<1e-8);
+ assert.equal(group.valuation.gross,0);
+});

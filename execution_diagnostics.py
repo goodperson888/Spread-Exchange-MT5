@@ -78,7 +78,7 @@ def build_report(state, events):
         if margin.get('phase') in ('connect','start'): clean['phase']=margin['phase']
         report['runtime']['entry_margin']=clean
     report['notes'].extend([
-        'pair.type=mt5_mt5 表示同一 MT5 的相同手数组合；兼容字段 leg=binance 在此类组中代表 MT5 卖出腿，leg=mt5 代表 MT5 买入腿。quantity_unit=lot 时 requested/qty/remaining 均为手数，leg_contracts 为各自每手合约大小；platform=mt5，native_position_side=1 为空头、0 为多头。价差使用原始同报价单位价格相减，盈亏各乘各自合约大小。并发适配器调用不代表同一 MT5 终端能并发撮合。',
+        'pair.type=mt5_mt5 表示同一 MT5 的相同手数组合；兼容字段 leg=binance 在此类组中代表 MT5 品种 A，leg=mt5 代表 MT5 品种 B；direction=forward 为卖 A 买 B，reverse 为买 A 卖 B，旧组缺失时为 forward。执行价差按实际卖出腿−买入腿归一化，反向组为 B−A，图表统一显示 A−B；parameters.exit_spread_usd 和 exit_decision.target_spread 仍为配置的 A−B 绝对阈值。quantity_unit=lot 时 requested/qty/remaining 均为手数，leg_contracts 为各自每手合约大小；platform=mt5，native_position_side=1 为空头、0 为多头。价差使用原始同报价单位价格相减，盈亏各乘各自合约大小。并发适配器调用不代表同一 MT5 终端能并发撮合。',
         'result.close_cause为已确认外部成交的固定原因证据：MT5保留原reason数字码，6表示Stop Out；币安仅将已签名LIQUIDATION强平订单与原成交编号、方向、数量、均价精确匹配后标记强平。liquidation_protection_armed仅表示已安排保护性平仓，不证明已经双平；liquidation_recovery记录本机发现/安排时间和当时剩余数量。缺失原因不等于手动平仓，平台原始时间不用于推算本机耗时。',
         'quote_source=cache表示下单前使用后台缓存报价，refresh表示走原同步报价读取路径；不是纯网络耗时。开仓第二腿缓存需两边本机接收时间均在250毫秒内，同时满足用户配置的更严格行情时效和时差限制；缓存不足仍走原查询，不放宽开仓敞口时限。',
         'pnl_schema_version=2将币安线性合约价差盈亏先以USDT计算后换汇；已平仓的换算汇率固定，不对开平两笔名义本金分别换汇。旧记录的价差变化不能直接当作净收益。',
@@ -110,10 +110,13 @@ def build_report(state, events):
         if g.get('reason'): row.update(safe_reason(g))
         if g.get('pair',{}).get('type') in ('mt5_mt5','exchange_mt5'):
             row['pair']={'type':g['pair']['type']}
+            if g['pair']['type']=='mt5_mt5': row['direction']=g.get('direction','forward') if g.get('direction','forward') in ('forward','reverse') else 'unknown'
         if g.get('quantity_unit')=='lot':
             row['quantity_unit']='lot';row['leg_contracts']=numbers(g.get('leg_contracts',{}),'binance mt5')
-        row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
+        row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd entry_lower_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
+        if g.get('parameters',{}).get('direction_mode') in ('auto','forward','reverse'):
+            row['parameters']['direction_mode']=g['parameters']['direction_mode']
         row.update(numbers(g,'exit_rules_revision'))
         if isinstance(g.get('liquidation_recovery'),dict):
             row['liquidation_recovery']=numbers(g['liquidation_recovery'],'detected_ms armed_ms remaining_mt5 remaining_binance')

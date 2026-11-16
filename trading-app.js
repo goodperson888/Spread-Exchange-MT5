@@ -16,7 +16,9 @@
   const date = t => t ? new Date(t).toLocaleTimeString() : '—';
   const dateTime = t => t ? new Date(t).toLocaleString('zh-CN') : '—';
   const isNative=g=>g?.pair?.type==='mt5_mt5';
-  const legLabel=(g,leg)=>isNative(g)?(leg==='binance'?'MT5 卖出腿':'MT5 买入腿'):(leg==='binance'?'币安':'MT5');
+  const reverse=g=>isNative(g)&&g.direction==='reverse';
+  const canonical=(g,value)=>reverse(g)?-value:value;
+  const legLabel=(g,leg)=>isNative(g)?(leg==='binance'?'MT5 品种 A':'MT5 品种 B'):(leg==='binance'?'币安':'MT5');
   const recordSelection=g=>!el('record-pair-filter')?.value||el('record-pair-filter').value==='all'||(g.pair?.id||'legacy')===el('record-pair-filter').value;
   const usd = x => Number.isFinite(Number(x)) ? `${Number(x)>=0?'+':''}${Number(x).toFixed(2)} USD` : '—';
   const escape = value => String(value ?? '').replace(/[&<>'"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
@@ -177,7 +179,7 @@
           if(pendingQuotes.length>30000)pendingQuotes=pendingQuotes.slice(-30000);
           const q=latestLive,age=x=>Math.max(0,Date.now()-(x?.observed_ms||x?.time_ms||0)),sourceTime=x=>x?.source_time_ms||x?.time_ms||0;
           const sourceGap=Math.abs(sourceTime(q.mt5)-sourceTime(q.binance));
-          el('quote-latency').textContent=`${legLabel(q,'mt5')} ${q.mt5_transport||'行情'} · ${legLabel(q,'binance')} ${q.binance_transport||'行情'} · 报价年龄：买入腿 ${age(q.mt5)} ms / 卖出腿 ${age(q.binance)} ms · 本机收到时间差 ${Math.abs((q.mt5?.observed_ms||0)-(q.binance?.observed_ms||0))} ms · 原始时间差 ${sourceGap>=60000?'约 '+n(sourceGap/60000)+' 分钟（不代表传输延迟）':sourceGap+' ms'}${q.valid===false?' · 当前报价不满足交易校验':''}`;
+          el('quote-latency').textContent=`${legLabel(q,'mt5')} ${q.mt5_transport||'行情'} · ${legLabel(q,'binance')} ${q.binance_transport||'行情'} · 报价年龄：品种 B ${age(q.mt5)} ms / 品种 A ${age(q.binance)} ms · 本机收到时间差 ${Math.abs((q.mt5?.observed_ms||0)-(q.binance?.observed_ms||0))} ms · 原始时间差 ${sourceGap>=60000?'约 '+n(sourceGap/60000)+' 分钟（不代表传输延迟）':sourceGap+' ms'}${q.valid===false?' · 当前报价不满足交易校验':''}`;
           showQuote(q);paintSoon();
         }
         streamLabel();
@@ -241,13 +243,14 @@
     const v=g.valuation||{},s=g.parameters||{},costs=g.costs||{},pending=unconfirmed(g,orders);
     const guarded=valuationPending(g,orders),value=x=>guarded?'待核对':usd(x);
     const a=escape(g.symbol),b=escape(g.mt5_symbol),remaining=v.remaining||{};
+    const direction=reverse(g)?`买 ${a} / 卖 ${b}`:`卖 ${a} / 买 ${b}`;
     const reason=[g.reason||'无额外原因',g.execution_warning,
-      g.exit_decision?`退出触发：${g.reason}；触发价差 ${n(g.exit_decision.signal_spread)}；触发预估净收益 ${usd(g.exit_decision.estimated_net)}`:''].filter(Boolean).join('；');
+      g.exit_decision?`退出触发：${g.reason}；触发 A−B 价差 ${n(canonical(g,g.exit_decision.signal_spread))}；触发预估净收益 ${usd(g.exit_decision.estimated_net)}`:''].filter(Boolean).join('；');
     const owned=leg=>orders.filter(o=>o.group===g.id&&o.action==='open'&&o.leg===leg).reduce((total,o)=>total+Number(o.result?.qty||0)*Number(o.result?.price||0)*g.leg_contracts[leg],0);
     const action=g.status==='closed'?'':g.status==='closing'?'<button disabled>平仓处理中…</button>':`<button data-close="${escape(g.id)}"${busy?' disabled':''}>${g.status==='attention'?'重试平仓':'平仓'}</button>`;
     const edit=g.status==='open'&&!pending.length?`<button data-edit-exit="${escape(g.id)}" type="button"${busy?' disabled':''}>调整退出条件与返佣</button>`:'';
-    const rules=`<details class="help-details" data-group-rules="${escape(g.id)}"${expandedRules.has(g.id)?' open':''}><summary>本组已锁定规则</summary><p class="note">卖 ${a} / 买 ${b}；两腿各 ${n(g.lots)} 手<br>合约大小：${n(g.leg_contracts.binance)} / ${n(g.leg_contracts.mt5)}<br>止盈：${s.target_mode==='absolute'?'退出价差 ≤ '+n(s.exit_spread_usd):'收窄 ≥ '+n(s.take_contraction_usd)} USD/报价单位<br>最低净收益：${s.require_net_profit?usd(s.min_net_profit_usd):'未要求'}<br>单组亏损退出：${s.group_loss_enabled?usd(s.group_max_loss_usd):'未启用'}；最长持仓：${Number(s.max_hold_minutes)>0?n(s.max_hold_minutes)+' 分钟':'未启用'}<br>普通 / 保护滑点：${n(s.max_slippage_usd)} / ${n(s.unwind_slippage_usd)}<br>预计佣金返佣：卖出腿 ${n(costs.mt5_short_rebate_percent||0)}% / 买入腿 ${n(costs.mt5_rebate_percent||0)}%<br>预计返佣计入退出判断，不代表到账；修改组合配置不会覆盖本组。</p></details>`;
-    return `<tr><td><strong>#${escape(g.id)}</strong><br>${escape(g.pair.name)}<br>${dateTime(g.opened_ms)}${g.closed_ms?'<br>→ '+dateTime(g.closed_ms):''}</td><td>${recordHint(pending.length?'成交待确认':states[g.status]||g.status,reason,g.id+'-status')}</td><td>双腿各 ${n(g.lots)} 手<br>卖 ${a} / 买 ${b}<br><span class="muted">名义金额 ${owned('binance').toFixed(2)} / ${owned('mt5').toFixed(2)} USD<br>成交价差 ${n(g.entry)} USD/报价单位</span></td><td>毛收益 ${value(v.gross)}<br>${v.fees_verified||v.costs_verified?'已核验成交手续费':'成交手续费（含估算）'} ${value(-Number(v.fees||0))}<br>预计平仓费 ${value(-Number(v.estimated_exit_fee||0))}<br>卖出腿 ${value(-Number(v.estimated_exit_fee_binance||0))} / 买入腿 ${value(-Number(v.estimated_exit_fee_mt5||0))}</td><td>双腿 Swap ${value(v.mt5_swap||0)}<br>预计返佣 ${value(v.estimated_rebate||0)}（未到账）</td><td class="${Number(v.net)>=0?'pnl-positive':'pnl-negative'}"><strong>${guarded?'—':usd(v.net)}</strong><br><span class="muted">${g.status==='closed'?'平仓净收益':'实时估算'}${g.mode==='paper'?' · 纸面':''}</span></td><td>${recordHint(`卖出腿 ${guarded?'待核对':n(remaining.binance||0)+' 手'}`,reason,g.id+'-binance')}<br>${recordHint(`买入腿 ${guarded?'待核对':n(remaining.mt5||0)+' 手'}`,reason,g.id+'-mt5')}</td><td>${action}${edit}${rules}</td></tr>`;
+    const rules=`<details class="help-details" data-group-rules="${escape(g.id)}"${expandedRules.has(g.id)?' open':''}><summary>本组已锁定规则</summary><p class="note">${direction}；两腿各 ${n(g.lots)} 手<br>合约大小：${n(g.leg_contracts.binance)} / ${n(g.leg_contracts.mt5)}<br>止盈：${s.target_mode==='absolute'?'A−B 退出价差 '+(reverse(g)?'≥ ':'≤ ')+n(s.exit_spread_usd):'收窄 ≥ '+n(s.take_contraction_usd)} USD/报价单位<br>最低净收益：${s.require_net_profit?usd(s.min_net_profit_usd):'未要求'}<br>单组亏损退出：${s.group_loss_enabled?usd(s.group_max_loss_usd):'未启用'}；最长持仓：${Number(s.max_hold_minutes)>0?n(s.max_hold_minutes)+' 分钟':'未启用'}<br>普通 / 保护滑点：${n(s.max_slippage_usd)} / ${n(s.unwind_slippage_usd)}<br>预计佣金返佣：品种 A ${n(costs.mt5_short_rebate_percent||0)}% / 品种 B ${n(costs.mt5_rebate_percent||0)}%<br>预计返佣计入退出判断，不代表到账；修改组合配置不会覆盖本组。</p></details>`;
+    return `<tr><td><strong>#${escape(g.id)}</strong><br>${escape(g.pair.name)}<br>${dateTime(g.opened_ms)}${g.closed_ms?'<br>→ '+dateTime(g.closed_ms):''}</td><td>${recordHint(pending.length?'成交待确认':states[g.status]||g.status,reason,g.id+'-status')}</td><td>双腿各 ${n(g.lots)} 手<br>${direction}<br><span class="muted">名义金额 ${owned('binance').toFixed(2)} / ${owned('mt5').toFixed(2)} USD<br>A−B 成交价差 ${n(canonical(g,g.entry))} USD/报价单位</span></td><td>毛收益 ${value(v.gross)}<br>${v.fees_verified||v.costs_verified?'已核验成交手续费':'成交手续费（含估算）'} ${value(-Number(v.fees||0))}<br>预计平仓费 ${value(-Number(v.estimated_exit_fee||0))}<br>品种 A ${value(-Number(v.estimated_exit_fee_binance||0))} / 品种 B ${value(-Number(v.estimated_exit_fee_mt5||0))}</td><td>双腿 Swap ${value(v.mt5_swap||0)}<br>预计返佣 ${value(v.estimated_rebate||0)}（未到账）</td><td class="${Number(v.net)>=0?'pnl-positive':'pnl-negative'}"><strong>${guarded?'—':usd(v.net)}</strong><br><span class="muted">${g.status==='closed'?'平仓净收益':'实时估算'}${g.mode==='paper'?' · 纸面':''}</span></td><td>${recordHint(`品种 A ${guarded?'待核对':n(remaining.binance||0)+' 手'}`,reason,g.id+'-binance')}<br>${recordHint(`品种 B ${guarded?'待核对':n(remaining.mt5||0)+' 手'}`,reason,g.id+'-mt5')}</td><td>${action}${edit}${rules}</td></tr>`;
   }
   function groupRows(groups, orders) {
     if(!groups?.length) return '<p class="note">暂无本策略持仓或交易记录。</p>';
@@ -301,7 +304,8 @@
     const page=recordPage('orders',orders.slice().reverse(),'双边订单流水');
     const rows=page.items.map(o=>{
       const r=o.result||{},g=byGroup.get(o.group),filled=Number(r.qty||0),price=Number(r.price||0);
-      const direction=o.leg==='binance'?(o.action==='open'?'卖出':'买入'):(o.action==='open'?'买入':'卖出');
+      const selling=isNative(g)?((o.native_position_side===1)===(o.action==='open')):((o.leg==='binance')===(o.action==='open'));
+      const direction=selling?'卖出':'买入';
       const quantity=isNative(g)?`${n(filled)} 手 / ${n(filled*g.leg_contracts[o.leg])} 合约数量`:o.leg==='mt5'&&g?`${n(filled)} 盎司 / ${n(filled/g.contract)} 手`:`${n(filled)} XAU`;
       const status=o.source==='external'?'平台外部平仓 · 已回补':o.imported?'原持仓成本登记（本次未下单）':r.status==='done'?(filled>0?'已成交':'未成交'):(r.status==='pending'?'待确认':'状态未知');
       const currency=isNative(g)?'USD':o.leg==='binance'?'USDT':'USD';
@@ -313,9 +317,10 @@
       if(o.source!=='external'&&Number.isFinite(r.reconcile_time_ms)) stages.push(`查询确认 ${Math.max(0,r.reconcile_time_ms-o.created_ms)} ms（非实际成交延迟）`);
       else if(!Number.isFinite(r.request_ms)&&Number.isFinite(r.fill_time_ms)) stages.push(`意图→本机回报 ${Math.max(0,r.fill_time_ms-o.created_ms)} ms`);
       const timing=o.source==='external'?'<br><span class="muted">平台成交时间 · 后台回补</span>':o.imported||!stages.length?'':`<br><span class="muted" title="本机测量，含适配器内部校验；不是交易所撮合时间">${stages.join('<br>')}</span>`;
-      const signal=Number.isFinite(o.signal_spread)?n(o.signal_spread):'—';
-      const actual=Number.isFinite(o.actual_spread)?n(o.actual_spread):'等待双边成交';
-      const spreadDelta=Number.isFinite(o.spread_slippage)?`${o.spread_slippage>=0?'+':''}${n(o.spread_slippage)}`:'—';
+      const signal=Number.isFinite(o.signal_spread)?n(canonical(g,o.signal_spread)):'—';
+      const actual=Number.isFinite(o.actual_spread)?n(canonical(g,o.actual_spread)):'等待双边成交';
+      const delta=canonical(g,o.spread_slippage);
+      const spreadDelta=Number.isFinite(delta)?`${delta>=0?'+':''}${n(delta)}`:'—';
       return `<tr><td>${dateTime(o.created_ms)}${timing}</td><td>#${escape(o.group)}</td><td>${legLabel(g,o.leg)}<br>${escape(o.symbol)}</td><td>${o.action==='open'?'开仓':'平仓'} · ${direction}</td><td>${o.source==='external'?'外部成交':'申请'} ${n(o.requested)} ${isNative(g)?'手':'盎司'}<br>${r.status==='done'?'成交 '+quantity:'成交待确认（已确认 '+quantity+'）'}</td><td>${price?`${n(price)}<br>${(filled*price*(isNative(g)?g.leg_contracts[o.leg]:1)).toFixed(2)} ${currency}`:'—'}</td><td>${signal}<br><span class="muted">${actual}</span><br><span class="muted">偏移 ${spreadDelta}</span></td><td>${fee}</td><td>${status}${r.error?'<br>'+escape(r.error):''}<br><span class="muted">${escape(r.ticket||o.id)}</span></td></tr>`;
     }).join('');
     return recordTable(`<table class="records-table"><thead><tr><th>时间</th><th>交易组</th><th>平台 / 品种</th><th>动作</th><th>申请 / 成交数量</th><th>成交价 / 金额</th><th>监控价差<br>实际成交价差<br>偏移</th><th>成交手续费</th><th>状态 / 票据</th></tr></thead><tbody>${rows}</tbody></table>`,page);
@@ -323,12 +328,25 @@
   function showQuote(q) {
     if(q) {
       const same=isNative(q)||isNative(last),a=legLabel(same?{pair:{type:'mt5_mt5'}}:null,'binance'),b=legLabel(same?{pair:{type:'mt5_mt5'}}:null,'mt5');
-      el('quote-summary').textContent=`${a} Bid/Ask ${n(q.binance.bid)} / ${n(q.binance.ask)} · ${b} Bid/Ask ${n(q.mt5.bid)} / ${n(q.mt5.ask)} · 入场（卖 A Bid − 买 B Ask） ${n(q.entry)} · 退出（买回 A Ask − 卖 B Bid） ${n(q.exit)} ${same?'USD/报价单位':'USD/盎司'}`;
+      el('quote-summary').textContent=`${a} Bid/Ask ${n(q.binance.bid)} / ${n(q.binance.ask)} · ${b} Bid/Ask ${n(q.mt5.bid)} / ${n(q.mt5.ask)} · ${same?'A Bid−B Ask（正入／反出）':'入场（卖 A Bid − 买 B Ask）'} ${n(q.entry)} · ${same?'A Ask−B Bid（正出／反入）':'退出（买回 A Ask − 卖 B Bid）'} ${n(q.exit)} ${same?'USD/报价单位':'USD/盎司'}`;
       el('bid').value=q.binance.bid;el('binance-ask').value=q.binance.ask;
       el('mt5-bid').value=q.mt5.bid;el('mt5-ask').value=q.mt5.ask;
       text('live-entry',n(q.entry));text('live-exit',n(q.exit));
       const threshold=last?.strategy_runtime?.entry_spread_usd;
       const valid=q.valid!==false&&Date.now()-Math.min(q.mt5.observed_ms||q.mt5.time_ms,q.binance.observed_ms||q.binance.time_ms)<=Number(last?.strategy_runtime?.max_quote_age_ms||3000);
+      if(same) {
+        const settings=last?.strategy_runtime||{},mode=settings.direction_mode||'forward';
+        const held=(last?.state?.groups||[]).find(g=>g.status!=='closed');
+        const locked=held&&(held.direction||'forward');
+        const options=[];
+        if(mode!=='reverse'&&(!locked||locked==='forward')&&Number.isFinite(threshold))options.push({name:'正向',distance:Math.max(0,threshold-q.entry)});
+        if(mode!=='forward'&&(!locked||locked==='reverse')&&Number.isFinite(settings.entry_lower_usd))options.push({name:'反向',distance:Math.max(0,q.exit-settings.entry_lower_usd)});
+        options.sort((a,b)=>a.distance-b.distance);
+        const nearest=options[0];
+        text('live-distance',nearest?n(nearest.distance)+' USD · '+nearest.name:'—');
+        text('live-opportunity',!valid?'报价过期或不同步，禁止开仓':!last?.connected?'连接后显示有效阈值':!nearest?'当前方向与持仓不符，需完成平仓并重新连接':nearest.distance===0?nearest.name+'达到阈值，仍须通过执行保护':'等待'+nearest.name+'价差达到阈值');
+        return;
+      }
       text('live-distance',Number.isFinite(threshold)?n(Math.max(0,threshold-q.entry))+' USD':'—');
       text('live-opportunity',!valid?'报价过期或不同步，禁止开仓':!Number.isFinite(threshold)?'连接后显示有效阈值':q.entry>=threshold?'达到基础阈值，仍须通过执行保护':'等待价差达到基础阈值');
     }
@@ -470,6 +488,19 @@
       effectiveEntry.dataset.value=Number.isFinite(runtimeEntry)?String(runtimeEntry):'';
       updateEntryLabel();
     }
+    const nativeStatus=el('native-direction-status');nativeStatus.hidden=!isNative(result);
+    if(isNative(result)&&result.connected&&result.strategy_runtime) {
+      const settings=result.strategy_runtime||{},mode=settings.direction_mode||'forward';
+      const held=(state.groups||[]).filter(g=>g.status!=='closed');
+      const locked=held.length?(held[0].direction||'forward'):null;
+      const forward=q&&q.entry>=settings.entry_spread_usd,backward=q&&q.exit<=settings.entry_lower_usd;
+      const summary=locked?`已有持仓锁定${locked==='reverse'?'买 A／卖 B':'卖 A／买 B'}，平仓确认前不反手。`:'当前空仓，可按生效模式选择方向。';
+      nativeStatus.textContent=`生效模式：${{auto:'自动双向',forward:'固定卖 A／买 B',reverse:'固定买 A／卖 B'}[mode]}。正向 ${n(q?.entry)} ≥ ${n(settings.entry_spread_usd)}：${forward?'达到上限':'等待'}；反向 ${n(q?.exit)} ≤ ${n(settings.entry_lower_usd)}：${backward?'达到下限':'等待'}。${summary}${state.enabled?' 满足阈值后仍须通过数量、冷却和风控检查。':' 新开仓未启用。'}`;
+      el('entry-lower-effective').textContent=`当前生效下限：${n(settings.entry_lower_usd)} · 点击应用开仓阈值更新上下限。`;
+    } else if(isNative(result)) {
+      nativeStatus.textContent='尚未连接。保存并重新连接后显示生效方向和上下限；已有组保留原方向。';
+      el('entry-lower-effective').textContent='当前生效下限：未连接';
+    }
     const pf=result.entry_preflight;
     if(pf) {
       const labels={ready:'预检通过',checking:'预检中',failed:'预检失败',expired:'预检已过期',waiting:'等待接近阈值'};
@@ -534,7 +565,7 @@
     const marginNotice=result.connected&&result.auto_values?.mt5_margin_check?.ready===false
       ? '\n'+result.auto_values.mt5_margin_check.message+'。连接已建立；先完成持仓对账，原程序仓位按原规则管理，外部仓位按接管流程登记。启动新开仓时会重新检查。' : '';
     const visibleActionError=actionError&&!(alarm&&actionError.endsWith(String(alarm)))?actionError:'';
-    text('trading-result', `${visibleActionError? visibleActionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${marginNotice}${result.plan?isNative(result)?`\n每组：卖出腿 ${result.plan.lots} 手 / 买入腿 ${result.plan.lots} 手。`:`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError||marginNotice));
+    text('trading-result', `${visibleActionError? visibleActionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${marginNotice}${result.plan?isNative(result)?`\n每组：品种 A ${result.plan.lots} 手 / 品种 B ${result.plan.lots} 手。`:`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError||marginNotice));
     const auto=result.auto_values||{}, details=[];
     if(auto.fx?.value) {
       if(loaded && el('auto-fx').checked && !dirtyFields.has('usdt-fx')) el('usdt-fx').value=Number(auto.fx.value).toFixed(6);
@@ -562,7 +593,7 @@
     showQuote(q);
     if(result.plan&&isNative(result)) {
       const p=result.plan;
-      text('runtime-plan',`引擎当前每组：卖 ${result.pair.short_symbol} ${n(p.lots)} 手 / 买 ${result.pair.long_symbol} ${n(p.lots)} 手；对应合约数量 ${n(p.lots*p.leg_contracts.binance)} / ${n(p.lots*p.leg_contracts.mt5)}`);
+      text('runtime-plan',`引擎当前每组：品种 A ${result.pair.short_symbol} ${n(p.lots)} 手 / 品种 B ${result.pair.long_symbol} ${n(p.lots)} 手；对应合约数量 ${n(p.lots*p.leg_contracts.binance)} / ${n(p.lots*p.leg_contracts.mt5)}`);
       if(typeof previewPlan==='function')previewPlan();
       el('plan-state').textContent='双品种相同手数已校验';
     } else if(result.plan) {
@@ -599,7 +630,7 @@
   const savedExitRules=g=>Object.fromEntries(Object.keys(ruleInputs).map(key=>[key,g.parameters?.[key]]));
   const rebateInputs={binance_rebate_percent:'binance-rebate',mt5_rebate_percent:'mt5-rebate'};
   const savedRebates=g=>Object.fromEntries(Object.keys(rebateInputs).map(key=>[key,g.costs?.[isNative(g)&&key==='binance_rebate_percent'?'mt5_short_rebate_percent':key]||0]));
-  const describeRebates=r=>`预计手续费返佣：${isNative(last)?'MT5 卖出腿':'币安'} ${n(r.binance_rebate_percent)}% / ${isNative(last)?'MT5 买入腿':'MT5'} ${n(r.mt5_rebate_percent)}%；计入净收益及平仓判断，非已到账`;
+  const describeRebates=r=>`预计手续费返佣：${isNative(last)?'MT5 品种 A':'币安'} ${n(r.binance_rebate_percent)}% / ${isNative(last)?'MT5 品种 B':'MT5'} ${n(r.mt5_rebate_percent)}%；计入净收益及平仓判断，非已到账`;
   function readRebates(){
     return Object.fromEntries(Object.entries(rebateInputs).map(([key,id])=>{
       const value=el('exit-rule-'+id).value;
@@ -644,7 +675,8 @@
     return rules;
   }
   function describeExitRules(r) {
-    return `${r.target_mode==='absolute'?'退出价差 ≤ '+n(r.exit_spread_usd):'价差收窄 ≥ '+n(r.take_contraction_usd)} ${isNative(last)?'USD/报价单位':'USD/盎司'}；${r.require_net_profit?'最低净收益 '+usd(r.min_net_profit_usd):'不要求最低净收益'}；${r.group_loss_enabled?'单组最大亏损 '+usd(r.group_max_loss_usd):'单组亏损限制关闭'}；${r.max_hold_minutes?'从原开仓起 '+n(r.max_hold_minutes)+' 分钟':'不限持仓时间'}`;
+    const group=(last?.state?.groups||[]).find(g=>g.id===exitDraft?.groups?.[0]?.id);
+    return `${r.target_mode==='absolute'?'退出价差 '+(reverse(group)?'≥ ':'≤ ')+n(r.exit_spread_usd):'价差收窄 ≥ '+n(r.take_contraction_usd)} ${isNative(last)?'USD/报价单位':'USD/盎司'}；${r.require_net_profit?'最低净收益 '+usd(r.min_net_profit_usd):'不要求最低净收益'}；${r.group_loss_enabled?'单组最大亏损 '+usd(r.group_max_loss_usd):'单组亏损限制关闭'}；${r.max_hold_minutes?'从原开仓起 '+n(r.max_hold_minutes)+' 分钟':'不限持仓时间'}`;
   }
   el('exit-rule-group').onchange=()=>{exitDraft=null;exitPreview=null;el('exit-rule-fields').hidden=true;text('exit-rule-result','选择后请载入当前规则。');renderExitEditor();};
   el('exit-rule-load').onclick=()=>{
@@ -840,13 +872,13 @@
       });
     }
     const groups=last?.state?.groups||[];
-    const marks=groups.filter(g=>g.status==='open').map(g=>({name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported?(g.management_enabled?' 接管止盈':' 目标（暂停）'):' 已锁定止盈'),yAxis:g.parameters?.target_mode==='absolute'?g.parameters.exit_spread_usd:g.entry-g.parameters?.take_contraction_usd})).filter(mark=>Number.isFinite(mark.yAxis));
+    const marks=groups.filter(g=>g.status==='open').map(g=>({name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported?(g.management_enabled?' 接管止盈':' 目标（暂停）'):' 已锁定止盈'),yAxis:g.parameters?.target_mode==='absolute'?g.parameters.exit_spread_usd:canonical(g,g.entry-g.parameters?.take_contraction_usd)})).filter(mark=>Number.isFinite(mark.yAxis));
     const missing=gaps.map(gap=>[{name:gap.reason,xAxis:gap.start,itemStyle:{color:'rgba(100,116,139,.16)'},label:{show:true,color:'#536274',position:'insideTop'}},{xAxis:gap.end}]);
     text('chart-gaps',gaps.length?`发现 ${gaps.length} 处无有效采样区间，已用灰色标出；最近一处 ${date(gaps.at(-1).start)} 至 ${date(gaps.at(-1).end)}。可点“回到最新”补读本机历史；停机或断线期间未采集的报价无法补造。`:'当前已加载的采样未发现明显缺口；停留后台后会自动补读本机记录。');
     const nearest=(at,field)=>{let best=null,distance=Infinity;for(const x of samples){const d=Math.abs(x.time_ms-at);if(d<distance){best=x;distance=d;}}return best&&Number.isFinite(best[field])?[at,best[field]]:null;};
     const firstTime=samples[0]?.time_ms??0,lastTime=samples.at(-1)?.time_ms??0;
-    const opened=groups.filter(g=>!g.imported&&g.opened_ms>=firstTime&&g.opened_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.opened_ms,g.entry]}));
-    const closed=groups.filter(g=>g.closed_ms>=firstTime&&g.closed_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.closed_ms,Number.isFinite(g.exit)?g.exit:nearest(g.closed_ms,'exit')?.[1]]})).filter(x=>Number.isFinite(x.value[1]));
+    const opened=groups.filter(g=>!g.imported&&g.opened_ms>=firstTime&&g.opened_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.opened_ms,canonical(g,g.entry)]}));
+    const closed=groups.filter(g=>g.closed_ms>=firstTime&&g.closed_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.closed_ms,Number.isFinite(g.exit)?canonical(g,g.exit):nearest(g.closed_ms,'exit')?.[1]]})).filter(x=>Number.isFinite(x.value[1]));
     const entries=samples.map(x=>x.entry).filter(Number.isFinite), exits=samples.map(x=>x.exit).filter(Number.isFinite);
     const average=values=>values.length?values.reduce((a,b)=>a+b,0)/values.length:null;
     const latest=rawSamples.at(-1), all=entries.concat(exits);
@@ -868,10 +900,13 @@
       (samples.length&&samples[0].time_ms-rangeStart>Math.max(60000,windowMinutes*60000/100)?referenceLines.length?' 所选窗口前段暂无本机记录；紫色点线为取得的历史收盘参考，其余缺失区间保持留空。':' 所选窗口前段暂无本机记录，已留空显示；切换窗口不会补造停机前或断线期间的行情。':'');
     const oldZoom=chart.getOption()?.dataZoom?.[0];
     const start=resetChartZoom?0:(oldZoom?.start??0),end=resetChartZoom?100:(oldZoom?.end??100);resetChartZoom=false;
-    const thresholdLine=threshold===null?[]:[{name:`开仓阈值 ${threshold.toFixed(2)}`,yAxis:threshold,lineStyle:{color:'#b75e24',width:2,type:'dashed'},label:{show:true,color:'#8a461e',formatter:`开仓阈值 ${threshold.toFixed(2)}`}}];
+    const runtime=last?.strategy_runtime||{},nativeMode=runtime.direction_mode||'forward';
+    const lower=isNative(last)&&last?.connected&&nativeMode!=='forward'?runtime.entry_lower_usd:null;
+    const thresholdLine=threshold===null||isNative(last)&&nativeMode==='reverse'?[]:[{name:`开仓阈值 ${threshold.toFixed(2)}`,yAxis:threshold,lineStyle:{color:'#b75e24',width:2,type:'dashed'},label:{show:true,color:'#8a461e',formatter:`开仓阈值 ${threshold.toFixed(2)}`}}];
+    if(Number.isFinite(lower))thresholdLine.push({name:`反向开仓下限 ${lower.toFixed(2)}`,yAxis:lower,lineStyle:{color:'#9462a2',width:2,type:'dashed'},label:{show:true,formatter:`反向下限 ${lower.toFixed(2)}`}});
     chart.setOption({animation:false,legend:{top:5,type:'scroll'},tooltip:{trigger:'axis',confine:true,valueFormatter:v=>Number.isFinite(v)?v.toFixed(3):'—'},grid:{left:75,right:120,top:70,bottom:80},xAxis:{type:'time',min:rangeStart,max:rangeEnd,minInterval:1000,axisPointer:{label:{formatter:params=>dateTime(params.value)}}},yAxis:{type:'value',scale:true,name:isNative(last)?'价差 USD/报价单位':'价差 USD/盎司'},dataZoom:[{type:'inside',filterMode:'none',minValueSpan:1000,start,end},{type:'slider',filterMode:'none',minValueSpan:1000,bottom:15,start,end}],series:[
-      {id:'entry',name:isNative(last)?'入场（卖A Bid / 买B Ask）':'入场（卖币安Bid / 买MT5Ask）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.entry]),itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:[...(threshold===null?[]:[[{name:'开仓触发区',yAxis:threshold},{yAxis:'max'}]]),...missing]},markLine:{symbol:'none',silent:true,data:[...thresholdLine,...marks],label:{formatter:'{b}: {c}'}}},
-      {id:'exit',name:isNative(last)?'退出（买回A Ask / 卖B Bid）':'退出（买回币安Ask / 卖MT5Bid）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.exit]),itemStyle:{color:'#247b68'},lineStyle:{width:2,type:'dashed'}},
+      {id:'entry',name:isNative(last)?'A Bid−B Ask（正向入场／反向退出）':'入场（卖币安Bid / 买MT5Ask）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.entry]),itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:[...(threshold===null||isNative(last)&&nativeMode==='reverse'?[]:[[{name:'正向开仓触发区',yAxis:threshold},{yAxis:'max'}]]),...(Number.isFinite(lower)?[[{name:'反向开仓触发区',yAxis:'min'},{yAxis:lower}]]:[]),...missing]},markLine:{symbol:'none',silent:true,data:[...thresholdLine,...marks],label:{formatter:'{b}: {c}'}}},
+      {id:'exit',name:isNative(last)?'A Ask−B Bid（正向退出／反向入场）':'退出（买回币安Ask / 卖MT5Bid）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.exit]),itemStyle:{color:'#247b68'},lineStyle:{width:2,type:'dashed'}},
       {id:'reference',name:'历史参考（收盘价，点线）',type:'line',showSymbol:false,connectNulls:false,data:referenceLines,itemStyle:{color:'#8063a8'},lineStyle:{width:1.5,type:'dotted'},z:1},
       {id:'open',name:'策略开仓',type:'scatter',symbol:'triangle',symbolSize:12,itemStyle:{color:'#b75e24'},data:opened},
       {id:'close',name:'策略平仓',type:'scatter',symbol:'diamond',symbolSize:12,itemStyle:{color:'#6b50a6'},data:closed}
@@ -934,7 +969,7 @@
   el('entry').addEventListener('input',updateEntryLabel);
   el('apply-entry').onclick=()=>action(async()=>{
     if(typeof saveQueue!=='undefined')await saveQueue.catch(()=>{});
-    render(await request('/api/trading/apply-entry',{entry_spread_usd:el('entry').value}));
+    render(await request('/api/trading/apply-entry',{entry_spread_usd:el('entry').value,...(isNative(last)?{entry_lower_usd:el('entry-lower').value}:{})}));
     paintSoon();
   },'apply-entry','正在应用开仓阈值…');
   el('trading-close').onclick=()=>action(async()=>{render(await request('/api/trading/close',{reason:'用户请求全部平仓'}));},'trading-close','正在处理平仓请求…');
@@ -957,7 +992,7 @@
     const link=document.createElement('a');link.href=url;link.download='GoldPairQuotes.set';link.click();
     setTimeout(()=>URL.revokeObjectURL(url),10000);
     const asset=r.binary||r.source;
-    const charts=window.GoldPairPairs?.info()?.type==='mt5_mt5'?'分别挂到卖出腿和买入腿的两个图表，两处均在“输入”中载入同一个 .set 文件':'挂到当前黄金图表，在“输入”中载入刚下载的 .set 文件';
+    const charts=window.GoldPairPairs?.info()?.type==='mt5_mt5'?'分别挂到品种 A 和品种 B 的两个图表，两处均在“输入”中载入同一个 .set 文件':'挂到当前黄金图表，在“输入”中载入刚下载的 .set 文件';
     el('push-result').innerHTML=`本机接收器已启动（127.0.0.1:${Number(r.port)}），参数文件已下载。<a href="${escape(asset)}" download>下载${r.binary?'已编译 EA':'EA 源码'}</a>。将 EA 放入 MT5 数据目录的 MQL5/Experts，${charts}。`;
   },'push-setup','正在准备 EA 接收器和本机参数…');
   window.addEventListener('offline',()=>{stream?.close();stream=null;streamReady=false;streamLabel();});

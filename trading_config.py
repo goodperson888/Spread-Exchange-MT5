@@ -41,6 +41,11 @@ def validate(c):
     if not native_pair(c) and not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
         raise ValueError('币安合约名称无效，请填写平台实际名称，例如 XAUUSDT')
     if native_pair(c):
+        mode=s.get('direction_mode','forward');lower=s.get('entry_lower_usd',-5)
+        if mode not in ('forward','reverse','auto'): raise ValueError('MT5 组合方向模式无效')
+        if isinstance(lower,bool) or not isinstance(lower,(int,float)) or not math.isfinite(lower) or not -100000<=lower<=100000:
+            raise ValueError('反向开仓下限必须在 -100000～100000 之间')
+        if mode=='auto' and lower>=s['entry_spread_usd']: raise ValueError('自动双向的下限必须小于上限')
         a,b=short_symbol(c),c['mt5']['symbol']
         if not all(isinstance(x,str) and re.fullmatch(r'[\w.#+/-]{1,40}',x) for x in (a,b)) or a==b:
             raise ValueError('请填写两个不同的 MT5 完整品种名')
@@ -49,7 +54,7 @@ def validate(c):
         for field in ('mt5_short_commission_per_lot_side','mt5_short_swap_per_lot_day','mt5_short_rebate_percent'):
             value=costs.get(field,0)
             if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or (field!='mt5_short_swap_per_lot_day' and value<0) or (field.endswith('percent') and value>100):
-                raise ValueError('MT5 卖出腿的费用及返佣参数无效')
+                raise ValueError('MT5 品种 A 的费用及返佣参数无效')
     if e['mode'] not in ('paper', 'live') or e['quote_source'] != 'market':
         raise ValueError('运行模式或行情来源无效')
     if e.get('entry_leg') not in ('binance', 'mt5'):
@@ -73,6 +78,7 @@ def validate(c):
         'max_clock_skew_ms': (0, 5000), 'max_unhedged_ms': (100, 30000), 'max_slippage_usd': (0.01, 1000),
         'unwind_slippage_usd': (0.01, 1000),
     }
+    if native_pair(c): bounds['entry_spread_usd']=(-100000,100000)
     for k, (lo, hi) in bounds.items():
         v = s[k]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:

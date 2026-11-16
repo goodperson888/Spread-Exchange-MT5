@@ -132,3 +132,43 @@ class PairProfilesHttpTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class PairParameterIsolationTests(unittest.TestCase):
+    request=PairProfilesHttpTests.request
+    setUp=PairProfilesHttpTests.setUp
+    tearDown=PairProfilesHttpTests.tearDown
+    save=PairProfilesHttpTests.save
+    # Retain only setup/helpers; functional tests below exercise complete HTTP saves and switches.
+    def test_parameters_roundtrip_independently_including_risk_and_direction(self):
+        original=server.load_config();original['strategy']['mt5_lots']=.01
+        original['risk_alerts']['mt5_warning_margin_level_percent']=230
+        server.write_config(original)
+        _,result=self.save();selected=next(p['id'] for p in result['profiles'] if p['id']!='legacy')
+        self.assertEqual(self.request('/api/pairs/activate',{'id':selected})[0],200)
+        patch_body={'expected_pair_id':selected,'strategy':{'mt5_lots':.03,'direction_mode':'auto','entry_spread_usd':12,'entry_lower_usd':3,'max_groups':3},
+                    'execution':{'poll_ms':500},'costs':{'mt5_short_commission_per_lot_side':7,'mt5_rebate_percent':30},
+                    'risk_alerts':{'mt5_warning_margin_level_percent':300}}
+        self.assertEqual(self.request('/api/config',patch_body)[0],200)
+        native=server.load_config()
+        self.assertEqual(self.request('/api/pairs/activate',{'id':'legacy'})[0],200)
+        restored=server.load_config()
+        for key in ('strategy','execution','costs','risk_alerts'):self.assertEqual(restored[key],original[key],key)
+        self.assertEqual(self.request('/api/pairs/activate',{'id':selected})[0],200)
+        restored=server.load_config()
+        for key in ('strategy','execution','costs','risk_alerts'):self.assertEqual(restored[key],native[key],key)
+        self.assertNotIn('expected_pair_id',restored)
+
+    def test_delayed_old_pair_save_is_rejected_without_changing_parameters(self):
+        original=server.load_config()
+        code,result=self.request('/api/config',{'expected_pair_id':'other-pair','strategy':{'mt5_lots':.04}})
+        self.assertEqual(code,400);self.assertIn('组合已切换',result['error'])
+        self.assertEqual(server.load_config(),original)
+
+    def test_profile_storage_failure_does_not_replace_active_config(self):
+        _,result=self.save();selected=next(p['id'] for p in result['profiles'] if p['id']!='legacy')
+        original=server.load_config()
+        with patch.object(server,'atomic_write_json',side_effect=OSError('disk full')):
+            code,result=self.request('/api/pairs/activate',{'id':selected})
+        self.assertEqual(code,400);self.assertEqual(server.load_config(),original)
+        self.runtime._disconnect_pair_resources.assert_not_called()

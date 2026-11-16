@@ -1020,3 +1020,36 @@ test('late reference result cannot overwrite a newly selected observation window
  assert.match(f.el('chart-reference-status').textContent,/新窗口/);
  assert.equal(f.charts.at(-1).xAxis.max-f.charts.at(-1).xAxis.min,3600000);
 });
+
+
+test('reverse MT5 rows, fills and chart targets use the saved direction and canonical A minus B',async()=>{
+ const now=Date.now(),pair={type:'mt5_mt5',short_symbol:'FUT',long_symbol:'SPOT',name:'双品种'};
+ const group={id:'reverse-1',pair,key:'a',symbol:'FUT',mt5_symbol:'SPOT',status:'open',direction:'reverse',mode:'paper',opened_ms:now-1000,lots:.01,qty:.01,
+  entry:9.8,leg_contracts:{binance:100,mt5:10},costs:{usdt_usd:1},parameters:{target_mode:'contraction',take_contraction_usd:2,exit_mode:'group'},
+  valuation:{gross:0,fees:.08,estimated_exit_fee:.08,net:-.16,net_before_rebate:-.16,remaining:{binance:.01,mt5:.01}}};
+ const q={key:'a',pair,time_ms:now,entry:-10,exit:-9.8,binance:{bid:90,ask:90.1,time_ms:now},mt5:{bid:99.9,ask:100,time_ms:now}};
+ const orders=['binance','mt5'].map((leg,i)=>({id:'open-'+i,group:group.id,leg,action:'open',native_position_side:i,symbol:i?'SPOT':'FUT',requested:.01,created_ms:now-1000,signal_spread:9.8,actual_spread:9.7,spread_slippage:-.1,result:{status:'done',qty:.01,price:i?99.9:90.1}}));
+ const state={enabled:true,groups:[group],orders};
+ const snapshot={connected:true,pair,quote:q,state,strategy_runtime:{direction_mode:'auto',entry_spread_usd:5,entry_lower_usd:-5},capabilities:{reconciled:true,mode:'paper'}};
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,'/api/trading/reconcile':()=>snapshot,
+  '/api/trading/chart?minutes=60':()=>({samples:[{...q,time_ms:now-1000},q]})});
+ f.el('chart-window').value='60';await f.refresh();
+ assert.match(f.el('groups').innerHTML,/买 FUT \/ 卖 SPOT/);
+ assert.match(f.el('orders').innerHTML,/开仓 · 买入/);assert.match(f.el('orders').innerHTML,/开仓 · 卖出/);
+ assert.match(f.el('native-direction-status').textContent,/锁定买 A／卖 B/);
+ assert.match(f.el('orders').innerHTML,/-9.8[\s\S]*-9.7[\s\S]*偏移 \+0.1/);
+ assert.match(f.el('live-distance').textContent,/0 USD · 反向/);
+ assert.match(f.el('live-opportunity').textContent,/反向达到阈值/);
+ const series=f.charts.at(-1).series,marks=series.find(s=>s.id==='entry').markLine.data;
+ assert.ok(marks.some(m=>Math.abs(m.yAxis-(-7.8))<1e-8));
+ assert.ok(marks.some(m=>m.yAxis===-5));
+ assert.ok(series.find(s=>s.id==='open').data.some(p=>p.value[1]===-9.8));
+});
+
+test('disconnected native pair shows pending settings without NaN or an effective direction',async()=>{
+ const f=pageFixture(false,{'/api/trading/status':()=>({connected:false,pair:{type:'mt5_mt5'},strategy_runtime:null,state:{groups:[],orders:[]}})});
+ await f.refresh();
+ assert.match(f.el('native-direction-status').textContent,/尚未连接/);
+ assert.equal(f.el('entry-lower-effective').textContent,'当前生效下限：未连接');
+ assert.doesNotMatch(f.el('native-direction-status').textContent,/NaN|生效模式/);
+});

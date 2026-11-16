@@ -12,6 +12,42 @@ def short_symbol(config):
     return config.get('pair', {}).get('short_symbol', '')
 
 
+def reverse_pair(group):
+    return native_pair(group) and group.get('direction')=='reverse'
+
+
+def position_side(group,leg):
+    return (1 if leg=='binance' else 0) ^ int(reverse_pair(group))
+
+
+def order_sells(group,leg,action):
+    return (position_side(group,leg)==1)==(action=='open')
+
+
+def direction_quote(quote,group):
+    """Project spread scalars only; A/B books and account identity never swap."""
+    if not quote: return quote
+    desired='reverse' if reverse_pair(group) else 'forward'
+    current=quote.get('_spread_direction','forward')
+    if desired==current: return quote
+    negate=lambda x:-x if isinstance(x,(int,float)) and math.isfinite(x) else None
+    return {**quote,'entry':negate(quote.get('exit')),'exit':negate(quote.get('entry')),'_spread_direction':desired}
+
+
+def entry_direction(config,quote,active=()):
+    """Choose only an allowed, reached direction; open groups lock the pair."""
+    if not native_pair(config): return 'forward'
+    s=config['strategy'];mode=s.get('direction_mode','forward')
+    directions={'forward','reverse'} if mode=='auto' else {mode}
+    held={g.get('direction','forward') for g in active}
+    if held:
+        if len(held)!=1: return None
+        directions &= held
+    if 'forward' in directions and quote['entry']>=s['entry_spread_usd']: return 'forward'
+    if 'reverse' in directions and quote['exit']<=s.get('entry_lower_usd',-5): return 'reverse'
+    return None
+
+
 def pair_info(config):
     p = config.get('pair', {})
     native = native_pair(config)
@@ -49,12 +85,14 @@ def native_valuation(engine, group, quote):
     for o in engine.state['orders']:
         if o['group'] != g['id']: continue
         r=o.get('result',{}); lots=r.get('qty',0); leg=o['leg']
-        sign=1 if (leg=='binance')==(o['action']=='open') else -1
+        sign=1 if order_sells(g,leg,o['action']) else -1
         pnl[leg] += sign*lots*r.get('price',0)*g['leg_contracts'][leg]
         fees[leg] += r.get('fee',lots*rates[leg])
         if lots>0: flags.append(r.get('fee_verified') is True)
-    pnl['binance'] -= remaining['binance']*quote['binance']['ask']*g['leg_contracts']['binance']
-    pnl['mt5'] += remaining['mt5']*quote['mt5']['bid']*g['leg_contracts']['mt5']
+    for leg in pnl:
+        if not remaining[leg]: continue
+        short=position_side(g,leg)==1
+        pnl[leg] += (-1 if short else 1)*remaining[leg]*quote[leg]['ask' if short else 'bid']*g['leg_contracts'][leg]
     exits={leg:remaining[leg]*rates[leg] for leg in rates}
     rebate_rates={'binance':c.get('mt5_short_rebate_percent',0), 'mt5':c.get('mt5_rebate_percent',0)}
     # Cashback applies only to positive commission, never to swap.

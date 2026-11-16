@@ -112,7 +112,7 @@ test('native check saves latest lots, renders both legs, and applies common step
   const saved=f.calls.filter(c=>c.url==='/api/config'&&c.body).at(-1);
   assert.equal(saved.body.strategy.mt5_lots,.1);
   const text=f.el('mt5-result').textContent;
-  assert.match(text,/卖出腿 GOLD-FUT：通过/);assert.match(text,/买入腿 GOLD-SPOT：通过/);
+  assert.match(text,/品种 A GOLD-FUT：通过/);assert.match(text,/品种 B GOLD-SPOT：通过/);
   assert.match(text,/共同手数规则：最小 0.1 \/ 步长 0.1/);assert.doesNotMatch(text,/黄金品种|盎司/);
   assert.match(text,/不代表持续行情已就绪/);
   assert.equal(f.el('bid').value,'4301');assert.equal(f.el('mt5-bid').value,'4300');
@@ -125,8 +125,8 @@ test('native one-leg failure cannot auto-apply a usable long-leg symbol',async()
   result.pair_checks.binance.passed=false;result.pair_checks.binance.errors=['不支持当前手数'];
   const f=await fixture({'/api/mt5/check':()=>({result})});nativeUi(f);
   await f.el('check-mt5').onclick();
-  assert.match(f.el('mt5-result').textContent,/卖出腿 GOLD-FUT：未通过/);
-  assert.match(f.el('mt5-result').textContent,/买入腿 GOLD-SPOT：通过/);
+  assert.match(f.el('mt5-result').textContent,/品种 A GOLD-FUT：未通过/);
+  assert.match(f.el('mt5-result').textContent,/品种 B GOLD-SPOT：通过/);
   assert.equal(f.run('hasResult'),false);assert.ok(!f.calls.some(c=>c.url==='/api/mt5/apply'));
 });
 
@@ -329,4 +329,33 @@ test('chart reference checkbox never dirties, drafts or saves trading configurat
  assert.equal(JSON.stringify(f.run('formConfig()')),configBefore);
  assert.equal(f.calls.filter(c=>c.url==='/api/config'&&c.body!==undefined).length,0);
  assert.equal(f.run('editableField("chart-reference-enabled")'),false);
+});
+
+
+test('configuration drafts stay bound to the pair and stale pair drafts are ignored',async()=>{
+ const f=await fixture();
+ f.run('populate({...formConfig(),pair:{id:"pair-a",name:"组合甲",type:"exchange_mt5"}})');
+ f.edit('lots','0.01');f.run('saveDraft()');
+ const draft=JSON.parse(f.storage.get('GoldPairLocal.configDraft.v2'));
+ assert.equal(draft.pair_id,'pair-a');assert.equal(draft.fields.lots,'0.01');
+ assert.equal(f.run('readDraft("pair-b")'),null);
+ assert.equal(f.run('readDraft("pair-a").fields.lots'),'0.01');
+ f.run('dirtyFields.clear();populate({...formConfig(),pair:{id:"pair-b",name:"组合乙",type:"exchange_mt5"},strategy:{...formConfig().strategy,mt5_lots:.03}})');
+ assert.equal(f.el('lots').value,'0.03');
+ assert.match(f.el('pair-parameter-scope').textContent,/组合乙/);
+ f.edit('take','4');f.run('saveDraft()');
+ const next=JSON.parse(f.storage.get('GoldPairLocal.configDraft.v2'));
+ assert.equal(next.pair_id,'pair-b');assert.equal(next.fields.lots,undefined);
+ assert.equal(next.fields.take,'4');
+});
+
+test('configuration saves carry the pair identity and independent directional fields',async()=>{
+ const f=await fixture();
+ f.run('populate({...formConfig(),pair:{id:"pair-b",name:"组合乙",type:"mt5_mt5"}})');
+ f.edit('entry','12');f.edit('entry-lower','3');f.edit('direction-mode','auto');
+ await f.run('saveConfig()');
+ const body=f.calls.filter(c=>c.url==='/api/config'&&c.body).at(-1).body;
+ assert.equal(body.expected_pair_id,'pair-b');assert.equal(body.strategy.direction_mode,'auto');
+ assert.equal(body.strategy.entry_lower_usd,3);assert.equal(body.strategy.entry_spread_usd,12);
+ assert.match(f.el('config-status').textContent,/组合乙/);
 });

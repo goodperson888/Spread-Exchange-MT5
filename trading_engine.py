@@ -5,7 +5,8 @@ import uuid
 from trading_config import pair_key
 from execution_evidence import reason_code, REASON_LABELS, result_evidence, validation_issues
 from execution_dispatch import dispatch_order, dispatch_pair, not_dispatched
-from pair_instruments import native_pair, pair_info, native_valuation
+from pair_instruments import (native_pair, pair_info, native_valuation, reverse_pair,
+                              position_side, order_sells, direction_quote, entry_direction)
 
 
 def stamp(): return int(time.time()*1000)
@@ -67,7 +68,7 @@ class Engine:
 
     def _observe_exit(self, g, q, code=None, **evidence):
         observer = getattr(self, 'exit_observations', None)
-        if observer is not None: observer.observe(g, q, code, **evidence)
+        if observer is not None: observer.observe(g, direction_quote(q,g), code, **evidence)
 
     def observe_exit_wait(self, c, q, code):
         if getattr(self, 'exit_observations', None) is None: return
@@ -166,7 +167,8 @@ class Engine:
 
     def _prepare_order(self, g, leg, action, qty, q):
         if qty<=1e-9: return
-        side=q[leg]; sell=(leg=='binance')==(action=='open')
+        q=direction_quote(q,g)
+        side=q[leg]; sell=order_sells(g,leg,action)
         reference=side['bid' if sell else 'ask']
         remaining=self.amounts(g) if action=='close' else None
         residual=(action=='close' and g.get('status')=='closing'
@@ -210,7 +212,7 @@ class Engine:
             o['position_side']='SHORT'
         if g.get('pair',{}).get('type')=='mt5_mt5':
             o.update(platform='mt5',quantity_unit='lot',contract_size=g['leg_contracts'][leg],
-                     native_position_side=1 if leg=='binance' else 0)
+                     native_position_side=position_side(g,leg))
             o.pop('position_side',None);o.pop('top_qty',None)
         if action=='close' and (leg=='mt5' or o.get('platform')=='mt5'):
             candidates=[x for x in self.state['orders'] if x['group']==g['id'] and x['leg']==leg and x['action']=='open' and x['result'].get('qty',0)>0]
@@ -284,6 +286,7 @@ class Engine:
                 and bool(o.get('result',{}).get('ticket')))
 
     def _begin_execution(self, g, action, q=None, started=None, started_ms=None):
+        q=direction_quote(q,g)
         key='execution_'+action
         if key in g: return
         g[key]={'started_ms':stamp() if started_ms is None else started_ms}
@@ -311,11 +314,12 @@ class Engine:
         mprice=sum(float(o['result']['qty'])*float(o['result']['price']) for o in m)/mqty
         fx=sum(float(o.get('fx',g['costs']['usdt_usd']))*float(o['result']['qty']) for o in b)/bqty
         actual=bprice*fx-mprice
+        if reverse_pair(g): actual=-actual
         if signal is None:
             signal=next((o.get('signal_spread') for o in rows if o.get('signal_spread') is not None),None)
         for o in rows:
             if 'reference' in o and 'slippage' in o:
-                sell=(o['leg']=='binance')==(o['action']=='open')
+                sell=order_sells(g,o['leg'],o['action'])
                 adverse=(o['reference']-o['result']['price']) if sell else (o['result']['price']-o['reference'])
                 o['adverse_slippage']=adverse
                 o['slippage_exceeded']=adverse>o['slippage']+1e-8
@@ -533,7 +537,7 @@ class Engine:
         """
         first_leg=g.get('first_leg') or ('binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5')
         second_leg=g.get('second_leg') or ('mt5' if first_leg=='binance' else 'binance')
-        first_label=('MT5 卖出腿' if first_leg=='binance' else 'MT5 买入腿') if native_pair(c) else ('币安' if first_leg=='binance' else 'MT5')
+        first_label=('MT5 '+('卖出' if order_sells(g,first_leg,'open') else '买入')+'腿') if native_pair(c) else ('币安' if first_leg=='binance' else 'MT5')
         first=next((o for o in self.state['orders']
                     if o['group']==g['id'] and o['leg']==first_leg and o['action']=='open'),None)
         if first is None: return False
@@ -587,15 +591,18 @@ class Engine:
         else:
             error=str(second.get('result',{}).get('error') or '')
             suffix='：'+error if error else ''
-            second_label=('MT5 卖出腿' if second_leg=='binance' else 'MT5 买入腿') if native_pair(c) else ('币安' if second_leg=='binance' else 'MT5')
+            second_label=('MT5 '+('卖出' if order_sells(g,second_leg,'open') else '买入')+'腿') if native_pair(c) else ('币安' if second_leg=='binance' else 'MT5')
             g['status']='unwinding';g['reason']=f'{second_label} 拒单、部分成交或状态未知，正在保护性平仓'+suffix;self.pause(g['reason'])
             self.close_group(g,q)
         return True
 
-    def open(self, c, p, q, grid_index=0, min_entry_spread=None):
+    def open(self, c, p, q, grid_index=0, min_entry_spread=None, direction='forward'):
         now=stamp()
         entry_started=time.monotonic()
-        threshold=min_entry_spread if min_entry_spread is not None else c['strategy']['entry_spread_usd']
+        if direction not in ('forward','reverse') or (direction=='reverse' and not native_pair(c)):
+            raise ValueError('开仓方向与当前组合不符')
+        q=direction_quote(q,{'pair':c.get('pair',{}),'direction':direction})
+        threshold=min_entry_spread if min_entry_spread is not None else (-c['strategy'].get('entry_lower_usd',-5) if direction=='reverse' else c['strategy']['entry_spread_usd'])
         guard=getattr(self, 'entry_preflight', None)
         if guard and not guard(q, threshold):
             detail=getattr(self, 'entry_preflight_detail', {})
@@ -617,7 +624,7 @@ class Engine:
             first_leg=first_leg,second_leg=second_leg,entry_threshold=threshold,grid_index=int(grid_index))
         g['pair']=pair_info(c)
         if native_pair(c):
-            g.update(leg_contracts=copy.deepcopy(p['leg_contracts']),quantity_unit='lot')
+            g.update(leg_contracts=copy.deepcopy(p['leg_contracts']),quantity_unit='lot',direction=direction)
         self._begin_execution(g,'open',q,entry_started,now)
         self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
         self._entry_deadlines[g['id']]=entry_started+c['strategy']['max_unhedged_ms']/1000
@@ -647,7 +654,7 @@ class Engine:
             if not self.resolve(g): return
             result=first['result']
         if result.get('status')!='done':
-            label=('MT5 卖出腿' if first_leg=='binance' else 'MT5 买入腿') if native_pair(c) else ('币安' if first_leg=='binance' else 'MT5')
+            label=('MT5 '+('卖出' if order_sells(g,first_leg,'open') else '买入')+'腿') if native_pair(c) else ('币安' if first_leg=='binance' else 'MT5')
             self.pause(f'{label} 开仓状态未知，进入分层对账',keep_entry=True);return
         self._finish_open(c,p,g,q,threshold)
 
@@ -673,6 +680,7 @@ class Engine:
 
     def finalize_flat(self, g, q):
         """Record a completed close once both broker legs report zero exposure."""
+        q=direction_quote(q,g)
         if not q or g.get('status') not in ('closing','unwinding') or self.uncertain(g): return False
         if max(self.amounts(g).values())>=1e-8: return False
         actual=self._record_spread(g,'close',g.get('exit_signal',q.get('exit')))
@@ -804,6 +812,7 @@ class Engine:
         self.pause('减仓重试达到上限，仍有敞口；请检查账户后使用“重试平仓”')
 
     def close_group(self, g, q):
+        q=direction_quote(q,g)
         self._begin_execution(g,'close',q)
         if q and 'exit_signal' not in g: g['exit_signal']=q.get('exit')
         timing=g['execution_close']
@@ -815,7 +824,7 @@ class Engine:
             self._observe_exit(g,q,'CLOSE_PENDING')
             return
         self._pause_parallel_residual(g)
-        q=self._close_quote(q)
+        q=direction_quote(self._close_quote(q),g)
         if not valid_group_quote(q,g['key'],g['parameters']):
             self.state['alarm']='平仓等待有效新报价；成交查询继续，当前尚未双平'
             self._observe_exit(g,q,'CLOSE_QUOTE_UNAVAILABLE')
@@ -907,10 +916,12 @@ class Engine:
             if self.active(): self.state['alarm']='报价过期、时钟偏差或品种不符，等待有效行情；已有仓位仍未平仓'
             self.observe_exit_wait(c,q,'QUOTE_UNAVAILABLE')
             return
+        market_quote=q
         measure = getattr(self, 'latency', None) is not None
         decision_elapsed = 0.
         exit_event=False
         for g in self.active():
+            q=direction_quote(market_quote,g)
             if g['key']!=q['key']: raise ValueError('当前行情与持仓账户或品种不一致')
             if g['status']=='opening':
                 confirmed=self.resolve(g)
@@ -942,6 +953,7 @@ class Engine:
         basket_exit=set()
         basket_evidence=None
         if basket:
+            q=direction_quote(market_quote,basket[0])
             qty=sum(g['qty'] for g in basket); entry=sum(g['entry']*g['qty'] for g in basket)/qty
             net=sum(g['valuation']['net'] for g in basket)
             # Every current member's saved condition must agree. Explicit
@@ -953,6 +965,7 @@ class Engine:
                     target_blocked_members=sum(not self.target(g,entry,q['exit']) for g in basket),
                     net_blocked_members=sum(g['parameters']['require_net_profit'] and net<g['parameters']['min_net_profit_usd'] for g in basket))
         for g in opened:
+            q=direction_quote(market_quote,g)
             s=g['parameters'];v=g['valuation'];reason=''
             if g.get('imported'):
                 if self.target(g,g['entry'],q['exit']) and v['net']>=s['min_net_profit_usd']: reason='接管篮子收窄并盈利'
@@ -980,27 +993,31 @@ class Engine:
         if measure: decision_elapsed += time.monotonic()-started
         for g in self.active():
             if g['status'] in ('closing','unwinding'):
-                exit_event=True;self.close_group(g,q)
+                exit_event=True;self.close_group(g,market_quote)
         started = time.monotonic() if measure else 0
-        s=c['strategy'];all_active=self.active();active=[g for g in all_active if not g.get('imported')];grid_index=0;open_threshold=s['entry_spread_usd'];grid_allowed=True
+        q=market_quote
+        s=c['strategy'];all_active=self.active();active=[g for g in all_active if not g.get('imported')];grid_index=0;grid_allowed=True
+        direction=entry_direction(c,q,all_active)
+        open_threshold=-s.get('entry_lower_usd',-5) if direction=='reverse' else s['entry_spread_usd']
+        entry_q=direction_quote(q,{'pair':c.get('pair',{}),'direction':direction})
         if s.get('grid_enabled') and active:
             # Grid additions are separate paired groups. They only continue
             # a homogeneous grid chain; unrelated/manual groups block adds.
             if all(g.get('parameters',{}).get('grid_enabled') for g in active):
                 grid_index=max(int(g.get('grid_index',0)) for g in active)+1
-                open_threshold=s['entry_spread_usd']+grid_index*s['grid_spacing_usd']
+                open_threshold+=grid_index*s['grid_spacing_usd']
                 grid_allowed=grid_index<=int(s['grid_max_adds'])
             else:
                 grid_allowed=False
         should_open = (self.state['enabled'] and not exit_event and all(g['status']=='open' for g in all_active)
             and grid_allowed and len(active)<s['max_groups']
             and sum(g['lots'] for g in all_active)+p['lots']<=s['max_total_lots']+1e-9
-            and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and q['entry']>=open_threshold)
+            and direction is not None and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and entry_q['entry']>=open_threshold)
         if measure: self._latency('decision_ms', (decision_elapsed+time.monotonic()-started)*1000)
         if should_open:
-            self.open(c,p,q,grid_index=grid_index,min_entry_spread=open_threshold)
+            self.open(c,p,q,grid_index=grid_index,min_entry_spread=open_threshold,direction=direction)
 
     @staticmethod
     def target(g, entry, exit_spread):
         s=g['parameters']
-        return entry-exit_spread>=s['take_contraction_usd'] if s['target_mode']=='contraction' else exit_spread<=s['exit_spread_usd']
+        return entry-exit_spread>=s['take_contraction_usd'] if s['target_mode']=='contraction' else exit_spread<=(-s['exit_spread_usd'] if reverse_pair(g) else s['exit_spread_usd'])

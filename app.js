@@ -14,10 +14,11 @@ const sectionFields = {
   binance: new Set(['symbol','recv-window','binance-proxy','trading-api-key','trading-api-secret']),
   execution: new Set(['exec-mode','entry-leg','poll-ms','magic','close-retries']),
   strategy: new Set([...Object.values(bindings.strategy),'grid-enabled','cooldown','max-total','exit-mode','target-mode',
-    'absolute-exit','require-net','min-net','group-loss-on','group-loss','total-loss-on','total-loss','max-hold']),
+    'absolute-exit','direction-mode','entry-lower','require-net','min-net','group-loss-on','group-loss','total-loss-on','total-loss','max-hold']),
   risk_alerts: new Set(Object.values(bindings.risk_alerts)),
 };
 let credentialsDirty = false;
+let configPairId='legacy',configPairName='当前组合';
 let saveQueue = Promise.resolve();
 let revision = 0, busy = false, loaded = false, hasResult = false, planTimer, planGeneration=0, saveTimer, autoSaving=false, publicIpValue='';
 let pollBusy = false;
@@ -73,7 +74,7 @@ function formConfig() {
     mode:'paper', symbol:window.GoldPairPairs?.native({pair:window.GoldPairPairs.info()})?window.GoldPairPairs.info().short_symbol:value('symbol').toUpperCase(), mt5,
     risk_alerts:Object.fromEntries(Object.entries(bindings.risk_alerts).map(([key,id])=>[key,Number(value(id))])),
     binance:{recv_window_ms:Number(value('recv-window')),proxy_url:value('binance-proxy'),api_key:value('trading-api-key'),api_secret:value('trading-api-secret')},
-    strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),grid_enabled:$('grid-enabled').checked,
+    strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),direction_mode:value('direction-mode')||'forward',entry_lower_usd:Number(value('entry-lower')||-5),grid_enabled:$('grid-enabled').checked,
       cooldown_seconds:Number(value('cooldown')),max_total_lots:Number(value('max-total')),exit_mode:value('exit-mode'),target_mode:value('target-mode'),exit_spread_usd:Number(value('absolute-exit')),
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
       total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold'))},
@@ -106,14 +107,15 @@ function saveDraft() {
     // Preserve raw strings (including temporarily empty numbers) and only
     // edited fields. Credentials never enter this browser draft; they are
     // saved only through the local config endpoint.
-    const previous=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null');
-    localStorage.setItem(DRAFT_KEY,JSON.stringify({fields:{...previous?.fields,...draftFields()}}));
+    const previous=readDraft();
+    localStorage.setItem(DRAFT_KEY,JSON.stringify({pair_id:configPairId,fields:{...previous?.fields,...draftFields()}}));
   } catch (_) {
     message('config-status','浏览器草稿不可用，请等待“已保存到本机”后再刷新。',true);
   }
 }
-function readDraft() {
-  try { return JSON.parse(localStorage.getItem(DRAFT_KEY)||'null'); }
+function readDraft(pairId=configPairId) {
+  try { const draft=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null');
+    return draft&&(draft.pair_id===pairId||(!draft.pair_id&&pairId==='legacy'))?draft:null; }
   catch (_) { return null; }
 }
 function clearDraft() {
@@ -129,6 +131,7 @@ function removeDraftFields(ids) {
   } catch (_) {}
 }
 function populate(c) {
+  configPairId=c.pair?.id||'legacy';configPairName=c.pair?.name||`${c.symbol} × ${c.mt5.symbol}`;
   for (const [section, fields] of Object.entries(bindings)) {
     for (const [key, id] of Object.entries(fields)) $(id).value = c[section]?.[key] ?? '';
   }
@@ -145,6 +148,8 @@ function populate(c) {
   $('magic').value = c.execution?.magic ?? 9121701;
   $('close-retries').value = c.execution?.close_retry_limit ?? 3;
   const s=c.strategy || {}, costs=c.costs || {};
+  $('direction-mode').value=s.direction_mode||'forward';$('entry-lower').value=s.entry_lower_usd??-5;
+  $('pair-parameter-scope').textContent=`参数属于「${configPairName}」；策略、执行、费用及风险提醒按组合保存，账户连接共用。已有组保留原规则。`;
   const extra={cooldown_seconds:'cooldown',max_total_lots:'max-total',exit_mode:'exit-mode',target_mode:'target-mode',exit_spread_usd:'absolute-exit',min_net_profit_usd:'min-net',group_max_loss_usd:'group-loss',total_max_loss_usd:'total-loss',max_hold_minutes:'max-hold'};
   for(const [key,id] of Object.entries(extra)) $(id).value=s[key] ?? $(id).value;
   for(const [key,id] of Object.entries({require_net_profit:'require-net',group_loss_enabled:'group-loss-on',total_loss_enabled:'total-loss-on',grid_enabled:'grid-enabled'})) $(id).checked=Boolean(s[key]);
@@ -163,6 +168,8 @@ function visible(id, show) { $(id).classList.toggle('is-hidden', !show); }
 function syncConditionalFields(source='') {
   let live=value('exec-mode')==='live';
   const same=window.GoldPairPairs?.info()?.type==='mt5_mt5';
+  $('native-direction-settings').hidden=!same;$('entry-lower-field').hidden=!same;
+  $('entry').min=same?'-100000':'0';
   const mcpAdapter=value('mt5-adapter')==='mcp';
   const incompatible=live && mcpAdapter;
   const compatibility=$('mode-compatibility');
@@ -223,6 +230,7 @@ function saveConfigPayload(payload, sections=null) {
   // All full-form saves share one queue so an older response cannot replace
   // a newer edit or clear its draft.
   const submittedRevision=revision;
+  payload={...payload,expected_pair_id:configPairId};
   saveQueue=saveQueue.catch(()=>{}).then(async()=>{
     const at=submittedRevision;
     message('config-status','正在保存到本机…');
@@ -238,7 +246,7 @@ function saveConfigPayload(payload, sections=null) {
         removeDraftFields(savedIds);
         saveDraft();
       }
-      message('config-status',sections===null?'已保存到本机，刷新后会恢复配置。':'已保存本次检查所需配置到本机。');
+      message('config-status',sections===null?`已保存「${configPairName}」的参数到本机。`:'已保存本次检查所需配置到本机。');
     } else { saveDraft(); queueAutoSave(); }
     window.dispatchEvent(new Event('gold-config-saved'));
     return at;
@@ -335,7 +343,7 @@ function showResult(r) {
 function showPairResult(r) {
   const lines=[r.message];
   if(r.identity)lines.push(`实际账户：${r.identity.account} · ${r.identity.server} · ${r.identity.currency} · ${r.identity.margin_mode===2?'对冲账户':'不支持的账户模式'}`);
-  for(const [leg,side,bid,ask] of [['binance','卖出腿','bid','binance-ask'],['mt5','买入腿','mt5-bid','mt5-ask']]) {
+  for(const [leg,side,bid,ask] of [['binance','品种 A','bid','binance-ask'],['mt5','品种 B','mt5-bid','mt5-ask']]) {
     const row=r.pair_checks?.[leg];
     if(!row)continue;
     lines.push(`${side} ${row.name}：${row.passed?'通过':'未通过'}`);
@@ -550,9 +558,9 @@ async function loadInitialConfig() {
   configLoading=true;
   try {
     const {config}=await api('/api/config');
-    const pending=draftFields(),draft=readDraft();
+    const pending=draftFields(),draft=readDraft(config.pair?.id||'legacy');
     let legacy=null;
-    try { legacy=JSON.parse(localStorage.getItem(LEGACY_DRAFT_KEY)||'null')?.config; } catch(_) {}
+    try { if(!config.pair?.id||config.pair.id==='legacy')legacy=JSON.parse(localStorage.getItem(LEGACY_DRAFT_KEY)||'null')?.config; } catch(_) {}
     populate(legacy ? {...config,...legacy,mt5:{...config.mt5,...legacy.mt5}} : config);
     if(legacy) for(const input of document.querySelectorAll('input, select'))
       if(editableField(input.id)) dirtyFields.add(input.id);

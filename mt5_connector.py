@@ -140,7 +140,7 @@ def inspect_pair_terminal(settings, api, terminal, account, result):
     result.update(pair_check=True, pair_ready=False, pair_checks={}, pair_specs={}, candidates=[],
                   code='PAIR_BLOCKED', message='双品种检查未通过；此次检查不下单。')
     if not isinstance(names, list) or len(names) != 2 or not all(isinstance(n, str) and n.strip() for n in names):
-        result['blockers'].append('请先在组合管理中填写卖出腿和买入腿的完整品种名')
+        result['blockers'].append('请先在组合管理中填写品种 A 和品种 B 的完整名称')
         return result
     if names[0] == names[1]: result['blockers'].append('两条腿必须选择不同品种')
     if result['identity']['currency'] != 'USD' or result['identity']['margin_mode'] != 2:
@@ -151,7 +151,7 @@ def inspect_pair_terminal(settings, api, terminal, account, result):
     if not permitted:
         target = result['blockers'] if settings.get('pair_execution_mode') == 'live' else result['warnings']
         target.append('MT5 程序交易权限未开启，请检查 Algo Trading、外部 Python API 和账户交易权限')
-    for leg, side, name in zip(('binance', 'mt5'), ('卖出腿', '买入腿'), names):
+    for leg, side, name in zip(('binance', 'mt5'), ('品种 A', '品种 B'), names):
         row = dict(name=name, side=side, passed=False, errors=[])
         result['pair_checks'][leg] = row
         try:

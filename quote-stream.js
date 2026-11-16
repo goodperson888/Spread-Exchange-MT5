@@ -103,8 +103,9 @@
       if(g.status!=='open'||g.valuation_status==='unverified'||!v||!c||g.key!==q.key)return g;
       const b=Number(v.remaining?.binance||0),m=Number(v.remaining?.mt5||0);
       if(g.pair?.type==='mt5_mt5') {
-        const shortMove=-b*(q.binance.ask-basis.binance.ask)*g.leg_contracts.binance;
-        const longMove=m*(q.mt5.bid-basis.mt5.bid)*g.leg_contracts.mt5;
+        const reverse=g.direction==='reverse';
+        const shortMove=(reverse?b*(q.binance.bid-basis.binance.bid):-b*(q.binance.ask-basis.binance.ask))*g.leg_contracts.binance;
+        const longMove=(reverse?-m*(q.mt5.ask-basis.mt5.ask):m*(q.mt5.bid-basis.mt5.bid))*g.leg_contracts.mt5;
         if(![shortMove,longMove,v.gross,v.net_before_rebate,v.net].every(Number.isFinite))return g;
         return {...g,valuation:{...v,gross:v.gross+shortMove+longMove,
           binance_pnl_usdt:v.binance_pnl_usdt+shortMove,mt5_pnl_usd:v.mt5_pnl_usd+longMove,

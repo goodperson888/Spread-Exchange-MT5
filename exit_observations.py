@@ -3,6 +3,7 @@ from collections import OrderedDict, deque
 import math
 import threading
 import time
+from pair_instruments import reverse_pair
 
 
 LABELS = {
@@ -86,8 +87,9 @@ class ExitObservations:
                 if finite(entry): sample['group_target_exit_spread'] = entry-s['take_contraction_usd']
                 if finite(exit_spread): sample['target_reached'] = evaluated_entry-exit_spread >= s['take_contraction_usd']
             elif s.get('target_mode') == 'absolute' and finite(s.get('exit_spread_usd')):
-                sample['target_exit_spread'] = sample['group_target_exit_spread'] = s['exit_spread_usd']
-                if finite(exit_spread): sample['target_reached'] = exit_spread <= s['exit_spread_usd']
+                target=-s['exit_spread_usd'] if reverse_pair(group) else s['exit_spread_usd']
+                sample['target_exit_spread'] = sample['group_target_exit_spread'] = target
+                if finite(exit_spread): sample['target_reached'] = exit_spread <= target
         if in_basket:
             sample.update({'basket_'+k: x for k, x in numeric(basket,
                 ('entry', 'net', 'members', 'target_blocked_members', 'net_blocked_members')).items()})

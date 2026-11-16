@@ -24,6 +24,8 @@
   "strategy": {
     "mt5_lots": 0.02,
     "entry_spread_usd": 5,
+    "direction_mode": "forward",
+    "entry_lower_usd": -5,
     "take_contraction_usd": 2,
     "max_groups": 1,
     "max_quote_age_ms": 3000,

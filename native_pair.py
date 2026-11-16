@@ -10,7 +10,7 @@ import time
 from trading_brokers import Terminal, PaperBroker
 from trading_config import pair_key
 from trading_engine import valid_group_quote, stamp
-from pair_instruments import short_symbol, equal_lot_plan, pair_info
+from pair_instruments import short_symbol, equal_lot_plan, pair_info, position_side
 from market_push import TickFreshness
 from runtime_maintenance import evidence
 import external_closes
@@ -58,7 +58,7 @@ class NativePairPump:
         self.config=copy.deepcopy(config if config is not None else runtime.config)
         self.changed=threading.Event();self.stopped=threading.Event();self.lock=threading.Lock()
         self.latest=None;self.version=0;self.error='';self.last_stamp=0
-        self.mt5_transport='MT5 双品种报价轮询';self.binance_transport='MT5 卖出腿'
+        self.mt5_transport='MT5 双品种报价轮询';self.binance_transport='MT5 品种 A'
         self.thread=threading.Thread(target=self._loop,name='mt5-pair-quotes',daemon=True)
 
     def start(self): self.thread.start()
@@ -362,7 +362,7 @@ class NativePairRuntime:
             # sessions, both specs and the first pair quote have been prepared.
             terminal=stage('初始化 MT5 执行会话',lambda:Terminal(settings_for(c),c['execution']['magic'],timeout_seconds=remaining()))
             specs={leg:stage(label,lambda name=name:terminal.call('pair_spec',symbol=name,timeout_seconds=remaining()))
-                   for leg,name,label in (('binance',short_symbol(c),'核验卖出品种规格'),('mt5',c['mt5']['symbol'],'核验买入品种规格'))}
+                   for leg,name,label in (('binance',short_symbol(c),'核验品种 A 规格'),('mt5',c['mt5']['symbol'],'核验品种 B 规格'))}
             plan=equal_lot_plan(c,specs)
             snap=stage('读取账户与交易权限',lambda:terminal.call('snapshot',timeout_seconds=remaining()))
             if snap['account']['currency']!='USD' or snap['account']['margin_mode']!=2:
@@ -441,10 +441,15 @@ class NativePairRuntime:
     def _native_margin(self):
         c=self.config;lots=max(0,c['strategy']['max_total_lots']-sum(g['lots'] for g in self.engine.active()))
         if lots<=1e-9: return dict(ready=True,state='capacity_full',required=0.,checked_ms=stamp(),message='总手数额度已用满，已有持仓继续管理')
-        rows=[self.terminal.call('margin',symbol=name,lots=lots,native_position_side=side)
-              for name,side in ((short_symbol(c),1),(c['mt5']['symbol'],0))]
+        mode=c['strategy'].get('direction_mode','forward')
+        directions=('forward','reverse') if mode=='auto' else (mode,)
+        batches=[[self.terminal.call('margin',symbol=name,lots=lots,
+                  native_position_side=position_side({'pair':c['pair'],'direction':direction},leg))
+                  for leg,name in (('binance',short_symbol(c)),('mt5',c['mt5']['symbol']))]
+                  for direction in directions]
         try:
-            required=sum(float(x['required']) for x in rows);available=min(float(x['available']) for x in rows)
+            required=max(sum(float(x['required']) for x in rows) for rows in batches)
+            available=min(float(x['available']) for rows in batches for x in rows)
             if not math.isfinite(required) or required<=0 or not math.isfinite(available): raise ValueError()
             return dict(ready=required<=available,state='ready' if required<=available else 'insufficient',lots=lots,
                         required=required,available=available,checked_ms=stamp(),
@@ -500,12 +505,12 @@ class NativePairRuntime:
                         if o['result'].get('qty',0)>0 and not p: raise ValueError('MT5 持仓票据尚未唯一确认')
                         expected[p]=expected.get(p,0)+(1 if o['action']=='open' else -1)*o['result'].get('qty',0)
                         if o['action']=='open' and o['result'].get('qty',0)>0:
-                            identities[p]=(o['id'],o['result'].get('position_identifier'))
+                            identities[p]=(o['id'],o['result'].get('position_identifier'),o.get('native_position_side',0))
                 current={str(p['ticket']):p for p in snap['positions']}
                 for p in snap['positions']:
-                    if p['magic']!=c['execution']['magic'] or p['side']!=(1 if leg=='binance' else 0):
+                    opening,identifier,side=identities.get(str(p['ticket']),('',None,None))
+                    if p['magic']!=c['execution']['magic'] or p['side']!=side:
                         raise ValueError('组合品种存在未归属或其他方向持仓；不会自动接管或平仓')
-                    opening,identifier=identities.get(str(p['ticket']),('',None))
                     if not opening or p.get('comment')!=opening or (identifier and str(p.get('identifier'))!=str(identifier)):
                         raise ValueError('MT5 持仓开仓归属或不可变标识不符')
                     if abs(expected.get(str(p['ticket']),0)-p['lots'])>1e-8: raise ValueError('平台手数与本机记录不一致，等待后台成交回补')

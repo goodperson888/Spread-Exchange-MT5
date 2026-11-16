@@ -43,7 +43,7 @@ from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, obser
 from entry_preflight import EntryPreflight
 from liquidation_risk import BinanceRiskMonitor, risk_snapshot
 from native_pair import NativePairRuntime, settings_for
-from pair_instruments import native_pair, pair_info, short_symbol
+from pair_instruments import native_pair, pair_info, short_symbol, direction_quote
 import pair_profiles
 
 ROOT = Path(__file__).resolve().parent
@@ -912,7 +912,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             ids=exit_rules.apply(self.engine,self.config,body)
             return {**self.snapshot(),'message':f'已更新 {len(ids)} 组的退出规则及所填返佣比例；预计返佣计入净收益，下一次有效行情检查起生效，满足条件可能立即平仓。'}
 
-    def apply_entry_threshold(self, value):
+    def apply_entry_threshold(self, value, entry_lower_usd=None):
         """Apply only the live opening threshold without reconnecting.
 
         Connection/account changes remain gated by reconnect and reconciliation;
@@ -927,15 +927,23 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
                 threshold = float(value)
             except (TypeError, ValueError):
                 raise ValueError('开仓阈值必须是数字')
-            if not math.isfinite(threshold) or threshold < 0 or threshold > 100000:
-                raise ValueError('开仓阈值必须在 0 到 100000 USD/盎司之间')
+            if not math.isfinite(threshold) or threshold < (-100000 if native_pair(self.config) else 0) or threshold > 100000:
+                raise ValueError('开仓上限必须在 -100000～100000 之间' if native_pair(self.config) else '开仓阈值必须在 0 到 100000 USD/盎司之间')
             # Persist only this field; never overwrite newer saved credentials
             # or other pending edits with the older runtime configuration.
             saved = load_config()
-            saved['strategy']['entry_spread_usd'] = threshold
+            if pair_key(saved)!=pair_key(self.config): raise ValueError('当前组合已变化，请重新连接后应用')
+            changes={'entry_spread_usd':threshold}
+            if native_pair(self.config) and entry_lower_usd is not None:
+                if isinstance(entry_lower_usd,bool) or not str(entry_lower_usd).strip(): raise ValueError('请填写反向开仓下限')
+                try: changes['entry_lower_usd']=float(entry_lower_usd)
+                except (TypeError,ValueError): raise ValueError('反向开仓下限必须是数字') from None
+            checked=copy.deepcopy(self.config);checked['strategy'].update(changes);validate_trading(checked)
+            saved['strategy'].update(changes)
+            validate_trading(saved)
             write_config(saved)
-            self.config['strategy']['entry_spread_usd'] = threshold
-            self.engine.save('entry_threshold_applied', {'value': threshold})
+            self.config['strategy'].update(changes)
+            self.engine.save('entry_threshold_applied', {'value': threshold,**changes})
             self.market_meta['strategy_trigger'] = '报价事件驱动；开仓阈值已应用'
             return self.snapshot()
 
@@ -947,7 +955,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
                 raise ValueError('尚无可用报价，不能请求平仓')
             for g in self.engine.active():
                 if group is None or g['id']==group:
-                    g['exit_signal']=self.quote.get('exit')
+                    g['exit_signal']=direction_quote(self.quote,g).get('exit')
             self.engine.request_close(group, reason)
             # One immediate attempt; the background loop performs retries.
             self.engine.tick(self.config, self.plan, self.quote)
@@ -1236,6 +1244,8 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
                 'position_report': self.position_report,
                 'external_close_status': copy.deepcopy(getattr(self,'external_close_status',None)),
                 'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd'],
+                                     'entry_lower_usd':self.config['strategy'].get('entry_lower_usd',-5),
+                                     'direction_mode':self.config['strategy'].get('direction_mode','forward'),
                                      'max_quote_age_ms': self.config['strategy']['max_quote_age_ms'],
                                      'mt5_symbol': self.config['mt5']['symbol'], 'symbol': self.config['symbol']} if self.config else None,
                 'config_pending': bool(self.connected and self.config_changed(saved_config)),
@@ -1409,7 +1419,7 @@ def validate_config(config):
         errors.append('数量和规格必须是有限数值')
     for key in ('entry_spread_usd', 'take_contraction_usd', 'max_slippage_usd', 'unwind_slippage_usd'):
         value = float(strategy.get(key, 0))
-        if not math.isfinite(value) or value < 0:
+        if not math.isfinite(value) or (value < 0 and not (key=='entry_spread_usd' and native_pair(config))):
             errors.append('价差、目标和滑点应为有限的非负数')
     if float(strategy.get('unwind_slippage_usd', 0)) < float(strategy.get('max_slippage_usd', 0)):
         errors.append('保护性平仓滑点不能小于普通最大滑点')
@@ -1681,7 +1691,8 @@ class Handler(BaseHTTPRequestHandler):
                         if path=='/api/pairs/save':
                             old=profile;profile=pair_profiles.clean_profile(body,config)
                             if old:
-                                for key in ('strategy','costs','execution'): profile[key]=old[key]
+                                for key in ('strategy','costs','execution','risk_alerts'):
+                                    if key in old: profile[key]=old[key]
                             rows=[x for x in rows if x['id']!=profile['id']]+[profile]
                         if not profile: raise ValueError('组合不存在，请刷新后重试')
                         if path=='/api/pairs/activate' or profile['id']==active:
@@ -1691,6 +1702,9 @@ class Handler(BaseHTTPRequestHandler):
                             replacement=pair_profiles.activate(config,profile)
                             errors=validate_config(replacement)
                             if errors: raise ValueError('；'.join(errors))
+                            # Keep the outgoing pair's latest parameters durable
+                            # before replacing the active configuration.
+                            atomic_write_json(DATA/'combinations.json',dict(profiles=rows))
                             write_config(replacement)
                             TRADING._disconnect_pair_resources()
                             TRADING.config=None;TRADING.plan=None;TRADING.quote=None;TRADING.position_report=None
@@ -1762,12 +1776,15 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 with LOCK:
                     current = load_config()
+                    if 'expected_pair_id' in body and body['expected_pair_id']!=current.get('pair',{}).get('id','legacy'):
+                        raise ValueError('组合已切换，已拒绝旧页面的参数保存；请刷新后编辑当前组合')
                     if body.get('clear_credentials'):
                         current.setdefault('binance', {})['api_key'] = ''
                         current.setdefault('binance', {})['api_secret'] = ''
                         current.setdefault('mt5', {})['mcp_token'] = ''
                     incoming = deep_merge({}, body)
                     incoming.pop('clear_credentials', None)
+                    incoming.pop('expected_pair_id',None)
                     b = incoming.get("binance", {})
                     for name in ('api_key', 'api_secret'):
                         if name in b: b[name] = str(b[name] or '').strip()
@@ -1802,7 +1819,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({'ok': True, **TRADING.apply_exit_rules(body)})
                 return
             if path == '/api/trading/apply-entry':
-                self.send_json({'ok': True, **TRADING.apply_entry_threshold(body.get('entry_spread_usd'))})
+                self.send_json({'ok': True, **TRADING.apply_entry_threshold(body.get('entry_spread_usd'),
+                    **({'entry_lower_usd':body['entry_lower_usd']} if 'entry_lower_usd' in body else {}))})
                 return
             if path == '/api/trading/close':
                 group = body.get('group')

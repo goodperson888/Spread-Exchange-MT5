@@ -269,7 +269,7 @@ class NativePairConnectionTests(unittest.TestCase):
         old_terminal=Mock();old_pump=Mock();old_broker=self.r.engine.broker
         self.r.terminal=old_terminal;self.r.pump=old_pump;self.r.config=copy.deepcopy(self.c);self.r.connected=True
         self.call=lambda command,**kw:(_ for _ in ()).throw(ValueError('spec unavailable'))
-        with self.assertRaisesRegex(ValueError,'核验卖出品种规格'):self.r._native_connect(self.c)
+        with self.assertRaisesRegex(ValueError,'核验品种 A 规格'):self.r._native_connect(self.c)
         self.assertTrue(self.r.connected);self.assertIs(self.r.terminal,old_terminal);self.assertIs(self.r.pump,old_pump)
         self.assertIs(self.r.engine.broker,old_broker);old_terminal.close.assert_not_called();old_pump.close.assert_not_called()
         self.created[0].close.assert_called_once()

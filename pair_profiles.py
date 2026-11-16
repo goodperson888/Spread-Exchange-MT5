@@ -9,6 +9,7 @@ def capture(config):
     info=pair_info(config)
     return {**info, 'symbol':config['symbol'],
             'strategy':copy.deepcopy(config['strategy']), 'costs':copy.deepcopy(config['costs']),
+            'risk_alerts':copy.deepcopy(config.get('risk_alerts',{})),
             'execution':{k:config['execution'][k] for k in ('mode','entry_leg','poll_ms','magic','close_retry_limit')}}
 
 
@@ -40,6 +41,9 @@ def clean_profile(body, config):
     # New profiles copy reviewed parameters; they never inherit a running/armed state.
     if p['id']!=pair_info(config)['id']:
         p['execution']['magic']=9120000+int(uuid.uuid4().hex[:6],16)%10000000
+        if p['type']=='mt5_mt5' and not config.get('pair',{}).get('type')=='mt5_mt5':
+            p['strategy']['direction_mode']='auto'
+            p['strategy']['entry_lower_usd']=-max(1,abs(p['strategy']['entry_spread_usd']))
     return p
 
 
@@ -48,6 +52,7 @@ def activate(config, profile):
     c['pair']={k:profile[k] for k in ('id','name','type','short_symbol')}
     c['symbol']=profile['short_symbol'];c['mt5']['symbol']=profile['long_symbol']
     for key in ('strategy','costs'): c[key]=copy.deepcopy(profile[key])
+    c['risk_alerts']=copy.deepcopy(profile.get('risk_alerts',{}))
     c['execution'].update(copy.deepcopy(profile['execution']))
     if profile['type']=='mt5_mt5':
         c['costs'].update(usdt_usd=1.,usdt_usd_auto=False,binance_fee_auto=False)
