@@ -43,7 +43,8 @@ from market_push import PushBridge, QuoteEvents, QuotePump, TickFreshness, obser
 from entry_preflight import EntryPreflight
 from liquidation_risk import BinanceRiskMonitor, risk_snapshot
 from native_pair import NativePairRuntime, settings_for
-from pair_instruments import native_pair, pair_info, short_symbol, direction_quote
+from pair_instruments import native_pair, pool_pair, pair_info, short_symbol, direction_quote
+from mt5_pool import PoolRuntime
 import pair_profiles
 
 ROOT = Path(__file__).resolve().parent
@@ -88,7 +89,7 @@ def stop_legacy_paper_on_boot(path=STATE_PATH):
     return state
 
 
-class TradingRuntime(NativePairRuntime, MaintenanceWork):
+class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
     """The only component allowed to poll or submit paired trades.
 
     Credentials are loaded from the local config only when needed. They are
@@ -118,6 +119,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
         self.mt5_freshness = TickFreshness()
         self.market_wake = threading.Event()
         self.pump = None
+        self.pool = None
         self.push_bridge = None
         self._last_mt5_snapshot = None
         self._last_mt5_snapshot_at = 0
@@ -159,6 +161,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
     def connect(self, config, api_key='', api_secret='', mt5_mcp_token=''):
         config = copy.deepcopy(config)
         validate_trading(config)
+        if pool_pair(config): return self._pool_connect(config)
         if native_pair(config): return self._native_connect(config)
         mode = config['execution']['mode']
         
@@ -298,6 +301,8 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
 
             old_resources=tuple(getattr(self,name,None) for name in
                 ('pump','external_monitor','maintenance','entry_preflight','risk_monitor','market_stream','terminal'))
+            self.pool=None;self.engine.multi_pair=False
+            self.engine.__dict__.pop('entry_candidate_key',None)
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
             self.entry_preflight = new_preflight
             self.risk_monitor = new_risk_monitor
@@ -604,7 +609,9 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             try: path.chmod(0o600)
             except OSError: pass
         def notify():
-            if self.pump: self.pump.changed.set()
+            if getattr(self,'pool',None):
+                for wake in self.pool.pump.quote_wakes.values():wake.set()
+            elif self.pump:self.pump.changed.set()
         self.push_bridge = PushBridge(settings['token'], int(settings.get('port',8767)), notify).start()
         if self.pump: self.pump.bridge = self.push_bridge
 
@@ -700,6 +707,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
         return True
 
     def _poll(self):
+        if getattr(self,'pool',None): return self._pool_poll()
         if native_pair(self.config): return self._native_poll()
         if self.pump is None:
             self.connected=False;self.reconciled=False
@@ -869,6 +877,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
         return report
 
     def start(self, current_config=None):
+        if getattr(self,'pool',None): return self._pool_start(current_config)
         if self.config and native_pair(self.config): return self._native_start(current_config)
         with self.lock:
             if self._native_connection_pending(): raise ValueError('双品种行情仍在连接，暂不能启动新开仓')
@@ -909,7 +918,14 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
         with self.lock:
             if not self.connected:raise ValueError('请先连接双边行情')
             if not self.reconciled:raise ValueError('请先完成持仓对账')
-            ids=exit_rules.apply(self.engine,self.config,body)
+            config=self.config
+            if getattr(self,'pool',None):
+                selected=[g for g in self.engine.active() if g['id'] in body.get('groups',[])]
+                keys={g['key'] for g in selected}
+                if len(keys)!=1:raise ValueError('请选择同一个固定终端对的交易组')
+                config=next((ctx.config for ctx in self.pool.contexts.values() if pair_key(ctx.config) in keys),None)
+                if config is None:raise ValueError('找不到原终端对，不能修改规则')
+            ids=exit_rules.apply(self.engine,config,body)
             return {**self.snapshot(),'message':f'已更新 {len(ids)} 组的退出规则及所填返佣比例；预计返佣计入净收益，下一次有效行情检查起生效，满足条件可能立即平仓。'}
 
     def apply_entry_threshold(self, value, entry_lower_usd=None):
@@ -919,6 +935,7 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
         this setting is safe to change while the quote stream is running.
         """
         with self.lock:
+            if getattr(self,'pool',None):raise ValueError('多终端模式请在连接设置中分别维护每个终端对的阈值，保存后重新连接')
             if not self.connected:
                 raise ValueError('请先连接双边行情，再应用开仓阈值')
             if value is None or isinstance(value, bool) or not str(value).strip():
@@ -955,10 +972,12 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
                 raise ValueError('尚无可用报价，不能请求平仓')
             for g in self.engine.active():
                 if group is None or g['id']==group:
-                    g['exit_signal']=direction_quote(self.quote,g).get('exit')
+                    quote=self._pool_execution_quote(g) if getattr(self,'pool',None) else self.quote
+                    g['exit_signal']=direction_quote(quote,g).get('exit') if quote else None
             self.engine.request_close(group, reason)
             # One immediate attempt; the background loop performs retries.
-            self.engine.tick(self.config, self.plan, self.quote)
+            if getattr(self,'pool',None): self._pool_poll()
+            else:self.engine.tick(self.config, self.plan, self.quote)
             result=self.snapshot()
             targets=[g for g in self.engine.state['groups'] if group is None or g['id']==group]
             if any(self.engine.uncertain(g) for g in targets):
@@ -1109,6 +1128,8 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
         return True
 
     def reconcile(self):
+        if getattr(self,'pool',None):
+            with self.lock:return self._pool_reconcile()
         if self.config and native_pair(self.config): return self._native_reconcile()
         with self.lock:
             # 必须先连接才能进行对账
@@ -1225,27 +1246,30 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             # A valuation snapshot remains available while management is paused,
             # without invoking strategy decisions or changing durable state.
             st = copy.deepcopy(self.engine.state)
+            display_config=self.pool.contexts[self.pool.chart_key].config if getattr(self,'pool',None) else self.config
             quote = (self.pump.read()[0] if getattr(self,'pump',None) else None) or self.quote
             for group in st['groups']:
                 if group['status'] != 'closed':
-                    unverified=(not quote or group.get('key')!=quote.get('key') or not self.connected
+                    group_quote=self._pool_group_quote(group) if getattr(self,'pool',None) else quote
+                    unverified=(not group_quote or group.get('key')!=group_quote.get('key') or not self.connected
                                 or group['status']!='open' or self.engine.uncertain(group)
                                 or group.get('external_attention') or st.get('recovery')
                                 or (self.config and self.config['execution']['mode']=='live' and not self.reconciled))
                     group['valuation_status']='unverified' if unverified else 'estimate'
-                    if not unverified:group['valuation'] = self.engine.valuation(group, quote)
+                    if not unverified:group['valuation'] = self.engine.valuation(group, group_quote)
             return {
                 'connected': self.connected, 'last_error': self.last_error,
                 'connection_attempt': self._connection_status(),
-                'pair':pair_info(self.config or saved_config),
+                'pair':pair_info(display_config or saved_config),
                 'quote': quote, 'plan': self.plan,
+                'pool':self._pool_status() if getattr(self,'pool',None) else None,
                 'state': st, 'events': self.store.events(),
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,
                 'external_close_status': copy.deepcopy(getattr(self,'external_close_status',None)),
-                'strategy_runtime': {'entry_spread_usd': self.config['strategy']['entry_spread_usd'],
-                                     'entry_lower_usd':self.config['strategy'].get('entry_lower_usd',-5),
-                                     'direction_mode':self.config['strategy'].get('direction_mode','forward'),
+                'strategy_runtime': {'entry_spread_usd': display_config['strategy']['entry_spread_usd'],
+                                     'entry_lower_usd':display_config['strategy'].get('entry_lower_usd',-5),
+                                     'direction_mode':display_config['strategy'].get('direction_mode','forward'),
                                      'max_quote_age_ms': self.config['strategy']['max_quote_age_ms'],
                                      'mt5_symbol': self.config['mt5']['symbol'], 'symbol': self.config['symbol']} if self.config else None,
                 'config_pending': bool(self.connected and self.config_changed(saved_config)),
@@ -1266,7 +1290,10 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             # Keep history available after a page refresh or service restart,
             # before a new connection has established the runtime key.
             config = self.config or load_config()
-            key = pair_key(config) if config else ''
+            if pool_pair(config) and not getattr(self,'pool',None):
+                from mt5_pool_config import candidates
+                config=candidates(config)[config['mt5_pool']['chart_pair']]
+            key = pair_key(self.pool.contexts[self.pool.chart_key].config) if getattr(self,'pool',None) else pair_key(config) if config else ''
         return self.store.read_samples(key, since)
 
     def chart_reference(self,minutes,samples,enabled=True):
@@ -1275,6 +1302,10 @@ class TradingRuntime(NativePairRuntime, MaintenanceWork):
             return {'state':'disabled','samples':[],'message':'历史参考补取已关闭。'}
         with self.lock:
             config=copy.deepcopy(self.config or load_config())
+            if getattr(self,'pool',None):config=copy.deepcopy(self.pool.contexts[self.pool.chart_key].config)
+            elif pool_pair(config):
+                from mt5_pool_config import candidates
+                config=candidates(config)[config['mt5_pool']['chart_pair']]
             connected=self.connected
         return self.reference_history.request(config,minutes,samples,connected=connected)
 
@@ -1603,7 +1634,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if path in ("/app.js", "/workspace.js", "/pair-app.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
+        if path in ("/app.js", "/workspace.js", "/pair-app.js", "/pool-app.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
             suffix = path[1:]
             data = (ROOT / suffix).read_bytes()
             content_type = "text/javascript; charset=utf-8" if suffix.endswith("js") else "text/css; charset=utf-8"
@@ -1684,6 +1715,52 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             body = self.read_body()
+            if path=='/api/mt5/pool/save':
+                from mt5_pool_config import clean_pool,candidates,seed_rules
+                with TRADING.lock,LOCK:
+                    config=load_config()
+                    if not pool_pair(config) or body.get('expected_pair_id')!=config['pair']['id']:
+                        raise ValueError('当前终端池已变化，请刷新后编辑')
+                    replacement=copy.deepcopy(config);replacement['mt5_pool']=seed_rules(body.get('pool'),config['strategy'])
+                    validate_trading(replacement)
+                    keys={pair_key(c) for c in candidates(replacement).values()}
+                    if any(g['key'] not in keys for g in TRADING.engine.active()):
+                        raise ValueError('原终端仍有未结束交易组，不能删除、换账号或修改原品种/路径')
+                    write_config(replacement)
+                self.send_json({'ok':True,'config':replacement});return
+            if path=='/api/mt5/pool/check':
+                from mt5_pool_config import endpoint_settings
+                if not PROBE_LOCK.acquire(blocking=False):raise ValueError('已有连接检查正在进行，请稍候')
+                try:
+                    with LOCK:
+                        config=load_config()
+                        if not pool_pair(config) or body.get('expected_pair_id')!=config['pair']['id']:raise ValueError('当前组合已变化')
+                        endpoint=next((e for e in config['mt5_pool']['endpoints'] if e['id']==body.get('endpoint_id')),None)
+                        if not endpoint:raise ValueError('终端不存在')
+                        settings=endpoint_settings(config,endpoint)
+                    result=run_probe(settings)
+                    updated=False
+                    if result.get('connected') and result.get('identity_matches') and result.get('symbol'):
+                        with TRADING.lock,LOCK:
+                            latest=load_config()
+                            if latest!=config:raise ValueError('检查期间配置有修改，请重新检查')
+                            if TRADING.engine.active() and (not endpoint['account'] or not endpoint['server']):
+                                raise ValueError('已有持仓时不能重新绑定空白账户身份')
+                            endpoint.update(account=str(result['identity']['account']),server=result['identity']['server'])
+                            from mt5_pool_config import clean_pool
+                            config['mt5_pool']=clean_pool(config['mt5_pool'])
+                            write_config(config);updated=True
+                    self.send_json({'ok':True,'result':result,'applied':updated,'config':config});return
+                finally:PROBE_LOCK.release()
+            if path=='/api/mt5/pool/chart':
+                with TRADING.lock:
+                    owner=getattr(TRADING,'pool',None)
+                    if not owner or body.get('edge') not in owner.contexts:raise ValueError('请先连接并选择有效终端对')
+                    owner.chart_key=body['edge'];TRADING.plan=owner.contexts[owner.chart_key].plan
+                    TRADING.quote=owner.pump.read()[0]
+                    if TRADING.quote:TRADING.quote_events.publish(TRADING.quote)
+                    result=TRADING.snapshot()
+                self.send_json({'ok':True,**result});return
             if path in ('/api/pairs/save','/api/pairs/activate','/api/pairs/delete'):
                 with TRADING.lock, LOCK:
                     config=load_config();catalogue=pair_profiles.catalogue(config,read_json(DATA/'combinations.json',{}))
@@ -1729,6 +1806,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     with LOCK:
                         checked_config=load_config();settings=checked_config['mt5']
+                    if pool_pair(checked_config):raise ValueError('多终端模式请分别使用终端卡片上的“检查此终端”')
                     LAST_PROBE = None
                     token = str(body.get('mcp_token') or settings.get('mcp_token', ''))
                     if native_pair(checked_config) and settings.get('adapter') != 'native':

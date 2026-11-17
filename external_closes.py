@@ -129,6 +129,8 @@ def differences(state, config, mode, positions, mt5, open_orders):
 def external_order(group, leg, rows, qty, price, fee, order_id, at, position=None, identifier=None, swap=0):
     ids = sorted(str(x['ticket'] if leg=='mt5' else x['id']) for x in rows)
     key = json.dumps([group['key'],leg,order_id,ids],ensure_ascii=False)
+    if group.get('_endpoint_identity'):
+        key=json.dumps([key,group['_endpoint_identity']],ensure_ascii=False)
     result = dict(status='done',qty=qty,price=price,ticket=str(order_id),fee=fee,
                   platform_time_ms=at,reconcile_time_ms=int(time.time()*1000))
     if leg=='mt5': result.update(position=position,position_identifier=identifier,swap=swap,close_cause=close_cause.mt5_cause(rows))

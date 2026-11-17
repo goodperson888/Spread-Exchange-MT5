@@ -52,13 +52,19 @@ def build_report(state, events):
     group_ids={g['id']:'G'+str(i+1) for i,g in enumerate(groups)}
     orders=[o for o in state.get('orders',[]) if o.get('group') in group_ids]
     order_ids={o['id']:'O'+str(i+1) for i,o in enumerate(orders)}
+    terminal_ids={}
+    def terminal_alias(ref):
+        identity=ref.get('identity')
+        if not isinstance(identity,str) or not identity:return None
+        if identity not in terminal_ids:terminal_ids[identity]='T'+str(len(terminal_ids)+1)
+        return terminal_ids[identity]
     report={'schema_version':2,'receipt_schema_version':1,'exported_ms':int(time.time()*1000),
         'scope':{'group_limit':200,'event_limit':2000,'groups':len(groups),'orders':len(orders)},
         'notes':[
             '仅含最近200组已持久化执行记录及最近2000条中的执行、启动、暂停白名单事件；导出时正在执行的记录可能尚未完成。',
             '组和订单ID已替换；不含API凭据、账户、服务器、票据、路径或原始错误文本。仍包含价格、数量和交易时间。',
             'signal_spread为组触发价差；quote_spread及quote_context为各腿调用前报价；actual_spread为双边成交均价差，非同时市场报价。',
-            'actual_spread=币安成交均价×记录汇率−MT5成交均价；spread_slippage=实际−触发，平仓正偏移通常更不利。',
+            'actual_spread=币安成交均价×记录汇率−MT5成交均价；MT5 配对时分别表示 A、B 两腿。spread_slippage=实际−触发，平仓正偏移通常更不利。跨终端配对的 endpoints 使用 T1、T2 等本次导出内一致的匿名代号，已有组始终在原终端核对和平仓。',
             'dispatch_ms是调用交易适配器的本机时间；request_ms包括适配器内部校验及请求，并非纯网络或撮合耗时。',
             'response_received_ms/fill_time_ms为本机收到直接回报时间；reconcile_time_ms为后续查询确认时间。',
             'execution_open/close.elapsed_ms使用单调时钟，含本机同步日志、双腿执行和可能的查询等待，截止组完成确认前；不含最后一次组状态提交。',
@@ -119,6 +125,8 @@ def build_report(state, events):
         if g.get('pair',{}).get('type') in ('mt5_mt5','exchange_mt5'):
             row['pair']={'type':g['pair']['type']}
             if g['pair']['type']=='mt5_mt5': row['direction']=g.get('direction','forward') if g.get('direction','forward') in ('forward','reverse') else 'unknown'
+            if g['pair'].get('endpoints'):
+                row['pair'].update(mode='terminals',endpoints={leg:terminal_alias(ref) for leg,ref in g['pair']['endpoints'].items() if leg in ('binance','mt5')})
         if g.get('quantity_unit')=='lot':
             row['quantity_unit']='lot';row['leg_contracts']=numbers(g.get('leg_contracts',{}),'binance mt5')
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd entry_lower_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
@@ -160,6 +168,7 @@ def build_report(state, events):
              **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms dispatch_queue_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt close_batch')}
         if o.get('dispatch_mode') in ('serial','parallel'): row['dispatch_mode']=o['dispatch_mode']
         if o.get('platform')=='mt5': row['platform']='mt5'
+        if isinstance(o.get('endpoint'),dict):row['endpoint']=terminal_alias(o['endpoint'])
         if o.get('quantity_unit')=='lot': row['quantity_unit']='lot'
         row.update(numbers(o,'contract_size native_position_side'))
         if o.get('slippage_mode') in ('normal','protective'): row['slippage_mode']=o['slippage_mode']

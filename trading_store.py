@@ -51,10 +51,14 @@ class Store:
             CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, time INTEGER, kind TEXT, data TEXT);
             CREATE TABLE IF NOT EXISTS quotes (time INTEGER PRIMARY KEY, symbol TEXT, data TEXT);
+            CREATE TABLE IF NOT EXISTS pair_quotes (
+                time INTEGER, symbol TEXT, data TEXT, PRIMARY KEY(time, symbol)
+            );
             CREATE TABLE IF NOT EXISTS quote_minutes (
                 time INTEGER, symbol TEXT, data TEXT, PRIMARY KEY(time, symbol)
             );
             CREATE INDEX IF NOT EXISTS quote_symbol_time ON quotes(symbol, time);
+            CREATE INDEX IF NOT EXISTS pair_quote_symbol_time ON pair_quotes(symbol, time);
         ''')
         self.last_cleanup = 0
 
@@ -80,7 +84,8 @@ class Store:
         with self.lock, self.db:
             # The timestamp is the sample identity. A duplicate timestamp must
             # not mutate an already-rendered historical point.
-            self.db.execute('INSERT OR IGNORE INTO quotes VALUES (?,?,?)',
+            table = 'pair_quotes' if str(quote['key']).startswith('mt5_edge|') else 'quotes'
+            self.db.execute(f'INSERT OR IGNORE INTO {table} VALUES (?,?,?)',
                             (quote['time_ms'], quote['key'], json.dumps(quote, allow_nan=False)))
             bucket = quote['time_ms'] - quote['time_ms'] % 60000
             # Archive points are immutable. High-frequency rows remain in
@@ -90,6 +95,7 @@ class Store:
             now = int(time.time()*1000)
             if now - self.last_cleanup >= 60000:
                 self.db.execute('DELETE FROM quotes WHERE time < ?', (now-86400000,))
+                self.db.execute('DELETE FROM pair_quotes WHERE time < ?', (now-86400000,))
                 self.db.execute('DELETE FROM quote_minutes WHERE time < ?', (now-30*86400000,))
                 self.last_cleanup = now
 
@@ -115,6 +121,8 @@ class Store:
         key=str(key or '')
         if not key:
             return []
+        if key.startswith('mt5_edge|'):
+            return [key]
         parts=key.split('|')
         if len(parts)<3 or not parts[2]:
             return [key]
@@ -159,7 +167,8 @@ class Store:
                 sample['sample_interval_ms']=interval
                 yield sample
         samples=list(display_samples('quote_minutes',since-since%60000,old_end,old_limit,60000))
-        samples+=list(display_samples('quotes',new_start,end,limit-old_limit,1))
+        table='pair_quotes' if str(key).startswith('mt5_edge|') else 'quotes'
+        samples+=list(display_samples(table,new_start,end,limit-old_limit,1))
         return sorted((row for row in samples if since<=row.get('time_ms',0)<end),key=lambda row:row.get('time_ms',0))
 
     def events(self, limit=100):

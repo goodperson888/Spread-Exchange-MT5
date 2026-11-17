@@ -105,6 +105,8 @@ def align_bars(short,long,start,end,interval):
 
 def fetch_bars(config,period,start,end,cancel):
     """Dedicated native worker and public HTTP client; no trading credentials."""
+    if config.get('pair',{}).get('endpoints'):
+        return fetch_terminal_bars(config,period,start,end,cancel)
     from trading_brokers import Terminal, Binance
     interval=PERIODS[period];deadline=time.monotonic()+45
     diagnostics=dict(period=period,start_ms=start,end_ms=end,checked_ms=int(time.time()*1000),stage='initialize',legs=[])
@@ -181,6 +183,43 @@ def fetch_bars(config,period,start,end,cancel):
         raise HistoryError(str(exc),diagnostics,'fetch_failed') from None
     finally:
         terminal.close()
+
+
+def fetch_terminal_bars(config,period,start,end,cancel):
+    """Calibrate each server independently before joining the fixed pair in UTC."""
+    from trading_brokers import Terminal
+    from mt5_pool_config import endpoint_settings
+    diagnostics=dict(period=period,start_ms=start,end_ms=end,checked_ms=int(time.time()*1000),
+                     stage='clock',legs=[],clock_state='independent_servers',server_offsets={})
+    deadline=time.monotonic()+45;bars={}
+    def check():
+        if cancel.is_set():raise Cancelled()
+        remaining=deadline-time.monotonic()
+        if remaining<=0:raise ValueError('历史补取超时')
+        return min(12,remaining)
+    try:
+        for leg,e in config['pair']['endpoints'].items():
+            settings=endpoint_settings(config,e)
+            terminal=Terminal(settings,config['execution']['magic'],read_only=True,timeout_seconds=check())
+            try:
+                clock={};offset=native_clock(terminal,[e['symbol']],cancel,check,clock)
+                if offset%PERIODS[period]:raise ValueError('终端时间偏移与所选历史周期不匹配')
+                diagnostics['server_offsets'][leg]=offset
+                result=terminal.call('chart_rates',symbol=e['symbol'],period=period,start_ms=start+offset,
+                    end_ms=end+offset,clock_offset_ms=offset,timeout_seconds=check())
+                tick=result.get('tick_time_ms');observed=result.get('observed_ms')
+                diagnostics['legs'].append(dict(clock_row(leg,tick,observed),bar_count=len(result.get('bars',[]))))
+                if (result.get('symbol')!=e['symbol'] or not positive(tick) or not positive(observed)
+                        or abs(tick-observed-offset)>120000):raise ValueError('独立终端历史时基尚未核验')
+                if offset and (not positive(result.get('current_bar_ms')) or not 0<=tick-result['current_bar_ms']<PERIODS[period]+120000):
+                    raise ValueError('终端当前 K 线与报价时基不一致')
+                bars[leg]=[{**row,'t':row['t']-offset} for row in result['bars']]
+            finally:terminal.close()
+        rows=align_bars(bars['binance'],bars['mt5'],start,end,PERIODS[period])
+        diagnostics.update(stage='complete',paired_count=len(rows))
+        return HistoryRows(rows,diagnostics)
+    except Cancelled:raise
+    except Exception as exc:raise HistoryError(str(exc),diagnostics,'independent_clock_failed') from None
 
 
 def percentile(values,fraction):

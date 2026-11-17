@@ -87,7 +87,7 @@ function formConfig() {
 function editableField(id) {
   const input=$(id);
   return input && !input.readOnly && !SECRET_IDS.has(id) && !id.startsWith('chart-') && id!=='record-pair-filter' &&
-    !id.startsWith('pair-') && !id.startsWith('exit-rule-') && !id.startsWith('adoption-') &&
+    !id.startsWith('pair-') && !id.startsWith('pool-') && !id.startsWith('exit-rule-') && !id.startsWith('adoption-') &&
     ['INPUT','SELECT'].includes(input.tagName);
 }
 function draftFields() {
@@ -166,18 +166,23 @@ function populate(c) {
   credentialsDirty=false; dirtySecrets.clear();
   syncConditionalFields();
   window.GoldPairPairs?.configure(c);
+  window.GoldPairPool?.configure(c);
 }
 function visible(id, show) { $(id).classList.toggle('is-hidden', !show); }
 function syncConditionalFields(source='') {
   let live=value('exec-mode')==='live';
   const same=window.GoldPairPairs?.info()?.type==='mt5_mt5';
-  $('native-direction-settings').hidden=!same;$('entry-lower-field').hidden=!same;
+  const pool=window.GoldPairPool?.enabled();
+  $('native-direction-settings').hidden=!same||pool;$('entry-lower-field').hidden=!same||pool;
   $('entry').min=same?'-100000':'0';
   const mcpAdapter=value('mt5-adapter')==='mcp';
   const incompatible=live && mcpAdapter;
   const compatibility=$('mode-compatibility');
   if (compatibility) {
-    if(same) {
+    if(pool) {
+      compatibility.textContent='多 MT5 使用各自的 Windows 原生终端；纸面模式读取真实行情，两腿相同手数并核验相同合约大小。';
+      compatibility.classList.toggle('error',value('mt5-adapter')!=='native');
+    } else if(same) {
       compatibility.textContent='同一 MT5 双品种使用 Windows 原生终端；纸面模式也需读取该终端的两路真实行情，双腿相同手数。';
       compatibility.classList.toggle('error',value('mt5-adapter')!=='native');
     } else if (incompatible) {
@@ -378,6 +383,7 @@ function showPlan(p, executable=false) {
   $('plan-state').classList.remove('warning');
 }
 function previewPlan() {
+  if(window.GoldPairPool?.preview())return;
   if(window.GoldPairPairs?.info()?.type==='mt5_mt5') {
     const p=window.GoldPairPairs.info();
     message('plan-result',`卖 ${p.short_symbol} / 买 ${value('mt5-symbol')}：每腿 ${value('lots')} 手。\n连接时分别读取两腿合约大小、手数范围和步长；相同手数可能对应不同名义金额。`);
@@ -520,7 +526,7 @@ $('paper-step').onclick = () => action('paper-step', async () => {
 });
 for(const input of document.querySelectorAll('input:not([readonly]), select')) {
   const changed=()=>{
-    if(input.id.startsWith('chart-')||input.id==='record-pair-filter'||input.id.startsWith('pair-')||input.id.startsWith('adoption-')||input.id.startsWith('exit-rule-')) return;
+    if(input.id.startsWith('chart-')||input.id.startsWith('pool-')||input.id==='record-pair-filter'||input.id.startsWith('pair-')||input.id.startsWith('adoption-')||input.id.startsWith('exit-rule-')) return;
     revision++;
     if(SECRET_IDS.has(input.id)) {
       credentialsDirty=true; dirtySecrets.add(input.id);

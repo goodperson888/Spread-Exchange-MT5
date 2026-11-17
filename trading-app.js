@@ -18,12 +18,13 @@
   const isNative=g=>g?.pair?.type==='mt5_mt5';
   const reverse=g=>isNative(g)&&g.direction==='reverse';
   const canonical=(g,value)=>reverse(g)?-value:value;
-  const legLabel=(g,leg)=>isNative(g)?(leg==='binance'?'MT5 品种 A':'MT5 品种 B'):(leg==='binance'?'币安':'MT5');
+  const legLabel=(g,leg)=>g?.pair?.endpoints?.[leg]?.name||(isNative(g)?(leg==='binance'?'MT5 品种 A':'MT5 品种 B'):(leg==='binance'?'币安':'MT5'));
   const recordSelection=g=>!el('record-pair-filter')?.value||el('record-pair-filter').value==='all'||(g.pair?.id||'legacy')===el('record-pair-filter').value;
   const usd = x => Number.isFinite(Number(x)) ? `${Number(x)>=0?'+':''}${Number(x).toFixed(2)} USD` : '—';
   const escape = value => String(value ?? '').replace(/[&<>'"]/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[x]));
   const recordHint=(label,detail,key)=>`<span class="record-hint" tabindex="0" data-record-hint="${escape(detail)}" data-record-hint-key="${escape(key)}" aria-label="${escape(label+'：'+detail)}">${escape(label)}</span>`;
   function recordPage(key,items,label) {
+    recordPages[key]??=1;
     const pages=Math.max(1,Math.ceil(items.length/recordPageSize));
     const page=recordPages[key]=Math.min(pages,Math.max(1,recordPages[key]));
     const start=(page-1)*recordPageSize;
@@ -242,7 +243,7 @@
   function nativeGroupRow(g,orders,states) {
     const v=g.valuation||{},s=g.parameters||{},costs=g.costs||{},pending=unconfirmed(g,orders);
     const guarded=valuationPending(g,orders),value=x=>guarded?'待核对':usd(x);
-    const a=escape(g.symbol),b=escape(g.mt5_symbol),remaining=v.remaining||{};
+    const a=escape((g.pair?.endpoints?.binance?.name?g.pair.endpoints.binance.name+' · ':'')+g.symbol),b=escape((g.pair?.endpoints?.mt5?.name?g.pair.endpoints.mt5.name+' · ':'')+g.mt5_symbol),remaining=v.remaining||{};
     const direction=reverse(g)?`买 ${a} / 卖 ${b}`:`卖 ${a} / 买 ${b}`;
     const reason=[g.reason||'无额外原因',g.execution_warning,
       g.exit_decision?`退出触发：${g.reason}；触发 A−B 价差 ${n(canonical(g,g.exit_decision.signal_spread))}；触发预估净收益 ${usd(g.exit_decision.estimated_net)}`:''].filter(Boolean).join('；');
@@ -446,6 +447,12 @@
       const page=recordPage(key,rows,label);
       return recordTable(`<table class="records-table"><thead><tr>${headers.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${page.items.map(row=>`<tr>${row.map(x=>`<td>${display(x)}</td>`).join('')}</tr>`).join('')}</tbody></table>`,page);
     };
+    if(report?.pool_endpoints) {
+      setRecordContent('platform-positions',`<p class="note">${escape(dateTime(report.time_ms))} · ${escape(report.status)}（对账快照）</p>`+
+        report.pool_endpoints.map(e=>`<h3>${escape(e.name)} · ${escape(e.symbol)}</h3>`+
+          (e.snapshot.positions.length?table('pool-'+e.id,'MT5 持仓',['票据','方向','手数','开仓价','浮动收益 USD'],e.snapshot.positions.map(p=>[p.ticket,p.side===1?'卖出':'买入',p.lots,p.price_open,p.profit])):'<p class="note">当前品种无持仓。</p>')).join(''));
+      return;
+    }
     if(report?.native_legs) {
       setRecordContent('platform-positions',`<p class="note">${escape(dateTime(report.time_ms))} · ${escape(report.status)}</p>`+
         Object.entries(report.native_legs).map(([leg,snap])=>`<h3>${legLabel(report,leg)} ${escape(snap.spec?.name)}</h3>`+
@@ -632,6 +639,7 @@
     renderEvents(result.events||[]);
     renderAdoption(result);
     renderExitEditor();
+    window.GoldPairPool?.status(result);
   }
   const ruleInputs={target_mode:'mode',take_contraction_usd:'take',exit_spread_usd:'spread',require_net_profit:'require',min_net_profit_usd:'profit',group_loss_enabled:'loss-enabled',group_max_loss_usd:'loss',max_hold_minutes:'hold'};
   let exitDraft=null, exitPreview=null, exitChoicesSignature='';
@@ -872,7 +880,7 @@
   }
   function nativeChartView() {
     const runtime=last?.strategy_runtime||{},mode=runtime.direction_mode||'forward';
-    const active=(last?.state?.groups||[]).filter(g=>g.status!=='closed');
+    const active=(last?.state?.groups||[]).filter(g=>g.status!=='closed'&&(!last?.pool||g.key===last?.quote?.key));
     const directions=new Set(active.map(g=>g.direction||'forward'));
     const held=directions.size===1?[...directions][0]:null;
     const choice=el('chart-focus').value||'auto';
@@ -918,7 +926,7 @@
     const showEntry=!native||view.both||view.field==='entry',showExit=!native||view.both||view.field==='exit';
     el('chart-focus-controls').hidden=!native;
     el('spread-stats').dataset.native=String(native);
-    const groups=last?.state?.groups||[];
+    const groups=(last?.state?.groups||[]).filter(g=>!last?.pool||g.key===last?.quote?.key);
     const targetMarks=groups.filter(g=>g.status==='open').map(g=>({field:reverse(g)?'entry':'exit',mark:{name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported?(g.management_enabled?' 接管止盈':' 目标（暂停）'):' 已锁定止盈'),yAxis:g.parameters?.target_mode==='absolute'?g.parameters.exit_spread_usd:canonical(g,g.entry-g.parameters?.take_contraction_usd)}})).filter(x=>Number.isFinite(x.mark.yAxis));
     const marks=targetMarks.map(x=>x.mark);
     const missing=gaps.map(gap=>[{name:gap.reason,xAxis:gap.start,itemStyle:{color:'rgba(100,116,139,.16)'},label:{show:true,color:'#536274',position:'insideTop'}},{xAxis:gap.end}]);
@@ -1022,6 +1030,7 @@
   async function saveBeforeTrading() {
     const before=typeof revision==='number'?revision:null;
     await saveConfig();
+    await window.GoldPairPool?.save();
     if(before!==null&&before!==revision)throw Error('保存期间参数又有修改，请核对当前输入后再次操作。');
   }
   async function connect() {
@@ -1085,7 +1094,7 @@
     const link=document.createElement('a');link.href=url;link.download='GoldPairQuotes.set';link.click();
     setTimeout(()=>URL.revokeObjectURL(url),10000);
     const asset=r.binary||r.source;
-    const charts=window.GoldPairPairs?.info()?.type==='mt5_mt5'?'分别挂到品种 A 和品种 B 的两个图表，两处均在“输入”中载入同一个 .set 文件':'挂到当前黄金图表，在“输入”中载入刚下载的 .set 文件';
+    const charts=window.GoldPairPool?.enabled()?'分别挂到终端池各个账户的已配置黄金图表，在每处“输入”中载入同一个 .set 文件；程序按账号、服务器和品种区分报价':window.GoldPairPairs?.info()?.type==='mt5_mt5'?'分别挂到品种 A 和品种 B 的两个图表，两处均在“输入”中载入同一个 .set 文件':'挂到当前黄金图表，在“输入”中载入刚下载的 .set 文件';
     el('push-result').innerHTML=`本机接收器已启动（127.0.0.1:${Number(r.port)}），参数文件已下载。<a href="${escape(asset)}" download>下载${r.binary?'已编译 EA':'EA 源码'}</a>。将 EA 放入 MT5 数据目录的 MQL5/Experts，${charts}。`;
   },'push-setup','正在准备 EA 接收器和本机参数…');
   window.addEventListener('offline',()=>{stream?.close();stream=null;streamReady=false;streamLabel();});
@@ -1108,6 +1117,7 @@
   window.addEventListener('pageshow',()=>{if(!document.hidden)startStream();});
   window.addEventListener('beforeunload',suspendPage);
   window.addEventListener('resize',()=>chart?.resize());
+  window.addEventListener('gold-pair-chart-changed',async()=>{await status(false);await plot();});
   window.addEventListener('gold-workspace-changed',()=>{
     chart?.resize();paintSoon();
     if((historyDirty||!chart)&&!el('view-trading')?.hidden)plot().catch(error=>text('trading-result',error.message,true));

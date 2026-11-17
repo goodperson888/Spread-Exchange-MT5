@@ -74,6 +74,7 @@ class Engine:
     def observe_exit_wait(self, c, q, code):
         if getattr(self, 'exit_observations', None) is None: return
         for g in self.active():
+            if getattr(self,'multi_pair',False) and g['key']!=pair_key(c): continue
             self._observe_exit(g, q, code, limits=c['strategy'], expected_key=pair_key(c))
 
     def active(self): return [g for g in self.state['groups'] if g['status']!='closed']
@@ -215,6 +216,8 @@ class Engine:
             o.update(platform='mt5',quantity_unit='lot',contract_size=g['leg_contracts'][leg],
                      native_position_side=position_side(g,leg))
             o.pop('position_side',None);o.pop('top_qty',None)
+            if g['pair'].get('endpoints'):
+                o['endpoint']=copy.deepcopy(g['pair']['endpoints'][leg])
         if action=='close' and (leg=='mt5' or o.get('platform')=='mt5'):
             candidates=[x for x in self.state['orders'] if x['group']==g['id'] and x['leg']==leg and x['action']=='open' and x['result'].get('qty',0)>0]
             if g.get('imported'):
@@ -562,7 +565,7 @@ class Engine:
             second_q=q
             provider=getattr(self,'quote_provider',None)
             if provider:
-                try: second_q=provider()
+                try: second_q=provider(g) if g.get('pair',{}).get('endpoints') else provider()
                 except Exception as exc:
                     g['status']='unwinding';g['reason']='第二腿前无法取得新报价，正在保护性平仓：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return True
             if (stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms'] or
@@ -627,6 +630,7 @@ class Engine:
         g['pair']=pair_info(c)
         if native_pair(c):
             g.update(leg_contracts=copy.deepcopy(p['leg_contracts']),quantity_unit='lot',direction=direction)
+            if c.get('pair',{}).get('endpoints'): g['magic']=c['execution']['magic']
         attach_commission_reference(self,c,g)
         self._begin_execution(g,'open',q,entry_started,now)
         self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
@@ -698,7 +702,7 @@ class Engine:
     def _close_quote(self, q):
         provider=getattr(self,'close_quote_provider',None)
         if provider:
-            try: q=provider()
+            try: q=provider(q) if getattr(self,'multi_pair',False) else provider()
             except Exception: q=None
         return q
 
@@ -920,10 +924,14 @@ class Engine:
             self.observe_exit_wait(c,q,'QUOTE_UNAVAILABLE')
             return
         market_quote=q
+        # A pool shares the journal and global capacity, but every group's
+        # management/valuation uses only its permanently bound pair of books.
+        scoped=lambda:([g for g in self.active() if g['key']==market_quote['key']]
+                       if getattr(self,'multi_pair',False) else self.active())
         measure = getattr(self, 'latency', None) is not None
         decision_elapsed = 0.
         exit_event=False
-        for g in self.active():
+        for g in scoped():
             q=direction_quote(market_quote,g)
             if g['key']!=q['key']: raise ValueError('当前行情与持仓账户或品种不一致')
             if g['status']=='opening':
@@ -949,7 +957,7 @@ class Engine:
                     valuation=g['valuation'],limits=c['strategy'])
             if measure: decision_elapsed += time.monotonic()-started
         started = time.monotonic() if measure else 0
-        opened=[g for g in self.active() if g['status']=='open' and (not g.get('imported') or g.get('management_enabled'))]
+        opened=[g for g in scoped() if g['status']=='open' and (not g.get('imported') or g.get('management_enabled'))]
         total=sum(g.get('valuation',{}).get('net',0) for g in self.active() if not g.get('imported'))
         loss=c['strategy']['total_loss_enabled'] and total<=-c['strategy']['total_max_loss_usd']
         basket=[g for g in opened if g['parameters']['exit_mode']=='basket' and not g.get('imported')]
@@ -994,13 +1002,13 @@ class Engine:
                 if reason in ('本策略总浮动亏损上限','单组亏损上限'): self.pause(reason)
                 started = time.monotonic() if measure else 0
         if measure: decision_elapsed += time.monotonic()-started
-        for g in self.active():
+        for g in scoped():
             if g['status'] in ('closing','unwinding'):
                 exit_event=True;self.close_group(g,market_quote)
         started = time.monotonic() if measure else 0
         q=market_quote
         s=c['strategy'];all_active=self.active();active=[g for g in all_active if not g.get('imported')];grid_index=0;grid_allowed=True
-        direction=entry_direction(c,q,all_active)
+        direction=entry_direction(c,q,scoped() if getattr(self,'multi_pair',False) else all_active)
         open_threshold=-s.get('entry_lower_usd',-5) if direction=='reverse' else s['entry_spread_usd']
         entry_q=direction_quote(q,{'pair':c.get('pair',{}),'direction':direction})
         if s.get('grid_enabled') and active:
@@ -1012,7 +1020,7 @@ class Engine:
                 grid_allowed=grid_index<=int(s['grid_max_adds'])
             else:
                 grid_allowed=False
-        should_open = (self.state['enabled'] and not exit_event and all(g['status']=='open' for g in all_active)
+        should_open = (self.state['enabled'] and getattr(self,'entry_candidate_key',q['key'])==q['key'] and not exit_event and all(g['status']=='open' for g in all_active)
             and grid_allowed and len(active)<s['max_groups']
             and sum(g['lots'] for g in all_active)+p['lots']<=s['max_total_lots']+1e-9
             and direction is not None and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and entry_q['entry']>=open_threshold)

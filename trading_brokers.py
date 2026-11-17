@@ -879,7 +879,7 @@ def worker_main():
                     if not mt.symbol_select(name,True): raise ValueError('MT5 品种不可用：'+name)
                 data=True
             else:
-                if read_only and cmd not in ('snapshot','quote','pair_quotes','history','external_history','external_history_probe','query','pair_spec','chart_rates','commission_reference','chart_clock'):
+                if read_only and cmd not in ('snapshot','quote','pair_quotes','history','external_history','external_history_probe','query','pair_spec','chart_rates','commission_reference','chart_clock','margin'):
                     raise ValueError('持仓核对会话只允许读取行情、持仓和成交')
                 a,t=identity()
                 name=r.get('symbol',settings['symbol'])

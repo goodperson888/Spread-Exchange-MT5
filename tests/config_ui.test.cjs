@@ -61,6 +61,14 @@ test('lots preview updates immediately after refresh without a fresh MT5 check',
   f.edit('lots','');assert.match(f.el('plan-result').textContent,/必须大于 0/);
 });
 
+test('pool chart selection is display-only and never dirties trading configuration',async()=>{
+  const f=await fixture();const revision=f.run('revision'),message=f.el('config-status').textContent;
+  f.edit('pool-chart-pair','t2~t3');
+  assert.equal(f.run('revision'),revision);
+  assert.equal(f.run('dirtyFields.size'),0);
+  assert.equal(f.el('config-status').textContent,message);
+});
+
 test('rebate percentages restore and save independently of the exchange fee rate',async()=>{
  const f=await fixture();
  assert.equal(f.el('binance-rebate').value,'0');assert.equal(f.el('mt5-rebate').value,'0');

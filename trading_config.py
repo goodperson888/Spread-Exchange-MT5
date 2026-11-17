@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 from urllib.parse import urlsplit
 from liquidation_risk import validate_alerts
-from pair_instruments import native_pair, short_symbol
+from pair_instruments import native_pair, short_symbol, pool_pair
 
 REBATE_FIELDS=('binance_rebate_percent','mt5_rebate_percent')
 
@@ -35,6 +35,12 @@ def validate_proxy_url(value):
 
 
 def validate(c):
+    if pool_pair(c):
+        from mt5_pool_config import candidates
+        for fixed in candidates(c).values(): validate(fixed)
+        if c['strategy'].get('grid_enabled'): raise ValueError('多终端择优暂不支持网格加仓，请关闭网格')
+        if c['strategy']['exit_mode']!='group': raise ValueError('多终端择优请使用逐组退出，各组绑定原终端')
+        return
     s, e, costs = c['strategy'], c['execution'], c['costs']
     validate_alerts(c.get('risk_alerts', {}))
     validate_proxy_url(c.get('binance', {}).get('proxy_url', ''))
@@ -47,7 +53,7 @@ def validate(c):
             raise ValueError('反向开仓下限必须在 -100000～100000 之间')
         if mode=='auto' and lower>=s['entry_spread_usd']: raise ValueError('自动双向的下限必须小于上限')
         a,b=short_symbol(c),c['mt5']['symbol']
-        if not all(isinstance(x,str) and re.fullmatch(r'[\w.#+/-]{1,40}',x) for x in (a,b)) or a==b:
+        if not all(isinstance(x,str) and re.fullmatch(r'[\w.#+/-]{1,40}',x) for x in (a,b)) or (a==b and not c.get('pair',{}).get('endpoints')):
             raise ValueError('请填写两个不同的 MT5 完整品种名')
         if c['mt5']['adapter'] not in ('native','paper'):
             raise ValueError('同一 MT5 双品种需要 Windows 原生终端；MCP 暂不支持双品种执行')
@@ -109,6 +115,13 @@ def validate(c):
 
 
 def pair_key(c):
+    if pool_pair(c) or c.get('pair',{}).get('endpoints'):
+        import hashlib,json
+        from mt5_pool_config import clean_pool,endpoint_ref
+        rows=clean_pool(c['mt5_pool'])['endpoints'] if pool_pair(c) else list(c['pair']['endpoints'].values())
+        identity=[(e['id'],endpoint_ref(e)['identity']) for e in sorted(rows,key=lambda e:e['id'])]
+        digest=hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
+        return '|'.join(('mt5_pool' if pool_pair(c) else 'mt5_edge',c['execution']['mode'],str(c['execution']['magic']),c['pair']['id'],digest))
     if native_pair(c):
         return 'mt5_mt5|'+ '|'.join(str(x) for x in (c['execution']['mode'],c['mt5']['adapter'],
             c['mt5'].get('terminal_path'),c['mt5'].get('account'),c['mt5'].get('server'),

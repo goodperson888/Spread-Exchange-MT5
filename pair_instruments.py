@@ -8,6 +8,10 @@ def native_pair(config):
     return config.get('pair', {}).get('type') == 'mt5_mt5'
 
 
+def pool_pair(config):
+    return native_pair(config) and config.get('pair', {}).get('mode') == 'pool'
+
+
 def short_symbol(config):
     return config.get('pair', {}).get('short_symbol', '')
 
@@ -51,10 +55,15 @@ def entry_direction(config,quote,active=()):
 def pair_info(config):
     p = config.get('pair', {})
     native = native_pair(config)
-    return dict(id=p.get('id', 'legacy'), name=p.get('name') or f"{config['symbol']} × {config['mt5']['symbol']}",
+    result = dict(id=p.get('id', 'legacy'), name=p.get('name') or f"{config['symbol']} × {config['mt5']['symbol']}",
                 type='mt5_mt5' if native else 'exchange_mt5',
                 short_symbol=short_symbol(config) if native else config['symbol'],
                 long_symbol=config['mt5']['symbol'], quantity_unit='lot' if native else 'oz')
+    if p.get('mode'): result['mode']=p['mode']
+    if p.get('endpoints'):
+        from mt5_pool_config import endpoint_ref
+        result['endpoints']={leg:endpoint_ref(e) for leg,e in p['endpoints'].items()}
+    return result
 
 
 def equal_lot_plan(config, specs):
@@ -71,7 +80,10 @@ def equal_lot_plan(config, specs):
             raise ValueError(f"{s['name']} 合约规格无效或盈亏币种不是 USD")
         if int(s.get('trade_mode', -1)) != 4:
             raise ValueError(f"{s['name']} 当前不是完整可交易模式")
-    if specs['binance']['name'] == specs['mt5']['name']: raise ValueError('两条腿必须选择不同品种')
+    if specs['binance']['name'] == specs['mt5']['name'] and not config.get('pair',{}).get('endpoints'):
+        raise ValueError('两条腿必须选择不同品种')
+    if config.get('pair',{}).get('endpoints') and specs['binance']['contract_size_oz']!=specs['mt5']['contract_size_oz']:
+        raise ValueError('多终端同品种相同手数需要相同合约大小，请核对两个黄金合约规格')
     return dict(lots=float(lots), qty=float(lots), contract=1., quantity_unit='lot',
                 leg_contracts={k:float(v['contract_size_oz']) for k,v in specs.items()},
                 specs=copy.deepcopy(specs), pair=pair_info(config))

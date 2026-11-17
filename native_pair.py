@@ -18,13 +18,19 @@ import close_cause
 import commission_reference
 
 
-def settings_for(config):
+def settings_for(config,leg=None):
+    if leg and config.get('pair',{}).get('endpoints'):
+        from mt5_pool_config import endpoint_settings
+        return endpoint_settings(config,config['pair']['endpoints'][leg])
     return {**config['mt5'],'pair_symbols':[short_symbol(config),config['mt5']['symbol']]}
 
 
 class NativePairBroker:
     def __init__(self, terminal, contracts):
         self.terminal=terminal;self.contracts=contracts
+
+    def terminal_for(self,leg):
+        return self.terminal[leg] if isinstance(self.terminal,dict) else self.terminal
 
     def wire(self, order):
         o=copy.deepcopy(order);factor=self.contracts[o['leg']]
@@ -42,11 +48,11 @@ class NativePairBroker:
 
     def submit(self, order):
         o=self.wire(order)
-        return self.read_result(self.terminal.call('submit',symbol=o['symbol'],order=o),o['leg'])
+        return self.read_result(self.terminal_for(o['leg']).call('submit',symbol=o['symbol'],order=o),o['leg'])
 
     def query(self, order):
         o=self.wire(order)
-        return self.read_result(self.terminal.call('query',symbol=o['symbol'],order=o),o['leg'])
+        return self.read_result(self.terminal_for(o['leg']).call('query',symbol=o['symbol'],order=o),o['leg'])
 
     def cancel(self, order):
         # Native IOC/FOK original orders must be verified, never blindly replaced.
@@ -112,6 +118,8 @@ class NativePairPump:
 def leg_view(state, group, leg):
     """Reuse the native external-close verifier with one ticket-owned leg at a time."""
     g=copy.deepcopy(group);g['mt5_symbol']=group['symbol'] if leg=='binance' else group['mt5_symbol']
+    if group.get('pair',{}).get('endpoints'):
+        g['_endpoint_identity']=group['pair']['endpoints'][leg]['identity']
     rows=[copy.deepcopy(o) for o in state['orders'] if o['group']==g['id'] and o['leg']==leg]
     for o in rows: o['leg']='mt5'
     return dict(groups=[g],orders=rows),g
@@ -119,6 +127,9 @@ def leg_view(state, group, leg):
 
 def exposure_matches(engine, config, snapshots):
     """A complete in-memory ownership proof against a stable platform snapshot."""
+    if config.get('pair',{}).get('endpoints'):
+        from mt5_pool import pool_exposure_matches
+        return pool_exposure_matches(engine,config,snapshots)
     for leg,snapshot in snapshots.items():
         if snapshot['orders']: return False
         current={str(p['ticket']):p for p in snapshot['positions']};expected=set()
@@ -153,14 +164,20 @@ class NativePairObserver:
     def close(self):
         self.stopped.set()
         with self.lock: terminals=list(self.terminals.values());self.terminals.clear()
-        for terminal in terminals: terminal.close()
-    def _terminal(self,lane):
-        with self.lock: terminal=self.terminals.get(lane)
+        for terminal in terminals:
+            if terminal is not None:
+                try: terminal.close()
+                except Exception: pass
+    def _terminal(self,lane,leg=None):
+        if self.runtime.config.get('pair',{}).get('endpoints'):
+            leg=leg or 'mt5';slot=(lane,leg)
+        else: slot=lane
+        with self.lock: terminal=self.terminals.get(slot)
         if terminal is None:
-            r=self.runtime;terminal=Terminal(settings_for(r.config),r.config['execution']['magic'],read_only=True)
+            r=self.runtime;terminal=Terminal(settings_for(r.config,leg),r.config['execution']['magic'],read_only=True)
             with self.lock:
                 if self.stopped.is_set(): terminal.close();raise ValueError('观察会话已停止')
-                self.terminals[lane]=terminal
+                self.terminals[slot]=terminal
         return terminal
     def step(self,lane):
         r=self.runtime
@@ -176,7 +193,7 @@ class NativePairObserver:
             state=copy.deepcopy(dict(groups=groups,orders=token['orders']))
         finally: r.lock.release()
         terminal=self._terminal(lane)
-        snapshots={leg:terminal.call('snapshot',symbol=name) for leg,name in
+        snapshots={leg:self._terminal(lane,leg).call('snapshot',symbol=name) for leg,name in
                    (('binance',short_symbol(c)),('mt5',c['mt5']['symbol']))}
         if lane=='account':
             with r.lock:
@@ -213,7 +230,7 @@ class NativePairObserver:
         updates=[];fees=[];swaps={};errors=[]
         if any(s['orders'] for s in snapshots.values()):
             raise ValueError('MT5 组合品种存在未完成委托，等待完整核对')
-        broker=NativePairBroker(terminal,r.plan['leg_contracts'])
+        broker=NativePairBroker({leg:self._terminal(lane,leg) for leg in ('binance','mt5')},r.plan['leg_contracts'])
         for g in state['groups']:
             if any(o['group']==g['id'] and o['result'].get('status')!='done' for o in state['orders']): continue
             group_swap=0.;verified=True;carry_valid=True
@@ -226,12 +243,13 @@ class NativePairObserver:
                     anchor=dict(identifier=result.get('position_identifier'),order_ticket=result.get('ticket'),
                                 created_ms=opening['created_ms'],comment=opening['id'],magic=c['execution']['magic'],
                                 native_position_side=opening.get('native_position_side',0))
-                    deals=terminal.call('external_history',symbol=vg['mt5_symbol'],start_ms=g['opened_ms'],openings=[anchor])
+                    deals=self._terminal(lane,leg).call('external_history',symbol=vg['mt5_symbol'],start_ms=g['opened_ms'],openings=[anchor])
                     current={str(p['ticket']):p for p in snapshot['positions']}
                     rows=external_closes.mt5_backfill(view,c,vg,current,deals)
                     for o in rows:
                         o.update(leg=leg,platform='mt5',quantity_unit='lot',
                                  native_position_side=opening.get('native_position_side',0),contract_size=g['leg_contracts'][leg])
+                        if opening.get('endpoint'): o['endpoint']=copy.deepcopy(opening['endpoint'])
                         updates.append(o)
                     for o in state['orders']:
                         if o['group']!=g['id'] or o['leg']!=leg or o.get('source')=='external' or not o['result'].get('qty'): continue
@@ -255,7 +273,7 @@ class NativePairObserver:
                                 p.get('magic'),p.get('side'),p.get('lots'),p.get('comment')) for p in s['positions']),
                         s['orders'])
             for leg in ('binance','mt5'):
-                after=terminal.call('snapshot',symbol=short_symbol(c) if leg=='binance' else c['mt5']['symbol'])
+                after=self._terminal(lane,leg).call('snapshot',symbol=short_symbol(c) if leg=='binance' else c['mt5']['symbol'])
                 if exposure(after)!=exposure(snapshots[leg]):
                     raise ValueError('MT5 仓位在成交核对期间变化，稍后重查；不会推算平仓')
         with r.lock:
@@ -303,14 +321,17 @@ class NativePairObserver:
                         armed.append(g['id'])
                 if armed:
                     r.engine.pause('MT5 已确认强平，保护性平掉剩余敞口')
-                    r.engine.state['recovery']=False;r.reconciled=True;changed=True
+                    if not getattr(r,'pool_owner',None): r.engine.state['recovery']=False
+                    r.reconciled=True;changed=True
                     r.engine.save('liquidation_protection_armed',{'groups':armed})
                 elif not r.engine.active():
-                    r.engine.state['recovery']=False;r.reconciled=True
+                    if not getattr(r,'pool_owner',None): r.engine.state['recovery']=False
+                    r.reconciled=True
             if changed: r.engine.save('native_pair_history_updated')
             r.external_close_status=dict(state='waiting' if errors else 'ready',checked_ms=stamp(),
                                          message=errors[0] if errors else 'MT5 双腿持仓与成交后台核对中')
             r.market_wake.set()
+            if getattr(r,'pool_owner',None): r.pool_owner.recovery_updated()
     def _loop(self,lane):
         if lane=='commission':
             while not self.stopped.is_set():
@@ -435,6 +456,10 @@ class NativePairRuntime:
             if resource:
                 try: resource.close()
                 except Exception: pass
+        if getattr(self,'pool',None):
+            self.pool=None
+            self.engine.multi_pair=False
+            self.engine.__dict__.pop('entry_candidate_key',None)
 
     def _native_cached_quote(self):
         q=self.pump.read()[0] if self.pump else self.quote

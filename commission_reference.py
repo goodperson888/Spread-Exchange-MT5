@@ -92,15 +92,17 @@ def refresh(monitor, terminal):
     legs = {}
     for leg, name in enabled.items():
         try:
-            legs[leg] = terminal().call('commission_reference', symbol=name, lots=c['strategy']['mt5_lots'])
+            reader=monitor._terminal('commission',leg) if c.get('pair',{}).get('endpoints') else terminal()
+            legs[leg] = reader.call('commission_reference', symbol=name, lots=c['strategy']['mt5_lots'])
         except Exception:
             legs[leg] = dict(symbol=name, checked_ms=int(time.time()*1000), state='unavailable',
                              message='佣金历史读取失败，保留手填估算')
             lane_lock=getattr(monitor,'session_lock',None) or getattr(monitor,'lock',None)
             if lane_lock is not None:
                 with lane_lock:
-                    reader=monitor.terminals.get('commission')
-                    monitor.terminals['commission']=None
+                    slot=('commission',leg) if c.get('pair',{}).get('endpoints') else 'commission'
+                    reader=monitor.terminals.get(slot)
+                    monitor.terminals[slot]=None
                 if reader:
                     try: reader.close()
                     except Exception: pass
@@ -115,7 +117,7 @@ def refresh(monitor, terminal):
 
 
 def attach(engine, config, group):
-    reference = getattr(engine, 'commission_reference', {})
+    reference = getattr(engine,'commission_references',{}).get(pair_key(config),getattr(engine, 'commission_reference', {}))
     if reference.get('key') == pair_key(config):
         group['commission_reference'] = copy.deepcopy(reference.get('legs', {}))
         legs=('binance','mt5') if native_pair(config) else ('mt5',)

@@ -96,8 +96,11 @@
   }
   function preview() {
     const same=node('pair-template').value==='native';
-    node('pair-short').readOnly=!same;
-    if(!same)node('pair-short').value=node('pair-template').value==='paxg'?'PAXGUSDT':'XAUUSDT';
+    const pool=same&&node('pair-native-mode').value==='pool';
+    node('pair-native-mode-field').hidden=!same;
+    node('pair-short').readOnly=false;
+    node('pair-short').closest('label').hidden=pool;node('pair-long').closest('label').hidden=pool;
+    if(pool){node('pair-preview').textContent='2～3 个独立 MT5 同时读取黄金报价，自动选择买入与卖出终端。每组两腿同手数、相同合约大小。保存并切换后，到连接设置填写各终端路径、品种及独立组合参数。';return;}
     node('pair-preview').textContent=(same?`品种 A：${node('pair-short').value||'待选'} / 品种 B：${node('pair-long').value||'待选'}\n`:`卖 ${node('pair-short').value||'待选 A'} / 买 ${node('pair-long').value||'待选 B'}\n`)+
       (same?'每组两腿使用相同手数，分别校验步长；实际数量和盈亏按各自合约大小计算。相同手数可能对应不同名义金额。两个品种需为同一标的、相同报价单位。':'按 MT5 实际合约大小换算币安黄金数量，并校验交易所数量规则。');
   }
@@ -105,7 +108,8 @@
     const p=catalogue?.profiles.find(x=>x.id===id);
     node('pair-list').value=p?.id||'';
     node('pair-name').value=p?.name||'';
-    node('pair-template').value=p?.type==='mt5_mt5'?'native':p?.short_symbol==='PAXGUSDT'?'paxg':'xau';
+    node('pair-template').value=p?.type==='mt5_mt5'?'native':'exchange';
+    node('pair-native-mode').value=p?.mode==='pool'?'pool':'same';
     node('pair-short').value=p?.short_symbol||'XAUUSDT';node('pair-long').value=p?.long_symbol||current?.mt5?.symbol||'';
     node('pair-activate').disabled=!p||p.id===catalogue.active_id;
     node('pair-delete').disabled=!p||p.id===catalogue.active_id;
@@ -144,14 +148,17 @@
   node('pair-list').onchange=()=>choose(node('pair-list').value);
   node('pair-new').onclick=()=>choose('');
   node('pair-template').onchange=()=>{
-    if(node('pair-template').value==='native')node('pair-short').value='';
+    node('pair-short').value=node('pair-template').value==='native'?'':'XAUUSDT';
     preview();
   };
+  node('pair-native-mode').onchange=preview;
   for(const id of ['pair-short','pair-long'])node(id).oninput=preview;
   node('pair-save').onclick=()=>work(async()=>{
     const result=await api('/api/pairs/save',{id:node('pair-list').value||undefined,name:node('pair-name').value,
       type:node('pair-template').value==='native'?'mt5_mt5':'exchange_mt5',
-      short_symbol:node('pair-short').value,long_symbol:node('pair-long').value});
+      mode:node('pair-template').value==='native'&&node('pair-native-mode').value==='pool'?'pool':undefined,
+      short_symbol:node('pair-template').value==='native'&&node('pair-native-mode').value==='pool'?'XAUUSD':node('pair-short').value,
+      long_symbol:node('pair-template').value==='native'&&node('pair-native-mode').value==='pool'?'XAUUSD':node('pair-long').value});
     const saved=result.profiles.find(x=>x.id===result.saved_id);
     if(saved?.id===result.active_id){const response=await api('/api/config');populate(response.config);}
     await refresh(saved?.id);node('pair-manager-result').textContent='组合已保存；未启动自动交易。';
@@ -160,8 +167,9 @@
     const selected=node('pair-list').value;
     const p=catalogue.profiles.find(x=>x.id===selected);
     if(!p)throw Error('请先保存组合');
-    if(p.name!==node('pair-name').value||p.short_symbol!==node('pair-short').value||p.long_symbol!==node('pair-long').value||
-       (p.type==='mt5_mt5')!==(node('pair-template').value==='native'))throw Error('组合有未保存修改，请先保存');
+    if(p.name!==node('pair-name').value||(p.mode!=='pool'&&(p.short_symbol!==node('pair-short').value||p.long_symbol!==node('pair-long').value))||
+       (p.type==='mt5_mt5')!==(node('pair-template').value==='native')||
+       (p.mode==='pool')!==(node('pair-template').value==='native'&&node('pair-native-mode').value==='pool'))throw Error('组合有未保存修改，请先保存');
     await api('/api/pairs/activate',{id:selected});
     const response=await api('/api/config');
     clearDraft();dirtyFields.clear();populate(response.config);
