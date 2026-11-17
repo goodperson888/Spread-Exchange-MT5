@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
@@ -80,8 +81,7 @@ class CommissionTests(unittest.TestCase):
             self.assertEqual(fee_rate(g,'mt5','close'),1)
 
     def test_new_group_locks_references_without_changing_existing_group_or_actual_fee(self):
-        with tempfile.TemporaryDirectory() as folder:
-            store=Store(Path(folder)/'db');self.addCleanup(store.close)
+        with tempfile.TemporaryDirectory() as folder, closing(Store(Path(folder)/'db')) as store:
             e=Engine(store,PaperBroker());c=native_config();c['strategy']['mt5_lots']=.01
             c['costs'].update(mt5_fee_auto=True,mt5_short_fee_auto=True)
             refs=self.group()['commission_reference']
