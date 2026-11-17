@@ -174,6 +174,9 @@ class NativePairObserver:
         else: slot=lane
         with self.lock: terminal=self.terminals.get(slot)
         if terminal is None:
+            owner=getattr(self.runtime,'pool_owner',None)
+            if owner:
+                return owner.read_terminal(lane,self.runtime.config['pair']['endpoints'][leg])
             r=self.runtime;terminal=Terminal(settings_for(r.config,leg),r.config['execution']['magic'],read_only=True)
             with self.lock:
                 if self.stopped.is_set(): terminal.close();raise ValueError('观察会话已停止')

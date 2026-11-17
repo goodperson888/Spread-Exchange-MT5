@@ -96,6 +96,8 @@ class PoolPump:
         self.books={};self.errors={};self.quotes={};self.version=0;self.threads=[];self.readers={}
         self.pending_samples={};self.sample_wake=threading.Event();self.sampling_error=''
         self.quote_wakes={e['id']:threading.Event() for e in owner.endpoints}
+        self.edges_by_endpoint={e['id']:[(edge,ctx) for edge,ctx in owner.contexts.items()
+            if e['id'] in {x['id'] for x in ctx.config['pair']['endpoints'].values()}] for e in owner.endpoints}
         self.mt5_transport='独立 MT5 报价会话';self.binance_transport='独立 MT5 报价会话'
     def start(self):
         writer=threading.Thread(target=self._samples,name='pool-chart-history',daemon=True)
@@ -112,6 +114,8 @@ class PoolPump:
             if thread is not threading.current_thread(): thread.join(timeout=1)
     def all(self):
         with self.lock: return copy.deepcopy(self.quotes)
+    def for_key(self,key):
+        with self.lock:return copy.deepcopy(self.quotes.get(self.owner.edges_by_key.get(key)))
     def read(self):
         with self.lock: return self.quotes.get(self.owner.chart_key),self.version,''
     def ingest(self,e,book):
@@ -121,9 +125,8 @@ class PoolPump:
             self.errors.pop(e['id'],None)
             if self.books.get(e['id'])==book: return
             self.books[e['id']]=book
-            for edge,ctx in self.owner.contexts.items():
+            for edge,ctx in self.edges_by_endpoint[e['id']]:
                 endpoints=ctx.config['pair']['endpoints']
-                if e['id'] not in {x['id'] for x in endpoints.values()}: continue
                 if not all(x['id'] in self.books for x in endpoints.values()): continue
                 books={leg:copy.deepcopy(self.books[x['id']]) for leg,x in endpoints.items()}
                 q=dict(key=pair_key(ctx.config),time_ms=stamp(),usdt_usd=1.,pair=pair_info(ctx.config),**books,
@@ -174,7 +177,7 @@ class PoolOwner:
     def __init__(self,runtime,config,sessions,specs,snapshots):
         self.runtime=runtime;self.config=config;self.endpoints=clean_pool(config['mt5_pool'])['endpoints']
         self.sessions=sessions;self.specs=specs;self.health={};self.contexts={};self.stopped=threading.Event()
-        self.health_readers={};self.resource_lock=threading.Lock();self.health_threads=[]
+        self.health_readers={};self.readers={};self.resource_lock=threading.Lock();self.health_threads=[]
         self.chart_key=config['mt5_pool']['chart_pair'];self.ranking=[]
         for edge,c in candidates(config).items():
             plan=equal_lot_plan(c,{leg:specs[e['id']] for leg,e in c['pair']['endpoints'].items()})
@@ -183,25 +186,85 @@ class PoolOwner:
                 quote=None,market_meta={},market_wake=runtime.market_wake,_native_snapshots={},
                 external_close_status=None,pool_owner=self)
             ctx.maintenance=NativePairObserver(ctx);self.contexts[edge]=ctx
+        self.edges_by_key={pair_key(ctx.config):edge for edge,ctx in self.contexts.items()}
         self.pump=PoolPump(self)
     def start(self):
         self.pump.start()
         if self.config['execution']['mode']=='live':
-            for ctx in self.contexts.values():
-                # Account/margin snapshots are shared once per terminal, separate
-                # from pair-specific exact-ticket history and fee verification.
-                for lane in ('history','commission'):
-                    t=threading.Thread(target=ctx.maintenance._loop,args=(lane,),name='pool-'+lane,daemon=True)
-                    ctx.maintenance.threads.append(t);t.start()
+            for lane in ('history','commission'):
+                target=self._history_loop if lane=='history' else self._commission_loop
+                t=threading.Thread(target=target,name='pool-'+lane,daemon=True)
+                self.health_threads.append(t);t.start()
             for e in self.endpoints:
                 t=threading.Thread(target=self._health_loop,args=(e,),name='pool-health-'+e['id'],daemon=True)
                 self.health_threads.append(t);t.start()
     def close(self):
         self.stopped.set();self.pump.close()
         for ctx in self.contexts.values(): ctx.connected=False;ctx.maintenance.close()
-        with self.resource_lock: readers=list(self.health_readers.values());self.health_readers.clear()
+        with self.resource_lock:
+            readers=list(self.health_readers.values())+list(self.readers.values())
+            self.health_readers.clear();self.readers.clear()
         for r in readers:r.close()
         for r in self.sessions.values():r.close()
+    def read_terminal(self,lane,e):
+        """History/commission workers scale by endpoint, never by pair count."""
+        key=(lane,e['id'])
+        with self.resource_lock:
+            if self.stopped.is_set():raise ValueError('终端池已断开')
+            reader=self.readers.get(key)
+        if reader is not None:return reader
+        candidate=Terminal(endpoint_settings(self.config,e),self.config['execution']['magic'],read_only=True)
+        with self.resource_lock:
+            if self.stopped.is_set():candidate.close();raise ValueError('终端池已断开')
+            reader=self.readers.setdefault(key,candidate)
+        if reader is not candidate:candidate.close()
+        return reader
+    def discard_reader(self,lane,e):
+        with self.resource_lock:reader=self.readers.pop((lane,e['id']),None)
+        if reader:
+            try:reader.close()
+            except Exception:pass
+    def _history_loop(self):
+        r=self.runtime
+        while not self.stopped.is_set():
+            with r.lock:
+                relevant={g['key'] for g in r.engine.state['groups'] if g.get('mode')=='live'
+                    and (g['status']!='closed' or not g.get('costs_verified'))}
+                contexts=[c for c in self.contexts.values() if c.engine.key in relevant]
+                contexts.sort(key=lambda c:not bool(c.engine.active()))
+            for ctx in contexts:
+                if self.stopped.is_set():return
+                try:ctx.maintenance.step('history')
+                except Exception as exc:
+                    for e in ctx.config['pair']['endpoints'].values():self.discard_reader('history',e)
+                    with r.lock:
+                        ctx.external_close_status=dict(state='failed',checked_ms=stamp(),message=str(exc))
+            self.stopped.wait(3)
+    def _commission_loop(self):
+        from commission_reference import safe_references
+        from reference_diagnostics import PROCESS_REFERENCE_DIAGNOSTICS
+        r=self.runtime
+        while not self.stopped.is_set():
+            references={}
+            for e in self.endpoints:
+                if self.stopped.is_set():return
+                if not e['fee_auto']:continue
+                try:
+                    references[e['id']]=self.read_terminal('commission',e).call(
+                        'commission_reference',symbol=e['symbol'],lots=self.config['strategy']['mt5_lots'])
+                except Exception:
+                    self.discard_reader('commission',e)
+                    references[e['id']]=dict(symbol=e['symbol'],checked_ms=stamp(),state='unavailable',
+                        message='佣金历史读取失败，保留手填估算')
+            with r.lock:
+                if self.stopped.is_set() or r.pool is not self:return
+                for edge,ctx in self.contexts.items():
+                    legs={leg:copy.deepcopy(references[e['id']]) for leg,e in ctx.config['pair']['endpoints'].items()
+                          if e['id'] in references}
+                    ctx.engine.commission_reference=dict(key=ctx.engine.key,legs=legs)
+                    ctx.market_meta['mt5_commission_reference']=legs
+                    if edge==self.chart_key:PROCESS_REFERENCE_DIAGNOSTICS.commissions=safe_references(legs)
+            r.market_wake.set();self.stopped.wait(60)
     def _health_loop(self,e):
         r=self.runtime
         while not self.stopped.is_set():
@@ -369,9 +432,9 @@ class PoolRuntime:
         if not valid_group_quote(q,group['key'],limits):return None
         return {**q,'execution_quote_source':'cache'} if q else None
     def _pool_group_quote(self,group):
-        return next((q for q in self.pool.pump.all().values() if q['key']==group['key']),None)
+        return self.pool.pump.for_key(group['key'])
     def _pool_close_quote(self,q):
-        book=next((x for x in self.pool.pump.all().values() if q and x['key']==q['key']),None)
+        book=self.pool.pump.for_key(q['key']) if q else None
         return direction_quote(book,dict(pair=self.config['pair'],direction=q.get('_spread_direction','forward'))) if book else None
     def _pool_entry_guard(self,q,threshold):
         ctx=next((c for c in self.pool.contexts.values() if pair_key(c.config)==q['key']),None)
@@ -385,7 +448,9 @@ class PoolRuntime:
     def _pool_poll(self):
         if self.pool.pump.sampling_error:raise ValueError('行情历史写入失败：'+self.pool.pump.sampling_error)
         quotes=self.pool.pump.all();owner=self.pool
-        for edge,ctx in owner.contexts.items():
+        active_keys={g['key'] for g in self.engine.active()}
+        managed=[(edge,ctx) for edge,ctx in owner.contexts.items() if ctx.engine.key in active_keys]
+        for edge,ctx in managed:
             self.engine.reconcile_pending(ctx.config)
             q=quotes.get(edge)
             if q:
@@ -399,7 +464,7 @@ class PoolRuntime:
         self.engine.entry_candidate_key=winner['key'] if winner else None
         # Manage every fixed pair first. Only then admit at most one ranked entry.
         orders_before=len(self.engine.state['orders'])
-        for edge,ctx in owner.contexts.items():
+        for edge,ctx in managed:
             q=quotes.get(edge)
             if not q:continue
             self.engine.entry_candidate_key=None

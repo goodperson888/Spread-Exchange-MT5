@@ -5,7 +5,7 @@
   const pushPanel=el('push-setup').closest('details'),pushHome=pushPanel.parentNode,pushNext=pushPanel.nextSibling;
   const enabled=()=>current?.pair?.mode==='pool';
   const clone=x=>JSON.parse(JSON.stringify(x));
-  const pairs=rows=>rows.flatMap((a,i)=>rows.slice(i+1).map(b=>({id:[a.id,b.id].sort().join('~'),a,b})));
+  const pairs=rows=>{const sorted=[...rows].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);return sorted.flatMap((a,i)=>sorted.slice(i+1).map(b=>({id:[a.id,b.id].join('~'),a,b})));};
   const defaults=()=>({entry_spread_usd:current.strategy.entry_spread_usd,entry_lower_usd:current.strategy.entry_lower_usd??-5,
     direction_mode:'auto',target_mode:current.strategy.target_mode,take_contraction_usd:current.strategy.take_contraction_usd,
     exit_spread_usd:current.strategy.exit_spread_usd,require_net_profit:current.strategy.require_net_profit,
@@ -19,6 +19,9 @@
   function select(label,key,value,options){return `<label>${label}<select data-pool-rule="${key}">${Object.entries(options).map(([v,t])=>`<option value="${v}"${String(value)===v?' selected':''}>${t}</option>`).join('')}</select></label>`;}
   function renderEditors() {
     if(!draft)return;
+    const expanded=new Set([...el('pool-rule-editors').querySelectorAll('details[open]')].map(x=>x.dataset.poolEdge));
+    const selected=new Set([...el('pool-bulk-targets').querySelectorAll('input:checked')].map(x=>x.value));
+    const source=el('pool-bulk-source').value;
     el('pool-endpoint-editors').innerHTML=draft.endpoints.map(e=>`<article class="pool-endpoint-card" data-pool-endpoint="${escape(e.id)}"><div class="heading"><h3>${escape(e.name)}</h3></div>`+
       field('终端名称','name',e.name,{type:'text'})+field('Windows MT5 完整路径','terminal_path',e.terminal_path,{type:'text'})+
       '<div class="grid">'+field('目标账号（可先检查读取）','account',e.account,{type:'text'})+field('服务器（可先检查读取）','server',e.server,{type:'text'})+
@@ -27,13 +30,17 @@
       (current.execution.mode==='paper'?field('纸面 Swap 成本 USD/手/日','swap',e.swap):'')+
       `</div><label class="check"><input data-pool-field="fee_auto" type="checkbox"${e.fee_auto?' checked':''}>后台学习真实成交佣金参考</label><p class="note">成交后按实际手续费核验；未成交的平仓费仍需估算。返佣比例由你填写，参与净收益判断。</p></details>`+
       `<div class="pool-endpoint-actions"><button type="button" data-pool-check="${escape(e.id)}">检查此终端</button>${draft.endpoints.length>2?`<button type="button" data-pool-remove="${escape(e.id)}">移除终端</button>`:''}</div><p class="pool-check-result" data-pool-check-result="${escape(e.id)}" role="status">保存后检查此终端的账户、品种及合约规格。</p></article>`).join('');
-    el('pool-add').disabled=draft.endpoints.length>=3;
     const list=pairs(draft.endpoints);const ids=new Set(list.map(x=>x.id));
+    el('pool-size').textContent=`${draft.endpoints.length} 个终端 · ${list.length} 个固定终端对 · ${list.length*2} 个方向`;
+    el('pool-bulk-source').replaceChildren(...list.map(({id,a,b})=>new Option(`${a.name} × ${b.name}`,id)));
+    if(ids.has(source))el('pool-bulk-source').value=source;
+    el('pool-bulk-targets').innerHTML=list.map(({id,a,b})=>`<label class="check"><input type="checkbox" value="${escape(id)}"${selected.has(id)?' checked':''}>${escape(a.name)} × ${escape(b.name)}</label>`).join('');
+    bulkCount();
     for(const key of Object.keys(draft.rules))if(!ids.has(key))delete draft.rules[key];
     el('pool-rule-editors').innerHTML=list.map(({id,a,b})=>{
       const r=draft.rules[id]??=defaults();
       const number=(label,key)=>field(label,key,r[key]).replace('data-pool-field','data-pool-rule');
-      return `<details class="pool-rule" data-pool-edge="${escape(id)}"><summary>${escape(a.name)} × ${escape(b.name)} · 上限 ${escape(r.entry_spread_usd)} / 下限 ${escape(r.entry_lower_usd)}</summary><p class="note">A = ${escape(a.name)}，B = ${escape(b.name)}。正向卖 A 买 B，A Bid − B Ask ≥ 上限；反向买 A 卖 B，A Ask − B Bid ≤ 下限。</p><div class="grid">`+
+      return `<details class="pool-rule" data-pool-edge="${escape(id)}"${expanded.has(id)?' open':''}><summary>${escape(a.name)} × ${escape(b.name)} · 上限 ${escape(r.entry_spread_usd)} / 下限 ${escape(r.entry_lower_usd)}</summary><p class="note">A = ${escape(a.name)}，B = ${escape(b.name)}。正向卖 A 买 B，A Bid − B Ask ≥ 上限；反向买 A 卖 B，A Ask − B Bid ≤ 下限。</p><div class="grid">`+
         select('允许方向','direction_mode',r.direction_mode,{auto:'自动双向',forward:'只卖 A 买 B',reverse:'只买 A 卖 B'})+
         number('正向开仓上限（A−B）','entry_spread_usd')+number('反向开仓下限（A−B）','entry_lower_usd')+
         select('止盈方式','target_mode',r.target_mode,{contraction:'相对实际开仓价差收窄',absolute:'绝对 A−B 退出阈值'})+
@@ -44,6 +51,7 @@
     }).join('');
   }
   function configure(config) {
+    if(current?.pair?.id!==config.pair?.id){el('pool-bulk-targets').replaceChildren();el('pool-bulk-source').replaceChildren();}
     current=config;
     const on=enabled();el('pool-settings').hidden=!on;el('pool-opportunities').hidden=!on;
     el('pool-chart-controls').hidden=true;
@@ -95,7 +103,7 @@
     working=true;setUiBusy(1);
     const buttons=[...el('pool-settings').querySelectorAll('button')],disabled=buttons.map(b=>b.disabled);buttons.forEach(b=>b.disabled=true);
     const inputs=[...el('pool-settings').querySelectorAll('input,select')];inputs.forEach(x=>x.disabled=true);
-    try{await saveQueue;await fn();}catch(e){note(e.message,true);}finally{working=false;setUiBusy(-1);inputs.forEach(x=>x.disabled=false);buttons.forEach((b,i)=>b.disabled=disabled[i]);el('pool-add').disabled=draft?.endpoints?.length>=3;}
+    try{await saveQueue;await fn();}catch(e){note(e.message,true);}finally{working=false;setUiBusy(-1);inputs.forEach(x=>x.disabled=false);buttons.forEach((b,i)=>b.disabled=disabled[i]);}
   }
   el('pool-settings').addEventListener('input',event=>{
     const input=event.target,key=input.dataset.poolField||input.dataset.poolRule;
@@ -106,10 +114,27 @@
     change();
   });
   el('pool-add').onclick=()=>{
-    if(draft.endpoints.length>=3)return;
     let id=1;while(draft.endpoints.some(e=>e.id==='t'+id))id++;
-    draft.endpoints.push({id:'t'+id,name:'MT5 '+String.fromCharCode(64+id),terminal_path:'',account:'',server:'',symbol:'XAUUSD',max_lots:1,commission:0,rebate:0,swap:0,fee_auto:true});
+    draft.endpoints.push({id:'t'+id,name:'MT5 '+id,terminal_path:'',account:'',server:'',symbol:'XAUUSD',max_lots:1,commission:0,rebate:0,swap:0,fee_auto:true});
     renderEditors();change();
+  };
+  function bulkCount(){el('pool-bulk-count').textContent=`已选 ${el('pool-bulk-targets').querySelectorAll('input:checked').length} 个终端对`;}
+  el('pool-bulk-targets').addEventListener('change',bulkCount);
+  el('pool-bulk-all').onclick=()=>{for(const x of el('pool-bulk-targets').querySelectorAll('input'))x.checked=true;bulkCount();};
+  el('pool-bulk-none').onclick=()=>{for(const x of el('pool-bulk-targets').querySelectorAll('input'))x.checked=false;bulkCount();};
+  el('pool-bulk-edit').onclick=()=>{
+    const source=el('pool-bulk-source').value;
+    const editor=[...el('pool-rule-editors').querySelectorAll('[data-pool-edge]')].find(x=>x.dataset.poolEdge===source);
+    if(editor){el('pool-individual').open=true;editor.open=true;editor.scrollIntoView({block:'start'});editor.querySelector('input,select')?.focus({preventScroll:true});}
+  };
+  el('pool-bulk-apply').onclick=()=>{
+    const source=el('pool-bulk-source').value,rule=draft.rules[source];
+    const targets=[...el('pool-bulk-targets').querySelectorAll('input:checked')].map(x=>x.value);
+    if(!targets.length){note('请先勾选需要统一参数的终端对。',true);return;}
+    if(!rule){note('请选择有效的参数来源。',true);return;}
+    for(const key of targets)draft.rules[key]=clone(rule);
+    renderEditors();dirty=true;
+    note(`已将来源参数复制到 ${targets.length} 个所选终端对，可继续单独微调。点击“保存终端与独立规则”保存，再重新连接后用于新开仓；已有组保留原规则。`);
   };
   el('pool-save').onclick=()=>work(save);
   el('pool-endpoint-editors').addEventListener('click',event=>{

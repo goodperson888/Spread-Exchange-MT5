@@ -111,5 +111,10 @@ section[aria-labelledby=plan-heading]>.grid{grid-template-columns:1fr}
 .pool-rule{border:1px solid #d7e1ea;border-radius:10px;padding:14px;margin:12px 0}.pool-rule summary{font-weight:600;cursor:pointer}.pool-rule .grid{margin-top:14px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
 #pool-candidate-rows tr[data-selected=true]{background:#edf8f2}#pool-candidate-rows td:last-child{max-width:320px;white-space:normal}#pool-opportunities .records-scroll{max-height:300px;margin-top:14px}
 #pool-settings-result{white-space:pre-line}.pool-check-result{white-space:pre-line;font-size:13px;overflow-wrap:anywhere}.pool-endpoint-actions{display:flex;gap:8px;flex-wrap:wrap}.pool-endpoint-actions button{min-height:44px;margin:0}
+.pool-bulk-targets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:8px;max-height:260px;overflow:auto;padding:4px}
+.pool-bulk-targets .check{display:flex;align-items:center;gap:10px;min-height:44px;margin:0;overflow-wrap:anywhere}
+#pool-bulk fieldset{border:1px solid #d7e1ea;border-radius:8px;margin-top:14px;min-width:0}
+#pool-individual>summary{min-height:44px;padding:12px 0;font-weight:600;cursor:pointer}
+#pool-add span{font-size:20px;vertical-align:middle;line-height:1}
 #pool-rule-editors input,#pool-endpoint-editors input{min-height:44px}#pool-settings .actions{margin-top:16px}button:focus-visible,summary:focus-visible{outline:3px solid #76b7e0;outline-offset:3px}
 @media(max-width:600px){.pool-endpoint-card{padding:12px}.pool-endpoint-card .grid{grid-template-columns:1fr 1fr}.pool-rule .grid{grid-template-columns:1fr}.pool-status-grid{grid-template-columns:1fr}}

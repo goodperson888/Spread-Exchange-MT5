@@ -39,7 +39,8 @@ def clean_profile(body, config):
     if is_pool:
         from mt5_pool_config import clean_pool
         p['mode']='pool'
-        p['mt5_pool']=clean_pool(body.get('mt5_pool') or config.get('mt5_pool') or dict(endpoints=[
+        inherited=config.get('mt5_pool') if body.get('id')==pair_info(config)['id'] else None
+        p['mt5_pool']=clean_pool(body.get('mt5_pool') or inherited or dict(endpoints=[
             dict(id='t1',name='MT5 A',symbol='XAUUSD'),dict(id='t2',name='MT5 B',symbol='XAUUSD')]))
         upper=p['strategy']['entry_spread_usd']
         p['strategy'].update(direction_mode='auto',entry_lower_usd=min(-max(1,abs(upper)),upper-1),grid_enabled=False,exit_mode='group')

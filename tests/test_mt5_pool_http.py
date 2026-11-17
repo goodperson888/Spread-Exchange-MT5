@@ -20,6 +20,30 @@ class PoolHttpTests(unittest.TestCase):
         code,result=self.request('/api/pairs/activate',dict(id=result['saved_id']))
         self.assertEqual(code,200,result);self.assertFalse(self.runtime.engine.state['enabled'])
         self.assertEqual(server.load_config()['pair']['mode'],'pool')
+
+    def test_renaming_inactive_pool_retains_its_own_endpoints_and_rules(self):
+        c=config(4);server.write_config(c)
+        code,result=self.request('/api/pairs/save',dict(name='新池',type='mt5_mt5',mode='pool',short_symbol='XAUUSD',long_symbol='XAUUSD'))
+        self.assertEqual(code,200,result);saved=result['saved_id']
+        p=next(x for x in result['profiles'] if x['id']==saved)
+        self.assertEqual(len(p['mt5_pool']['endpoints']),2)
+        code,result=self.request('/api/pairs/save',dict(id=saved,name='改名',type='mt5_mt5',mode='pool',short_symbol='XAUUSD',long_symbol='XAUUSD'))
+        self.assertEqual(code,200,result)
+        self.assertEqual(next(x for x in result['profiles'] if x['id']==saved)['mt5_pool'],p['mt5_pool'])
+        self.assertEqual(len(server.load_config()['mt5_pool']['endpoints']),4)
+
+    def test_selected_rules_save_atomically_without_overwriting_other_pairs(self):
+        c=config(4);server.write_config(c);pool=copy.deepcopy(c['mt5_pool'])
+        chosen={'t1~t2','t1~t4'}
+        for key in chosen:pool['rules'][key]['entry_spread_usd']=7.5
+        code,result=self.request('/api/mt5/pool/save',dict(expected_pair_id=c['pair']['id'],pool=pool))
+        self.assertEqual(code,200,result);saved=server.load_config()['mt5_pool']
+        for key,rule in saved['rules'].items():
+            self.assertEqual(rule['entry_spread_usd'],7.5 if key in chosen else 2)
+        bad=copy.deepcopy(saved);bad['rules']['t1~t2']['entry_spread_usd']=9
+        bad['rules']['t1~t4']['min_net_profit_usd']='invalid'
+        code,_=self.request('/api/mt5/pool/save',dict(expected_pair_id=c['pair']['id'],pool=bad))
+        self.assertEqual(code,400);self.assertEqual(server.load_config()['mt5_pool'],saved)
     def test_invalid_or_stale_form_cannot_replace_terminal_pool(self):
         c=self.install();pool=copy.deepcopy(c['mt5_pool']);pool['rules']['t1~t2']['entry_lower_usd']=100
         code,_=self.request('/api/mt5/pool/save',dict(expected_pair_id=c['pair']['id'],pool=pool))

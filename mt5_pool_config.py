@@ -30,7 +30,7 @@ def edge_id(a,b):
 def clean_pool(value, complete=False):
     if not isinstance(value,dict): raise ValueError('请先配置 MT5 终端池')
     rows=value.get('endpoints',[])
-    if not isinstance(rows,list) or not 2<=len(rows)<=3: raise ValueError('终端池需要 2～3 个 MT5')
+    if not isinstance(rows,list) or len(rows)<2: raise ValueError('终端池至少需要 2 个 MT5')
     endpoints=[];ids=set();paths=set();accounts=set()
     for row in rows:
         if not isinstance(row,dict): raise ValueError('MT5 终端配置格式无效')
@@ -74,10 +74,9 @@ def endpoint_settings(config, e):
 
 def candidates(config):
     pool=clean_pool(config['mt5_pool'])
-    result={}
+    result={};base={k:v for k,v in config.items() if k!='mt5_pool'}
     for a,b in combinations(pool['endpoints'],2):
-        key=edge_id(a['id'],b['id']);c=copy.deepcopy(config)
-        c.pop('mt5_pool',None)
+        key=edge_id(a['id'],b['id']);c=copy.deepcopy(base)
         c['pair'].update(mode='terminals',short_symbol=a['symbol'],
                          name=f"{a['name']} × {b['name']}",endpoints={'binance':a,'mt5':b},pool_edge=key)
         c['symbol']=a['symbol'];c['mt5']=endpoint_settings(config,b)

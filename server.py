@@ -1567,7 +1567,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_body(self):
         length = int(self.headers.get("Content-Length", "0"))
-        if not 0 <= length <= 100_000:
+        limit=2_000_000 if urlparse(self.path).path in ('/api/mt5/pool/save','/api/pairs/save') else 100_000
+        if not 0 <= length <= limit:
             raise ValueError("请求过大")
         result = json.loads(self.rfile.read(length) or b"{}", parse_constant=lambda _: None)
         if not isinstance(result, dict):
@@ -1773,6 +1774,8 @@ class Handler(BaseHTTPRequestHandler):
                         if path=='/api/pairs/save':
                             old=profile;profile=pair_profiles.clean_profile(body,config)
                             if old:
+                                if profile.get('mode')=='pool' and old.get('mode')=='pool':
+                                    profile['mt5_pool']=copy.deepcopy(old['mt5_pool'])
                                 for key in ('strategy','costs','execution','risk_alerts'):
                                     if key in old: profile[key]=old[key]
                             rows=[x for x in rows if x['id']!=profile['id']]+[profile]

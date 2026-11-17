@@ -42,6 +42,20 @@ def spec():
 
 
 class DefinitionTests(unittest.TestCase):
+    def test_pool_accepts_more_than_three_and_keeps_canonical_pair_orientation(self):
+        c=config(12);validate(c);rows=candidates(c)
+        self.assertEqual(len(rows),66)
+        for key,fixed in rows.items():
+            refs=list(fixed['pair']['endpoints'].values())
+            self.assertEqual(key,'~'.join(e['id'] for e in refs))
+            self.assertLess(refs[0]['id'],refs[1]['id'])
+        self.assertEqual(rows['t10~t2']['pair']['endpoints']['binance']['id'],'t10')
+
+    def test_new_pool_starts_with_two_without_cloning_other_pool_accounts(self):
+        c=config(5)
+        p=pair_profiles.clean_profile(dict(name='新池',type='mt5_mt5',mode='pool',short_symbol='XAUUSD',long_symbol='XAUUSD'),c)
+        self.assertEqual(len(p['mt5_pool']['endpoints']),2)
+        self.assertTrue(all(not e['account'] and not e['terminal_path'] for e in p['mt5_pool']['endpoints']))
     def test_three_terminals_are_three_fixed_pairs_and_six_directions(self):
         c=config();validate(c);rows=candidates(c)
         self.assertEqual(set(rows),{'t1~t2','t1~t3','t2~t3'})
@@ -107,6 +121,42 @@ class PoolTests(unittest.TestCase):
         self.assertEqual([e['id'] for e in g['pair']['endpoints'].values()],['t1','t3'])
         self.assertEqual({o['endpoint']['id'] for o in self.r.engine.state['orders']},{'t1','t3'})
         self.assertEqual(len(self.owner.ranking),6)
+
+    def test_history_reader_is_shared_by_endpoint_across_pairs_and_replaced_after_failure(self):
+        a=self.owner.contexts['t1~t2'].maintenance;b=self.owner.contexts['t1~t3'].maintenance
+        with patch('mt5_pool.Terminal') as factory:
+            shared=a._terminal('history','binance')
+            self.assertIs(b._terminal('history','binance'),shared)
+            factory.assert_called_once()
+            self.owner.discard_reader('history',self.owner.endpoints[0]);shared.close.assert_called_once()
+            replacement=Mock();factory.return_value=replacement
+            self.assertIs(b._terminal('history','binance'),replacement)
+            self.assertEqual(factory.call_count,2)
+
+    def test_four_terminals_rank_twelve_directions_and_open_only_best_pair(self):
+        c=config(4);endpoints=c['mt5_pool']['endpoints'];self.r.config=c
+        self.owner=self.r.pool=PoolOwner(self.r,c,{e['id']:Mock() for e in endpoints},
+            {e['id']:spec() for e in endpoints},{})
+        self.addCleanup(self.owner.close);self.r.pump=self.owner.pump;self.r.engine.start(c)
+        self.books([4006,4004,4002,3998]);self.r._pool_poll()
+        g=self.r.engine.active()[0]
+        self.assertEqual({e['id'] for e in g['pair']['endpoints'].values()},{'t1','t4'})
+        self.assertEqual(len(self.owner.ranking),12)
+
+    def test_commission_scheduler_fetches_each_endpoint_once_and_attaches_to_every_pair(self):
+        for e in self.owner.endpoints:e['fee_auto']=True
+        readers={e['id']:Mock() for e in self.owner.endpoints}
+        for e in self.owner.endpoints:
+            readers[e['id']].call.return_value=dict(symbol=e['symbol'],checked_ms=stamp(),profiles={})
+        # End after the first full sweep without creating background threads.
+        real_set=threading.Event();self.owner.stopped=Mock()
+        self.owner.stopped.is_set.side_effect=real_set.is_set
+        self.owner.stopped.wait.side_effect=lambda _:real_set.set()
+        with patch.object(self.owner,'read_terminal',side_effect=lambda lane,e:readers[e['id']]):
+            self.owner._commission_loop()
+        for reader in readers.values():reader.call.assert_called_once()
+        for ctx in self.owner.contexts.values():
+            self.assertEqual(set(ctx.engine.commission_reference['legs']),{'binance','mt5'})
     def test_stale_third_terminal_does_not_hide_healthy_pair(self):
         self.books([4005,4000,3990],[0,0,10000])
         winner=self.owner.rank(self.owner.pump.all())
