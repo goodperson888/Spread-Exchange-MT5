@@ -12,8 +12,8 @@
 <section class="pair-bar" aria-label="当前交易组合"><div><span class="muted">当前执行组合</span><strong id="pair-active-name">读取中…</strong><span id="pair-active-detail" class="note"></span></div><button id="pair-manage" type="button">管理 / 切换组合</button></section>
 <div class="workspace-status"><div><p id="workflow-status" role="status">首次使用：到「连接设置」检查两边账户，再连接行情与对账。</p><p id="config-status" class="note" role="status" aria-live="polite">正在读取配置…</p></div><button type="button" data-open-view="settings">检查连接配置</button></div>
 <div id="view-trading" class="workspace-view" role="tabpanel" aria-labelledby="tab-trading"><div id="market-overview" class="market-overview" aria-label="实时交易摘要">
-<div><span>入场价差</span><strong id="live-entry">—</strong><small>卖币安 Bid − 买 MT5 Ask</small></div>
-<div><span>退出价差</span><strong id="live-exit">—</strong><small>买回币安 Ask − 卖 MT5 Bid</small></div>
+<div><span id="live-entry-label">入场价差</span><strong id="live-entry">—</strong><small>卖币安 Bid − 买 MT5 Ask</small></div>
+<div><span id="live-exit-label">退出价差</span><strong id="live-exit">—</strong><small>买回币安 Ask − 卖 MT5 Bid</small></div>
 <div><span>距基础开仓阈值</span><strong id="live-distance">—</strong><small id="live-opportunity">等待双边行情</small></div>
 <div><span>当前持仓</span><strong id="live-groups">0 组</strong><small id="live-exposure">等待连接与对账</small></div>
 </div>
@@ -23,6 +23,7 @@
 <p id="quote-latency" class="note">等待行情 · 连接后显示报价年龄与传输方式。</p>
 <p id="quote-summary" class="state">等待双边行情。</p><span id="chart-live-status" class="badge neutral">未连接 · 图表保留历史</span>
 <div id="spread-stats" class="stats" aria-label="价差窗口摘要"></div>
+<div id="chart-focus-controls" class="chart-focus-controls" hidden><label>图表视角<select id="chart-focus"><option value="auto">自动关注</option><option value="forward">正向入场</option><option value="reverse">反向入场</option><option value="both">双线对照</option></select></label><p id="chart-focus-description" class="note"></p></div>
 <div class="chart-wrap"><div id="spread-chart" class="chart" role="img" aria-label="入场与退出可成交价差历史折线图"></div><p id="chart-empty" class="chart-empty">连接后开始积累可成交价差历史。</p></div>
 <p id="chart-reference-status" class="note" role="status">本机数据不足时，连接后自动补取历史参考；收盘价参考不参与交易判断。</p><p id="chart-reference-stats" class="note reference-stats"></p><p id="chart-gaps" class="note" role="status"></p><p id="chart-coverage" class="note">本机高频记录保留 24 小时，更早数据按分钟归档并保留 30 天；历史保存在本机数据目录，清理浏览器缓存不会删除。</p>
 </section><details class="panel risk-shell"><summary>账户保证金与强平风险 <span id="risk-summary" class="note">等待连接</span></summary><section class="risk-panel" aria-labelledby="risk-heading">

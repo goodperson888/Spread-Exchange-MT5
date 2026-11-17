@@ -40,7 +40,9 @@
     node('check-binance').hidden=same;node('native-pair-costs').hidden=!same;
     for(const id of ['auto-fx','usdt-fx','auto-binance-fee','binance-fee','binance-rebate','paper-funding'])node(id).closest('label').hidden=same;
     node('mt5-short-swap').closest('label').hidden=config.execution.mode==='live';
-    node('market-overview').querySelectorAll('small')[0].textContent=same?'A Bid − B Ask（正向入场／反向退出）':'卖币安 Bid − 买 MT5 Ask';
+    node('live-entry-label').textContent=same?'正向入场':'入场价差';
+    node('live-exit-label').textContent=same?'反向入场':'退出价差';
+    node('market-overview').querySelectorAll('small')[0].textContent=same?'A Bid − B Ask（同时为反向退出）':'卖币安 Bid − 买 MT5 Ask';
     node('market-overview').querySelectorAll('small')[1].textContent=same?'A Ask − B Bid（正向退出／反向入场）':'买回币安 Ask − 卖 MT5 Bid';
     node('risk-binance-heading').closest('.risk-card').hidden=same;
     for(const id of ['risk-binance-warning','risk-binance-danger','recv-window'])node(id).closest('label').hidden=same;

@@ -1042,7 +1042,11 @@ test('reverse MT5 rows, fills and chart targets use the saved direction and cano
  assert.match(f.el('live-opportunity').textContent,/反向达到阈值/);
  const series=f.charts.at(-1).series,marks=series.find(s=>s.id==='entry').markLine.data;
  assert.ok(marks.some(m=>Math.abs(m.yAxis-(-7.8))<1e-8));
- assert.ok(marks.some(m=>m.yAxis===-5));
+ // Auto focus shows reverse exits (entry side); reverse entry's lower bound
+ // belongs to the other quote side and must not masquerade as an exit target.
+ assert.ok(!marks.some(m=>m.yAxis===-5));
+ assert.equal(series.find(s=>s.id==='exit').data.length,0);
+ assert.match(f.el('chart-focus-description').textContent,/反向退出/);
  assert.ok(series.find(s=>s.id==='open').data.some(p=>p.value[1]===-9.8));
 });
 
@@ -1052,4 +1056,67 @@ test('disconnected native pair shows pending settings without NaN or an effectiv
  assert.match(f.el('native-direction-status').textContent,/尚未连接/);
  assert.equal(f.el('entry-lower-effective').textContent,'当前生效下限：未连接');
  assert.doesNotMatch(f.el('native-direction-status').textContent,/NaN|生效模式/);
+});
+
+function nativeChartSnapshot() {
+ const now=Date.now(),pair={type:'mt5_mt5',short_symbol:'GC',long_symbol:'XAUUSD.s'};
+ const quote={key:'native-chart',pair,time_ms:now,entry:2.43,exit:3.02,
+  binance:{bid:3873,ask:3873.3,time_ms:now},mt5:{bid:3870.28,ask:3870.57,time_ms:now}};
+ return {connected:true,pair,quote,state:{enabled:true,groups:[],orders:[]},
+  strategy_runtime:{direction_mode:'auto',entry_spread_usd:3,entry_lower_usd:2.1},capabilities:{reconciled:true,mode:'paper'}};
+}
+
+test('native single-line view never treats the other quote touching the upper bound as an entry',async()=>{
+ const snapshot=nativeChartSnapshot();
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,
+  '/api/trading/chart?minutes=60':()=>({samples:[snapshot.quote]})});
+ f.el('chart-window').value='60';await f.refresh();
+ const chart=f.charts.at(-1),entry=chart.series.find(s=>s.id==='entry'),exit=chart.series.find(s=>s.id==='exit');
+ assert.equal(entry.data.length,1);assert.equal(entry.data[0][1],2.43);assert.equal(exit.data.length,0);
+ assert.ok(entry.markLine.data.some(m=>m.yAxis===3));
+ assert.ok(chart.yAxis.max({min:2.4,max:2.5})>3); // Keep the bound on-screen in single-line view.
+ assert.equal(entry.markArea.data.length,0); // No full-width trigger shading.
+ assert.match(f.el('spread-stats').innerHTML,/正向入场[\s\S]*还差 0.57/);
+ assert.match(f.el('spread-stats').innerHTML,/反向入场[\s\S]*还差 0.92/);
+ const hint=chart.tooltip.formatter([{seriesId:'entry',value:[snapshot.quote.time_ms,2.43]}]);
+ assert.match(hint,/正向入场[^<]*2.430[^<]*≥ 3.000：未达到/);
+ assert.match(hint,/反向入场[^<]*3.020[^<]*≤ 2.100：未达到/);
+ assert.match(hint,/两侧报价差：0.590/);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+test('native chart perspective switches quote sides and bounds locally without trading or history calls',async()=>{
+ const snapshot=nativeChartSnapshot(),f=pageFixture(false,{'/api/trading/status':()=>snapshot,
+  '/api/trading/chart?minutes=60':()=>({samples:[snapshot.quote]})});
+ f.el('chart-window').value='60';await f.refresh();const calls=f.calls.length;
+ f.el('chart-focus').value='reverse';f.el('chart-focus').onchange();
+ let chart=f.charts.at(-1);
+ assert.equal(chart.series.find(s=>s.id==='entry').data.length,0);
+ assert.equal(chart.series.find(s=>s.id==='exit').data[0][1],3.02);
+ assert.deepEqual(Array.from(chart.series.find(s=>s.id==='exit').markLine.data,m=>m.yAxis),[2.1]);
+ f.el('chart-focus').value='both';f.el('chart-focus').onchange();chart=f.charts.at(-1);
+ assert.equal(chart.series.find(s=>s.id==='entry').data.length,1);
+ assert.equal(chart.series.find(s=>s.id==='exit').data.length,1);
+ assert.equal(f.calls.length,calls);
+ await f.refresh();assert.equal(f.el('chart-focus').value,'both');
+ assert.equal(snapshot.state.enabled,true);assert.equal(snapshot.strategy_runtime.direction_mode,'auto');
+});
+
+test('native auto focus follows held forward exit quote and puts its target only on that side',async()=>{
+ const snapshot=nativeChartSnapshot();snapshot.state.groups=[{id:'held',pair:snapshot.pair,status:'open',direction:'forward',
+  entry:3.5,qty:.01,lots:.01,leg_contracts:{binance:100,mt5:100},costs:{},
+  parameters:{target_mode:'contraction',take_contraction_usd:1},valuation:{}}];
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,
+  '/api/trading/chart?minutes=60':()=>({samples:[snapshot.quote]})});
+ f.el('chart-window').value='60';await f.refresh();
+ let chart=f.charts.at(-1);
+ assert.equal(chart.series.find(s=>s.id==='entry').data.length,0);
+ assert.ok(chart.series.find(s=>s.id==='exit').markLine.data.some(m=>m.yAxis===2.5));
+ assert.ok(!chart.series.find(s=>s.id==='exit').markLine.data.some(m=>m.yAxis===2.1));
+ assert.match(f.el('chart-focus-description').textContent,/正向退出/);
+ f.el('chart-focus').value='forward';f.el('chart-focus').onchange();chart=f.charts.at(-1);
+ assert.ok(!chart.series.find(s=>s.id==='entry').markLine.data.some(m=>m.yAxis===2.5));
+ assert.match(f.el('chart-focus-description').textContent,/不含另一侧平仓目标/);
+ snapshot.state.groups[0].status='closed';f.el('chart-focus').value='auto';await f.refresh();
+ assert.equal(f.charts.at(-1).series.find(s=>s.id==='entry').data.length,1);
 });

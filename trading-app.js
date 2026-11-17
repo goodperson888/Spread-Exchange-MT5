@@ -870,6 +870,34 @@
       if(generation===plotGeneration&&!document.hidden)throw error;
     } finally {if(plotController===controller)plotController=null;}
   }
+  function nativeChartView() {
+    const runtime=last?.strategy_runtime||{},mode=runtime.direction_mode||'forward';
+    const active=(last?.state?.groups||[]).filter(g=>g.status!=='closed');
+    const directions=new Set(active.map(g=>g.direction||'forward'));
+    const held=directions.size===1?[...directions][0]:null;
+    const choice=el('chart-focus').value||'auto';
+    // One physical quote side for the entire window, never a per-tick splice
+    // of the nearest direction. Existing positions take priority in auto view.
+    const field=choice==='reverse'?'exit':choice==='forward'?'entry':
+      held?(held==='reverse'?'entry':'exit'):(mode==='reverse'?'exit':'entry');
+    const names={entry:held==='reverse'?'反向退出（卖 A／买 B）':'正向入场（卖 A／买 B）',
+      exit:held==='forward'?'正向退出（买 A／卖 B）':'反向入场（买 A／卖 B）'};
+    return {mode,held,field,names,both:choice==='both',active};
+  }
+  function nativeEntryDistance(direction,quote) {
+    const settings=last?.strategy_runtime||{},mode=settings.direction_mode||'forward';
+    const upper=direction==='forward',threshold=upper?settings.entry_spread_usd:settings.entry_lower_usd;
+    const value=upper?quote?.entry:quote?.exit;
+    if(!last?.connected||!Number.isFinite(value)||!Number.isFinite(threshold))return {detail:'等待连接与有效报价',reached:false};
+    const oldest=Math.min(quote.mt5?.observed_ms||quote.mt5?.time_ms||quote.time_ms,quote.binance?.observed_ms||quote.binance?.time_ms||quote.time_ms);
+    if(quote.valid===false||Number.isFinite(oldest)&&Date.now()-oldest>(settings.max_quote_age_ms||3000))return {detail:'报价无效或已过期，仅供参考',reached:false};
+    const remaining=Math.max(0,upper?threshold-value:value-threshold);
+    const held=new Set((last?.state?.groups||[]).filter(g=>g.status!=='closed').map(g=>g.direction||'forward'));
+    const allowed=(mode==='auto'||mode===direction)&&(!held.size||(held.size===1&&held.has(direction)));
+    const state=!allowed?'此方向当前未启用或被持仓锁定':!last.state?.enabled?'新开仓未启用':'仍须通过冷却、额度和风控检查';
+    return {reached:remaining===0&&allowed&&!!last.state?.enabled,
+      detail:`${upper?'≥ 上限':'≤ 下限'} ${n(threshold)} · ${remaining===0?'已到价':'还差 '+n(remaining)}；${state}`};
+  }
   function drawChart(rawSamples) {
     const windowMinutes=Math.max(1,Number(el('chart-window').value)||1440);
     const rangeEnd=Date.now(),rangeStart=rangeEnd-windowMinutes*60000;
@@ -886,8 +914,13 @@
         paintSoon();
       });
     }
+    const native=isNative(last),view=native?nativeChartView():null;
+    const showEntry=!native||view.both||view.field==='entry',showExit=!native||view.both||view.field==='exit';
+    el('chart-focus-controls').hidden=!native;
+    el('spread-stats').dataset.native=String(native);
     const groups=last?.state?.groups||[];
-    const marks=groups.filter(g=>g.status==='open').map(g=>({name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported?(g.management_enabled?' 接管止盈':' 目标（暂停）'):' 已锁定止盈'),yAxis:g.parameters?.target_mode==='absolute'?g.parameters.exit_spread_usd:canonical(g,g.entry-g.parameters?.take_contraction_usd)})).filter(mark=>Number.isFinite(mark.yAxis));
+    const targetMarks=groups.filter(g=>g.status==='open').map(g=>({field:reverse(g)?'entry':'exit',mark:{name:(g.imported?'旧仓 ':'')+'#'+g.id+(g.imported?(g.management_enabled?' 接管止盈':' 目标（暂停）'):' 已锁定止盈'),yAxis:g.parameters?.target_mode==='absolute'?g.parameters.exit_spread_usd:canonical(g,g.entry-g.parameters?.take_contraction_usd)}})).filter(x=>Number.isFinite(x.mark.yAxis));
+    const marks=targetMarks.map(x=>x.mark);
     const missing=gaps.map(gap=>[{name:gap.reason,xAxis:gap.start,itemStyle:{color:'rgba(100,116,139,.16)'},label:{show:true,color:'#536274',position:'insideTop'}},{xAxis:gap.end}]);
     text('chart-gaps',gaps.length?`发现 ${gaps.length} 处无有效采样区间，已用灰色标出；最近一处 ${date(gaps.at(-1).start)} 至 ${date(gaps.at(-1).end)}。可点“回到最新”补读本机历史；停机或断线期间未采集的报价无法补造。`:'当前已加载的采样未发现明显缺口；停留后台后会自动补读本机记录。');
     const nearest=(at,field)=>{let best=null,distance=Infinity;for(const x of samples){const d=Math.abs(x.time_ms-at);if(d<distance){best=x;distance=d;}}return best&&Number.isFinite(best[field])?[at,best[field]]:null;};
@@ -896,10 +929,26 @@
     const closed=groups.filter(g=>g.closed_ms>=firstTime&&g.closed_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.closed_ms,Number.isFinite(g.exit)?canonical(g,g.exit):nearest(g.closed_ms,'exit')?.[1]]})).filter(x=>Number.isFinite(x.value[1]));
     const entries=samples.map(x=>x.entry).filter(Number.isFinite), exits=samples.map(x=>x.exit).filter(Number.isFinite);
     const average=values=>values.length?values.reduce((a,b)=>a+b,0)/values.length:null;
-    const latest=rawSamples.at(-1), all=entries.concat(exits);
+    const live=latestLive||last?.quote;
+    const latest=native&&live&&live.key===last?.quote?.key?live:rawSamples.at(-1),all=entries.concat(exits);
     const effective=last?.connected?last.strategy_runtime?.entry_spread_usd:null;
     const threshold=Number.isFinite(effective)?effective:null;
-    el('spread-stats').innerHTML=[['当前入场',latest?.entry],['当前退出',latest?.exit],['开仓阈值',threshold],['窗口入场均值',average(entries)],['价差范围',all.length?`${Math.min(...all).toFixed(3)} ～ ${Math.max(...all).toFixed(3)}`:null]].map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${typeof value==='number'?value.toFixed(3):value||'—'}</strong></div>`).join('');
+    if(native) {
+      const forward=nativeEntryDistance('forward',latest),backward=nativeEntryDistance('reverse',latest);
+      const focused=view.field==='entry'?entries:exits;
+      const width=Number.isFinite(latest?.entry)&&Number.isFinite(latest?.exit)?latest.exit-latest.entry:null;
+      el('spread-stats').innerHTML=[
+        ['正向入场 · 卖 A／买 B',latest?.entry,forward.detail,forward.reached],
+        ['反向入场 · 买 A／卖 B',latest?.exit,backward.detail,backward.reached],
+        ['两侧报价差',width,'两腿买卖点差之和，未含佣金'],
+        ['窗口'+(view.field==='entry'?'卖 A／买 B':'买 A／卖 B')+'均值',average(focused),'仅本机采样；历史参考另列']
+      ].map(([label,value,detail,reached])=>`<div class="stat" data-reached="${!!reached}"><span>${escape(label)}</span><strong>${Number.isFinite(value)?value.toFixed(3):'—'}</strong><small>${escape(detail)}</small></div>`).join('');
+      const otherTargets=targetMarks.some(x=>x.field!==view.field);
+      text('chart-focus-description',`${view.both?'双线对照：上限只比较正向入场，下限只比较反向入场。':'当前显示'+view.names[view.field]+'，'+(view.field==='entry'?'A Bid−B Ask':'A Ask−B Bid')+'。'} 切换视角仅改变图表，不改变交易方向。${view.held?'已有'+(view.held==='reverse'?'反向':'正向')+'持仓，自动关注优先显示退出报价；平仓目标仅表示价差条件，仍须满足本组收益规则。':''}${!view.both&&otherTargets?' 本视角不含另一侧平仓目标，可切回自动关注查看。':''}`);
+      el('spread-chart').setAttribute?.('aria-label',view.both?'正反向可成交价差对照图':view.names[view.field]+'可成交价差历史图');
+    } else {
+      el('spread-stats').innerHTML=[['当前入场',latest?.entry],['当前退出',latest?.exit],['开仓阈值',threshold],['窗口入场均值',average(entries)],['价差范围',all.length?`${Math.min(...all).toFixed(3)} ～ ${Math.max(...all).toFixed(3)}`:null]].map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${typeof value==='number'?value.toFixed(3):value||'—'}</strong></div>`).join('');
+    }
     el('chart-empty').classList.toggle('is-hidden',samples.length>0||referenceLines.length>0);
     const referenceStats=referenceHistory?.stats;
     const intervalLabel=referenceHistory?.period?referenceHistory.period.replace('M','')+' 分钟收盘价':'';
@@ -915,13 +964,41 @@
       (samples.length&&samples[0].time_ms-rangeStart>Math.max(60000,windowMinutes*60000/100)?referenceLines.length?' 所选窗口前段暂无本机记录；紫色点线为取得的历史收盘参考，其余缺失区间保持留空。':' 所选窗口前段暂无本机记录，已留空显示；切换窗口不会补造停机前或断线期间的行情。':'');
     const oldZoom=chart.getOption()?.dataZoom?.[0];
     const start=resetChartZoom?0:(oldZoom?.start??0),end=resetChartZoom?100:(oldZoom?.end??100);resetChartZoom=false;
-    const runtime=last?.strategy_runtime||{},nativeMode=runtime.direction_mode||'forward';
-    const lower=isNative(last)&&last?.connected&&nativeMode!=='forward'?runtime.entry_lower_usd:null;
-    const thresholdLine=threshold===null||isNative(last)&&nativeMode==='reverse'?[]:[{name:`开仓阈值 ${threshold.toFixed(2)}`,yAxis:threshold,lineStyle:{color:'#b75e24',width:2,type:'dashed'},label:{show:true,color:'#8a461e',formatter:`开仓阈值 ${threshold.toFixed(2)}`}}];
-    if(Number.isFinite(lower))thresholdLine.push({name:`反向开仓下限 ${lower.toFixed(2)}`,yAxis:lower,lineStyle:{color:'#9462a2',width:2,type:'dashed'},label:{show:true,formatter:`反向下限 ${lower.toFixed(2)}`}});
-    chart.setOption({animation:false,legend:{top:5,type:'scroll'},tooltip:{trigger:'axis',confine:true,valueFormatter:v=>Number.isFinite(v)?v.toFixed(3):'—'},grid:{left:75,right:120,top:70,bottom:80},xAxis:{type:'time',min:rangeStart,max:rangeEnd,minInterval:1000,axisPointer:{label:{formatter:params=>dateTime(params.value)}}},yAxis:{type:'value',scale:true,name:isNative(last)?'价差 USD/报价单位':'价差 USD/盎司'},dataZoom:[{type:'inside',filterMode:'none',minValueSpan:1000,start,end},{type:'slider',filterMode:'none',minValueSpan:1000,bottom:15,start,end}],series:[
-      {id:'entry',name:isNative(last)?'A Bid−B Ask（正向入场／反向退出）':'入场（卖币安Bid / 买MT5Ask）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.entry]),itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:[...(threshold===null||isNative(last)&&nativeMode==='reverse'?[]:[[{name:'正向开仓触发区',yAxis:threshold},{yAxis:'max'}]]),...(Number.isFinite(lower)?[[{name:'反向开仓触发区',yAxis:'min'},{yAxis:lower}]]:[]),...missing]},markLine:{symbol:'none',silent:true,data:[...thresholdLine,...marks],label:{formatter:'{b}: {c}'}}},
-      {id:'exit',name:isNative(last)?'A Ask−B Bid（正向退出／反向入场）':'退出（买回币安Ask / 卖MT5Bid）',type:'line',showSymbol:false,connectNulls:false,data:lines.map(x=>[x.time_ms,x.exit]),itemStyle:{color:'#247b68'},lineStyle:{width:2,type:'dashed'}},
+    const runtime=last?.strategy_runtime||{};
+    const upperAllowed=!native||view.mode!=='reverse'&&view.held!=='reverse';
+    const lowerAllowed=native&&view.mode!=='forward'&&view.held!=='forward';
+    const lower=native&&last?.connected?runtime.entry_lower_usd:null;
+    const thresholdLine=threshold===null||!upperAllowed?[]:[{name:native?'正向入场 ≥ 上限':'开仓阈值 '+threshold.toFixed(2),yAxis:threshold,lineStyle:{color:'#b75e24',width:2,type:'dashed'},label:{show:true,color:'#8a461e',formatter:native?`正向入场 ≥ ${threshold.toFixed(2)}`:`开仓阈值 ${threshold.toFixed(2)}`}}];
+    const lowerLine=lowerAllowed&&Number.isFinite(lower)?[{name:'反向入场 ≤ 下限',yAxis:lower,lineStyle:{color:'#9462a2',width:2,type:'dashed'},label:{show:true,formatter:`反向入场 ≤ ${lower.toFixed(2)}`}}]:[];
+    const entryName=native?view.names.entry:'入场（卖币安Bid / 买MT5Ask）';
+    const exitName=native?view.names.exit:'退出（买回币安Ask / 卖MT5Bid）';
+    const entryMarks=native?(showEntry?[...thresholdLine,...targetMarks.filter(x=>x.field==='entry').map(x=>x.mark)]:[]):[...thresholdLine,...marks];
+    const exitMarks=native&&showExit?[...lowerLine,...targetMarks.filter(x=>x.field==='exit').map(x=>x.mark)]:[];
+    const visibleBounds=[...entryMarks,...exitMarks].map(x=>x.yAxis).filter(Number.isFinite);
+    const axisBound=(extent,minimum)=>{
+      const values=[extent.min,extent.max,...visibleBounds].filter(Number.isFinite);
+      if(!values.length)return undefined;
+      const low=Math.min(...values),high=Math.max(...values),padding=Math.max(.1,high-low)*.08;
+      return minimum?low-padding:high+padding;
+    };
+    const lookup=native?new Map(lines.map(x=>[x.time_ms,x])):null;
+    const tooltip={trigger:'axis',confine:true,valueFormatter:v=>Number.isFinite(v)?v.toFixed(3):'—'};
+    if(native)tooltip.formatter=params=>{
+      const items=Array.isArray(params)?params:[params],point=items.find(p=>p.seriesId==='entry'||p.seriesId==='exit')||items[0];
+      if(!point)return '';
+      const at=point.value?.[0],sample=lookup.get(at),value=x=>Number.isFinite(x)?x.toFixed(3):'—';
+      if(!sample)return escape(dateTime(at))+'<br>'+items.map(p=>escape(p.seriesName)+'：'+escape(value(p.value?.[1]))).join('<br>');
+      const upper=last?.connected?last.strategy_runtime?.entry_spread_usd:null,lower=last?.connected?last.strategy_runtime?.entry_lower_usd:null;
+      const condition=(number,bound,sign)=>Number.isFinite(number)&&Number.isFinite(bound)?` · ${sign} ${value(bound)}：${(sign==='≥'?number>=bound:number<=bound)?'已到价':'未达到'}`:'';
+      return escape(dateTime(at))+'<br>'+escape(view.names.entry)+'：'+value(sample.entry)+(upperAllowed?condition(sample.entry,upper,'≥'):'')+
+        '<br>'+escape(view.names.exit)+'：'+value(sample.exit)+(lowerAllowed?condition(sample.exit,lower,'≤'):'')+
+        '<br>两侧报价差：'+value(Number.isFinite(sample.entry)&&Number.isFinite(sample.exit)?sample.exit-sample.entry:null)+
+        '<br>仅表示当时报价条件；是否开仓还需模式、持仓及风控校验。';
+    };
+    const legendNames=[...(showEntry?[entryName]:[]),...(showExit?[exitName]:[]),...(referenceLines.length?['历史参考（收盘价，点线）']:[]),...(opened.length?['策略开仓']:[]),...(closed.length?['策略平仓']:[])];
+    chart.setOption({animation:false,legend:{top:5,type:'scroll',...(native?{data:legendNames}:{})},tooltip,grid:{left:75,right:native?25:120,top:70,bottom:80},xAxis:{type:'time',min:rangeStart,max:rangeEnd,minInterval:1000,axisPointer:{label:{formatter:params=>dateTime(params.value)}}},yAxis:{type:'value',scale:true,name:native?'价差 USD/报价单位':'价差 USD/盎司',...(native?{min:v=>axisBound(v,true),max:v=>axisBound(v,false),axisLabel:{formatter:v=>n(v)}}:{})},dataZoom:[{type:'inside',filterMode:'none',minValueSpan:1000,start,end},{type:'slider',filterMode:'none',minValueSpan:1000,bottom:15,start,end}],series:[
+      {id:'entry',name:entryName,type:'line',showSymbol:false,connectNulls:false,data:showEntry?lines.map(x=>[x.time_ms,x.entry]):[],itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:[...(!native&&threshold!==null?[[{name:'正向开仓触发区',yAxis:threshold},{yAxis:'max'}]]:[]),...(showEntry?missing:[])]},markLine:{symbol:'none',silent:true,data:entryMarks,label:{formatter:'{b}: {c}',...(native?{position:'insideEndTop'}:{})}}},
+      {id:'exit',name:exitName,type:'line',showSymbol:false,connectNulls:false,data:showExit?lines.map(x=>[x.time_ms,x.exit]):[],itemStyle:{color:'#247b68'},lineStyle:{width:2,type:native&&!view.both?'solid':'dashed'},markArea:{silent:true,data:!showEntry?missing:[]},markLine:{symbol:'none',silent:true,data:exitMarks,label:{formatter:'{b}: {c}',...(native?{position:'insideEndTop'}:{})}}},
       {id:'reference',name:'历史参考（收盘价，点线）',type:'line',showSymbol:false,connectNulls:false,data:referenceLines,itemStyle:{color:'#8063a8'},lineStyle:{width:1.5,type:'dotted'},z:1},
       {id:'open',name:'策略开仓',type:'scatter',symbol:'triangle',symbolSize:12,itemStyle:{color:'#b75e24'},data:opened},
       {id:'close',name:'策略平仓',type:'scatter',symbol:'diamond',symbolSize:12,itemStyle:{color:'#6b50a6'},data:closed}
@@ -994,6 +1071,7 @@
     catch(error){text('chart-gaps','图表历史加载失败：'+error.message,true);}
   }
   el('chart-reference-enabled').onchange=reloadChart;
+  el('chart-focus').onchange=()=>drawChart(chartSamples);
   // Chart reads do not take the trading action lock; a new selection replaces
   // an older in-flight chart request even while a connection check is running.
   el('chart-window').onchange=reloadChart;
