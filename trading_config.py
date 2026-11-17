@@ -94,11 +94,11 @@ def validate(c):
         v=e[k]
         if type(v) is not int or not lo <= v <= hi:
             raise ValueError(k+' 不在有效整数范围')
-    for k in ('usdt_usd_auto','binance_fee_auto'):
-        if type(costs[k]) is not bool:
+    for k in ('usdt_usd_auto','binance_fee_auto','mt5_fee_auto','mt5_short_fee_auto'):
+        if type(costs.get(k,False) if k.startswith('mt5_') else costs.get(k)) is not bool:
             raise ValueError(k+' 必须是开关')
     for k, v in costs.items():
-        if k in ('usdt_usd_auto','binance_fee_auto'): continue
+        if k in ('usdt_usd_auto','binance_fee_auto','mt5_fee_auto','mt5_short_fee_auto'): continue
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
             raise ValueError('费用参数必须为有限数字')
     if not .5 <= costs['usdt_usd'] <= 1.5 or not 0 <= costs['binance_taker_percent'] <= 5:

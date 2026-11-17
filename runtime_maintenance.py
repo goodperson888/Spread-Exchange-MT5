@@ -6,6 +6,7 @@ import time
 from maintenance_work import MaintenanceWork
 from trading_config import pair_key
 from trading_engine import Engine
+import commission_reference
 
 
 def peers(state):
@@ -25,13 +26,13 @@ class MaintenanceMonitor:
         self.runtime, self.client, self.terminal_factory = runtime, client, terminal_factory
         self.stopped = threading.Event()
         # Account snapshots must not queue behind large history reads either.
-        self.terminals = {'account':None, 'costs':None}
+        self.terminals = {'account':None, 'costs':None, 'commission':None}
         self.session_lock = threading.Lock()
         self.retry_at = {}
         self.threads = []
 
     def start(self):
-        for lane in ('account', 'history'):
+        for lane in ('account', 'history', 'commission'):
             thread = threading.Thread(target=self._loop, args=(lane,), name='gold-pair-maintenance-'+lane, daemon=True)
             self.threads.append(thread)
             thread.start()
@@ -40,7 +41,7 @@ class MaintenanceMonitor:
         self.stopped.set()
         with self.session_lock:
             terminals = tuple(self.terminals.values())
-            self.terminals = {'account':None, 'costs':None}
+            self.terminals = {'account':None, 'costs':None, 'commission':None}
         for terminal in terminals:
             if terminal:
                 try: terminal.close()
@@ -210,6 +211,12 @@ class MaintenanceMonitor:
         finally: r.lock.release()
 
     def _loop(self, lane):
+        if lane == 'commission':
+            while not self.stopped.is_set():
+                try: commission_reference.refresh(self, lambda:self._terminal('commission'))
+                except Exception: pass
+                self.stopped.wait(60)
+            return
         while not self.stopped.is_set():
             kinds = ('account',) if lane=='account' else ('fx', 'funding', 'costs')
             for kind in kinds:

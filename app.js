@@ -80,6 +80,7 @@ function formConfig() {
       total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold'))},
     execution:{mode:value('exec-mode'), quote_source:'market', entry_leg:value('entry-leg'), poll_ms:Number(value('poll-ms')), magic:Number(value('magic')), close_retry_limit:Number(value('close-retries'))},
     costs:{usdt_usd_auto:$('auto-fx').checked,usdt_usd:Number(value('usdt-fx')),binance_fee_auto:$('auto-binance-fee').checked,binance_taker_percent:Number(value('binance-fee')), mt5_commission_per_lot_side:Number(value('mt5-fee')),binance_rebate_percent:Number(value('binance-rebate')),mt5_rebate_percent:Number(value('mt5-rebate')), mt5_swap_per_lot_day:Number(value('mt5-swap')), paper_funding_percent_day:Number(value('paper-funding')),
+      mt5_fee_auto:$('auto-mt5-fee').checked,mt5_short_fee_auto:$('auto-mt5-short-fee').checked,
       mt5_short_commission_per_lot_side:Number(value('mt5-short-fee')||0),mt5_short_rebate_percent:Number(value('mt5-short-rebate')||0),mt5_short_swap_per_lot_day:Number(value('mt5-short-swap')||0)},
   };
 }
@@ -156,6 +157,8 @@ function populate(c) {
   for(const [key,id] of Object.entries({usdt_usd:'usdt-fx',binance_taker_percent:'binance-fee',mt5_commission_per_lot_side:'mt5-fee',binance_rebate_percent:'binance-rebate',mt5_rebate_percent:'mt5-rebate',mt5_swap_per_lot_day:'mt5-swap',paper_funding_percent_day:'paper-funding'})) $(id).value=costs[key] ?? $(id).value;
   $('auto-fx').checked=costs.usdt_usd_auto ?? true;
   $('auto-binance-fee').checked=costs.binance_fee_auto ?? true;
+  $('auto-mt5-fee').checked=costs.mt5_fee_auto ?? false;
+  $('auto-mt5-short-fee').checked=costs.mt5_short_fee_auto ?? false;
   for(const [key,id] of [['contract_size_oz','contract'],['volume_min','volume-min'],['volume_step','volume-step']])
     $(id).value=c.mt5?.[key]??'';
   $('lots').min=c.mt5?.volume_min??'';$('lots').max=c.mt5?.volume_max??'';$('lots').step=c.mt5?.volume_step??'any';

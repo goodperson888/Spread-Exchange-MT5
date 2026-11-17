@@ -567,6 +567,21 @@
     const visibleActionError=actionError&&!(alarm&&actionError.endsWith(String(alarm)))?actionError:'';
     text('trading-result', `${visibleActionError? visibleActionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${marginNotice}${result.plan?isNative(result)?`\n每组：品种 A ${result.plan.lots} 手 / 品种 B ${result.plan.lots} 手。`:`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError||marginNotice));
     const auto=result.auto_values||{}, details=[];
+    const commissions=auto.mt5_commission_reference,commissionText=[];let readyCommissions=0,totalCommissions=0;
+    if(commissions) for(const leg of ['binance','mt5']) {
+      const ref=commissions[leg];if(!ref)continue;
+      const profiles=[];
+      for(const [key,label] of [['open_0','买入开仓'],['open_1','卖出开仓'],['close_0','买入平仓'],['close_1','卖出平仓']]) {
+        const row=ref.profiles?.[key];if(!row)continue;
+        totalCommissions++;if(row.state==='ready')readyCommissions++;
+        const amount=row.state==='ready'&&Number.isFinite(row.rate)?`${n(row.rate)} USD/手`:
+          row.state==='variable'?'费率不稳定，使用备用值':row.state==='zero_unconfirmed'?'全零记录未确认免佣，使用备用值':'样本不足，使用备用值';
+        profiles.push(`${label} ${amount}（${row.samples??0} 笔）`);
+      }
+      commissionText.push(`${ref.symbol||legLabel(result,leg)}：${profiles.join('；')||'读取待重试，使用备用值'} · 更新 ${dateTime(ref.checked_ms)}`);
+    }
+    text('mt5-commission-reference',commissionText.join('\n')||'连接原生 MT5 并启用佣金参考后后台获取；未取得可靠样本时使用手填备用值。');
+    text('mt5-commission-summary',totalCommissions?`佣金参考：${readyCommissions}/${totalCommissions} 类样本可用，其他使用备用值；仅供后续新组。`:'佣金参考待获取；未取得可靠样本时使用手填备用值。');
     if(auto.fx?.value) {
       if(loaded && el('auto-fx').checked && !dirtyFields.has('usdt-fx')) el('usdt-fx').value=Number(auto.fx.value).toFixed(6);
       details.push(`USDT/USD ${Number(auto.fx.value).toFixed(6)}（币安资产指数）`);

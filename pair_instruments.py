@@ -81,13 +81,15 @@ def native_valuation(engine, group, quote):
     """Equal lots can have different notionals: value each leg with its OWN multiplier."""
     g = group; c = g['costs']; remaining = engine.amounts(g)
     pnl = {'binance':0., 'mt5':0.}; fees = {'binance':0., 'mt5':0.}; flags = []
-    rates = {'binance':c.get('mt5_short_commission_per_lot_side',0), 'mt5':c['mt5_commission_per_lot_side']}
+    from commission_reference import fee_rate
+    estimates = {(leg,action):fee_rate(g,leg,action) for leg in ('binance','mt5') for action in ('open','close')}
+    rates = {leg:estimates[leg,'close'] for leg in ('binance','mt5')}
     for o in engine.state['orders']:
         if o['group'] != g['id']: continue
         r=o.get('result',{}); lots=r.get('qty',0); leg=o['leg']
         sign=1 if order_sells(g,leg,o['action']) else -1
         pnl[leg] += sign*lots*r.get('price',0)*g['leg_contracts'][leg]
-        fees[leg] += r.get('fee',lots*rates[leg])
+        fees[leg] += r.get('fee',lots*estimates[leg,o['action']])
         if lots>0: flags.append(r.get('fee_verified') is True)
     for leg in pnl:
         if not remaining[leg]: continue
@@ -96,7 +98,7 @@ def native_valuation(engine, group, quote):
     exits={leg:remaining[leg]*rates[leg] for leg in rates}
     rebate_rates={'binance':c.get('mt5_short_rebate_percent',0), 'mt5':c.get('mt5_rebate_percent',0)}
     # Cashback applies only to positive commission, never to swap.
-    bases={leg:sum(max(0,o.get('result',{}).get('fee',o.get('result',{}).get('qty',0)*rates[leg]))
+    bases={leg:sum(max(0,o.get('result',{}).get('fee',o.get('result',{}).get('qty',0)*estimates[leg,o['action']]))
                   for o in engine.state['orders'] if o['group']==g['id'] and o['leg']==leg) for leg in rates}
     rebates={leg:(bases[leg]+max(0,exits[leg]))*rebate_rates[leg]/100 for leg in rates}
     swap=g.get('native_swap_usd',0)

@@ -1306,7 +1306,12 @@ def deep_merge(base, incoming):
 
 
 def load_config():
-    config = deep_merge(DEFAULT, read_json(CONFIG_PATH, {}))
+    saved = read_json(CONFIG_PATH, {})
+    config = deep_merge(DEFAULT, saved)
+    # Keep existing manual commission choices until the user enables learning.
+    if saved:
+        for key in ('mt5_fee_auto','mt5_short_fee_auto'):
+            if key not in saved.get('costs',{}): config['costs'][key]=False
     # 1000 ms was the old example value and is too narrow for many stable
     # internet/proxy routes.  Migrate that untouched legacy default so an
     # existing installation does not keep failing signed requests after an

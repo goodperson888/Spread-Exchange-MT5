@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock,patch
 
-from chart_reference import ReferenceHistory,PERIODS,align_bars,fetch_bars
+from chart_reference import ReferenceHistory,PERIODS,align_bars,fetch_bars,HistoryRows,HistoryError,native_clock
 from trading_brokers import native_chart_rates,worker_main
 from test_trading_engine import config
 from test_pair_combinations import native_config
@@ -174,6 +174,9 @@ class SourceTests(unittest.TestCase):
         end=int(time.time()*1000)//60000*60000;start=end-60000*600
         terminal=Mock()
         def call(command,**kw):
+            if command=='chart_clock':
+                now=int(time.time()*1000)
+                return dict(observed_ms=now,ticks={name:now+drift for name in (c['mt5']['symbol'],c['pair']['short_symbol'])})
             self.assertEqual(command,'chart_rates')
             return dict(symbol=kw['symbol'],bars=[dict(t=start,close=4000)],
                         tick_time_ms=int(time.time()*1000)+drift,observed_ms=int(time.time()*1000))
@@ -200,7 +203,7 @@ class SourceTests(unittest.TestCase):
     def test_native_pair_fetches_both_selected_symbols_without_exchange_requests(self):
         c=native_config();r=self.run_fetch(c)
         self.assertEqual(len(r),1);self.exchange.assert_not_called()
-        self.assertEqual([x.kwargs['symbol'] for x in self.terminal.call.call_args_list],
+        self.assertEqual([x.kwargs['symbol'] for x in self.terminal.call.call_args_list if x.args[0]=='chart_rates'],
                          [c['mt5']['symbol'],c['pair']['short_symbol']])
         self.assertEqual(len(self.factory.call_args.args[0]['pair_symbols']),2)
 
@@ -237,3 +240,69 @@ class SourceTests(unittest.TestCase):
         reply=json.loads(output.getvalue().splitlines()[-1]);self.assertTrue(reply['ok'])
         self.assertEqual(reply['data']['bars'][0]['close'],4000)
         mt.order_send.assert_not_called();mt.order_check.assert_not_called()
+
+
+class ClockTests(unittest.TestCase):
+    def probes(self, offset=7200000, advancing=True, other_offset=None):
+        now=int(time.time()*1000)
+        return [dict(observed_ms=now+i*350,ticks={'B':now+offset+(i*350 if advancing else 0),
+                    'A':now+(offset if other_offset is None else other_offset)+(i*350 if advancing else 0)}) for i in range(9)]
+
+    def verify(self, probes):
+        terminal=Mock();terminal.call.side_effect=probes;cancel=Mock();cancel.wait.return_value=False
+        diagnostics={}
+        result=native_clock(terminal,['B','A'],cancel,lambda:10,diagnostics)
+        return result,diagnostics
+
+    def test_common_advancing_broker_clock_is_measured_without_timezone_assumption(self):
+        offset,diag=self.verify(self.probes())
+        self.assertEqual(offset,7200000);self.assertEqual(diag['clock_state'],'shared_advancing')
+        self.assertEqual(len(diag['clock_samples']),4)
+        self.assertEqual(self.verify(self.probes(offset=-7200000))[0],-7200000)
+
+    def test_stale_common_ticks_and_different_leg_clocks_remain_blocked(self):
+        with self.assertRaisesRegex(HistoryError,'未同时确认报价更新'):self.verify(self.probes(advancing=False))
+        with self.assertRaisesRegex(HistoryError,'两腿时间不一致'):self.verify(self.probes(other_offset=3600000))
+
+    def test_missing_and_jumping_clock_cannot_create_history(self):
+        probes=self.probes();probes[0]['ticks']['A']=None
+        with self.assertRaisesRegex(HistoryError,'字段缺失'):self.verify(probes)
+        probes=self.probes();probes[1]['ticks']['A']+=3600000
+        with self.assertRaisesRegex(HistoryError,'时间跳变'):self.verify(probes)
+
+    def test_shifted_native_bars_are_joined_before_display_conversion(self):
+        c=native_config();offset=7200000;end=int(time.time()*1000)//900000*900000;start=end-900000*2
+        t=Mock();probes=iter(self.probes(offset));cancel=Mock();cancel.wait.return_value=False;cancel.is_set.return_value=False
+        wrong_bar=False
+        def call(command,**kw):
+            if command=='chart_clock':
+                probe=next(probes)
+                probe['ticks']={c['mt5']['symbol']:probe['ticks']['B'],c['symbol']:probe['ticks']['A']}
+                return probe
+            self.assertEqual(kw['start_ms'],start+offset);self.assertEqual(kw['end_ms'],end+offset)
+            now=int(time.time()*1000)
+            return dict(symbol=kw['symbol'],observed_ms=now,tick_time_ms=now+offset,
+                        current_bar_ms=now//900000*900000+(0 if wrong_bar else offset),
+                        bars=[dict(t=start+offset,close=4000 if kw['symbol']==c['mt5']['symbol'] else 4005)])
+        t.call.side_effect=call
+        with patch('trading_brokers.Terminal',return_value=t),patch('trading_brokers.Binance') as exchange:
+            rows=fetch_bars(c,'M15',start,end,cancel)
+        self.assertEqual(rows[0]['time_ms'],start);self.assertEqual(rows[0]['source_time_ms'],start+offset)
+        self.assertEqual(rows[0]['short_close']-rows[0]['long_close'],5);exchange.assert_not_called()
+        self.assertEqual(rows.diagnostics['paired_count'],1);t.close.assert_called_once()
+        wrong_bar=True;probes=iter(self.probes(offset))
+        with patch('trading_brokers.Terminal',return_value=t):
+            with self.assertRaisesRegex(HistoryError,'K 线与报价的原始时基不一致'):
+                fetch_bars(c,'M15',start,end,cancel)
+
+    def test_shifted_history_metadata_survives_cache_and_is_exportable_on_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            svc=ReferenceHistory(folder);now=int(time.time()*1000)//60000*60000
+            rows=HistoryRows([dict(time_ms=now-60000,short_close=5,long_close=4)],
+                             dict(display_offset_ms=7200000,clock_state='shared_advancing'))
+            svc._write_cache('test',rows,now-120000,now)
+            restored=svc._read_cache('test',now-120000,now,60000)
+            self.assertEqual(restored.diagnostics,rows.diagnostics)
+            svc.entries['test']=dict(state='error',diagnostics=dict(clock_samples=[dict(leg='mt5',offset_ms=7200000)]))
+            self.assertEqual(svc.diagnostics()[0]['clock_samples'][0]['offset_ms'],7200000)
+            svc.close()

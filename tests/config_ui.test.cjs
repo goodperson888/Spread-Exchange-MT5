@@ -72,6 +72,24 @@ test('rebate percentages restore and save independently of the exchange fee rate
  assert.equal(f.el('binance-rebate').value,'12.5');assert.equal(f.el('mt5-rebate').value,'0');
 });
 
+test('MT5 commission references show source samples and preserve manual fallback and separate switches',async()=>{
+ const ref={symbol:'GOLD-A',checked_ms:Date.now(),profiles:{
+   open_0:{state:'ready',rate:6,samples:3},close_1:{state:'ready',rate:0,samples:4},
+   open_1:{state:'zero_unconfirmed',samples:3},close_0:{state:'insufficient',samples:0}}};
+ const live={connected:true,state:{enabled:false,groups:[],orders:[]},capabilities:{mode:'live',reconciled:true},
+   auto_values:{mt5_commission_reference:{mt5:ref}}};
+ const f=await fixture({'/api/trading/reconcile':()=>live,'/api/trading/status':()=>live});
+ f.edit('mt5-fee','7');f.el('auto-mt5-fee').checked=true;f.el('auto-mt5-short-fee').checked=false;
+ f.loadTrading();await f.el('trading-reconcile').onclick();
+ assert.match(f.el('mt5-commission-summary').textContent,/2\/4 类样本可用/);
+ assert.match(f.el('mt5-commission-reference').textContent,/买入平仓|卖出平仓/);
+ assert.match(f.el('mt5-commission-reference').textContent,/全零记录未确认免佣/);
+ assert.equal(f.el('mt5-fee').value,'7');
+ const payload=f.run('formConfig()');
+ assert.equal(payload.costs.mt5_fee_auto,true);assert.equal(payload.costs.mt5_short_fee_auto,false);
+ assert.equal(payload.costs.mt5_commission_per_lot_side,7);
+});
+
 test('failed MT5 check shows raw symbol fields and never applies unverified contract',async()=>{
   const result={connected:true,identity_matches:true,symbol:null,message:'已连接 MT5，但品种未通过校验',
     symbol_diagnostics:{name:'XAUUSD',description:'<img src=x>',currency_base:'',currency_profit:'USD',

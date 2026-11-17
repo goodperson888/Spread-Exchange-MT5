@@ -474,13 +474,16 @@ class BinanceBookTicker:
         if self.thread and self.thread.is_alive(): self.thread.join(timeout=2)
 
 
-def native_chart_rates(mt,symbol,period,start_ms,end_ms):
+def native_chart_rates(mt,symbol,period,start_ms,end_ms,clock_offset_ms=0):
     """Bounded, completed bars for display only, with an explicit raw clock probe."""
     intervals={'M1':60000,'M5':300000,'M15':900000}
     interval=intervals.get(period)
+    if (not isinstance(clock_offset_ms,int) or isinstance(clock_offset_ms,bool) or abs(clock_offset_ms)>14*3600000
+            or clock_offset_ms%60000): raise ValueError('历史显示时间偏移无效')
     if (interval is None or any(not isinstance(x,int) or isinstance(x,bool) for x in (start_ms,end_ms))
             or start_ms<=0 or end_ms<=start_ms or (end_ms-start_ms)//interval>4000
-            or start_ms%interval or end_ms%interval or end_ms>int(time.time()*1000)):
+            or start_ms%interval!=clock_offset_ms%interval or end_ms%interval!=clock_offset_ms%interval
+            or end_ms>int(time.time()*1000)+clock_offset_ms):
         raise ValueError('历史参考请求的周期或时间范围无效')
     rates=mt.copy_rates_range(symbol,getattr(mt,'TIMEFRAME_'+period),
         _utc_datetime_from_timestamp(start_ms/1000),_utc_datetime_from_timestamp(end_ms/1000))
@@ -489,7 +492,11 @@ def native_chart_rates(mt,symbol,period,start_ms,end_ms):
     bars=[dict(t=int(row['time'])*1000,close=float(row['close'])) for row in rates
           if start_ms<=int(row['time'])*1000 and int(row['time'])*1000+interval<=end_ms]
     tick=mt.symbol_info_tick(symbol)
-    return dict(symbol=symbol,bars=bars,tick_time_ms=getattr(tick,'time_msc',None),observed_ms=int(time.time()*1000))
+    data=dict(symbol=symbol,bars=bars,tick_time_ms=getattr(tick,'time_msc',None),observed_ms=int(time.time()*1000))
+    if clock_offset_ms:
+        current=mt.copy_rates_from_pos(symbol,getattr(mt,'TIMEFRAME_'+period),0,1)
+        data['current_bar_ms']=int(current[0]['time'])*1000 if current is not None and len(current) else None
+    return data
 
 
 class Terminal:
@@ -872,7 +879,7 @@ def worker_main():
                     if not mt.symbol_select(name,True): raise ValueError('MT5 品种不可用：'+name)
                 data=True
             else:
-                if read_only and cmd not in ('snapshot','quote','pair_quotes','history','external_history','external_history_probe','query','pair_spec','chart_rates'):
+                if read_only and cmd not in ('snapshot','quote','pair_quotes','history','external_history','external_history_probe','query','pair_spec','chart_rates','commission_reference','chart_clock'):
                     raise ValueError('持仓核对会话只允许读取行情、持仓和成交')
                 a,t=identity()
                 name=r.get('symbol',settings['symbol'])
@@ -933,8 +940,17 @@ def worker_main():
                         raise ValueError('MT5 成交历史超出自动回补范围')
                     data=native_external_history_probe(mt,s.name,r['openings'])
                 elif cmd=='chart_rates':
-                    data=native_chart_rates(mt,s.name,r['period'],r['start_ms'],r['end_ms'])
+                    data=native_chart_rates(mt,s.name,r['period'],r['start_ms'],r['end_ms'],r.get('clock_offset_ms',0))
                     identity()  # Reject a terminal account switch during the history read.
+                elif cmd=='commission_reference':
+                    from commission_reference import native_commission_reference
+                    data=native_commission_reference(mt,s.name,r['lots'])
+                    identity()
+                elif cmd=='chart_clock':
+                    data={'observed_ms':int(time.time()*1000),'ticks':{}}
+                    for name in settings.get('pair_symbols',[settings['symbol']]):
+                        tick=mt.symbol_info_tick(name)
+                        data['ticks'][name]=getattr(tick,'time_msc',None)
                 elif cmd=='rates':
                     tf={'M1':mt.TIMEFRAME_M1,'M5':mt.TIMEFRAME_M5,'H1':mt.TIMEFRAME_H1}[r['period']]
                     rates=mt.copy_rates_from_pos(s.name,tf,1,r['count'])

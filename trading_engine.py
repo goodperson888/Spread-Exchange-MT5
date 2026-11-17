@@ -7,6 +7,7 @@ from execution_evidence import reason_code, REASON_LABELS, result_evidence, vali
 from execution_dispatch import dispatch_order, dispatch_pair, not_dispatched
 from pair_instruments import (native_pair, pair_info, native_valuation, reverse_pair,
                               position_side, order_sells, direction_quote, entry_direction)
+from commission_reference import fee_rate, attach as attach_commission_reference
 
 
 def stamp(): return int(time.time()*1000)
@@ -475,6 +476,7 @@ class Engine:
             historical=sum(o['result']['qty']*o.get('fx',c['usdt_usd']) for o in closes)/total if total else c['usdt_usd']
             fx=g.get('valuation_fx',historical)
         pnl=dict(binance=0.,mt5=0.)
+        mt5_rates={action:fee_rate(g,'mt5',action) for action in ('open','close')}
         fee_base=dict(binance=0.,mt5=0.);fee_flags=[]
         owned=self.amounts(g)
         for o in self.state['orders']:
@@ -483,7 +485,7 @@ class Engine:
             sign=1 if (o['leg']=='binance')==(o['action']=='open') else -1
             order_fx=o.get('fx',g['costs']['usdt_usd'])
             pnl[o['leg']]+=sign*qty*price
-            fee=r.get('fee', qty*price*c['binance_taker_percent']/100 if o['leg']=='binance' else qty/g['contract']*c['mt5_commission_per_lot_side'])*(order_fx if o['leg']=='binance' else 1)
+            fee=r.get('fee', qty*price*c['binance_taker_percent']/100 if o['leg']=='binance' else qty/g['contract']*mt5_rates[o['action']])*(order_fx if o['leg']=='binance' else 1)
             fees+=fee
             fee_base[o['leg']]+=max(0,fee)
             if qty>0: fee_flags.append(r.get('fee_verified') is True)
@@ -493,7 +495,7 @@ class Engine:
         # that PnL once, rather than converting both full contract notionals.
         gross=pnl['binance']*fx+pnl['mt5']
         exit_fee_binance=owned['binance']*q['binance']['ask']*fx*c['binance_taker_percent']/100
-        exit_fee_mt5=owned['mt5']/g['contract']*c['mt5_commission_per_lot_side']
+        exit_fee_mt5=owned['mt5']/g['contract']*mt5_rates['close']
         exit_fee=exit_fee_binance+exit_fee_mt5
         days=max(0,(g.get('closed_ms',stamp())-g['opened_ms'])/86400000)
         if g['mode']!='paper':
@@ -625,6 +627,7 @@ class Engine:
         g['pair']=pair_info(c)
         if native_pair(c):
             g.update(leg_contracts=copy.deepcopy(p['leg_contracts']),quantity_unit='lot',direction=direction)
+        attach_commission_reference(self,c,g)
         self._begin_execution(g,'open',q,entry_started,now)
         self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
         self._entry_deadlines[g['id']]=entry_started+c['strategy']['max_unhedged_ms']/1000

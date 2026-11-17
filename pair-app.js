@@ -36,7 +36,7 @@
     node('mt5-spec-help').textContent=same?'下方只读规格为品种 B；检查结果分别列出两腿规格与共同手数规则。':'最小手数、步长和每手盎司数均从真实 MT5 读取。';
     node('risk-heading').textContent=same?'MT5 账户保证金风险':'双边强平风险';
     const costs=node('cost-source');costs.dataset.original??=costs.textContent;
-    costs.textContent=same?'实盘两腿成交佣金与 Swap 分别后台核验；预计平仓佣金按各腿每手单边设置计算，返佣按填写比例预计。纸面持仓费正值为成本、负值为收入。':costs.dataset.original;
+    costs.textContent=same?'实盘两腿成交佣金与 Swap 分别后台核验；启用佣金参考后，新组分别采用开仓／平仓历史估算，样本不足用手填备用值。返佣仍按填写比例预计。':costs.dataset.original;
     node('check-binance').hidden=same;node('native-pair-costs').hidden=!same;
     for(const id of ['auto-fx','usdt-fx','auto-binance-fee','binance-fee','binance-rebate','paper-funding'])node(id).closest('label').hidden=same;
     node('mt5-short-swap').closest('label').hidden=config.execution.mode==='live';
@@ -53,7 +53,8 @@
     label('volume-step',same?'品种 B 手数步长':'手数步长');
     label('entry',same?'正向开仓上限 A−B（USD/报价单位）':'自动开仓阈值（USD/盎司）');
     label('lots',same?'每组每腿手数（两腿相同）':'每组 MT5 手数');
-    label('mt5-fee',same?'品种 B 佣金预估（USD/手/单边）':'MT5 佣金预估（USD/手/单边）');
+    label('mt5-fee',same?'品种 B 备用佣金（USD/手/单边）':'MT5 备用佣金（USD/手/单边）');
+    label('auto-mt5-fee',same?'后台获取品种 B 佣金参考':'后台获取 MT5 佣金参考');
     label('mt5-rebate',same?'品种 B 佣金返佣比例（%）':'MT5 佣金返佣比例（%）');
     label('exit-rule-binance-rebate',same?'本组品种 A 佣金返佣（%）':'本组币安手续费返佣（%）');
     label('exit-rule-mt5-rebate',same?'本组品种 B 佣金返佣（%）':'本组 MT5 佣金返佣（%）');

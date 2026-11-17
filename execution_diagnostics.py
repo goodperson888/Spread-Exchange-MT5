@@ -8,6 +8,8 @@ from pathlib import Path
 from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
 from execution_evidence import reason_code, REASON_LABELS, result_evidence
+from commission_reference import safe_references
+from reference_diagnostics import PROCESS_REFERENCE_DIAGNOSTICS
 
 
 def numbers(row, fields):
@@ -65,6 +67,8 @@ def build_report(state, events):
             'source=external 表示平台外部平仓回补；platform_time_ms是未经时区推算的平台原始时间，reconcile_time_ms是本机发现时间，组closed_ms为本机确认完成时间；两者差不代表程序下单耗时。',
             'estimated_rebate为用户按手续费比例预计的返佣，非实际到账；net_before_rebate不含该项，net含该项并参与退出判断。'
         ],'groups':[],'orders':[],'events':[]}
+    report.update(PROCESS_REFERENCE_DIAGNOSTICS.snapshot())
+    report['notes'].append('chart_reference 与 mt5_commission_reference 是本进程最近后台读取的脱敏快照，不代表实时平台状态；历史失败请重试后导出。组内 commission_reference 和 commission_estimates 为开仓时锁定的历史费用参考及每手开仓／平仓估算，实际成交费用优先；未取得可靠样本时使用备用配置，返佣仍为用户预计。')
     report['runtime']={**numbers(state,'boot_ms last_start_ms'),**safe_reason(state,'alarm')}
     for key in ('enabled','recovery'):
         if type(state.get(key)) is bool: report['runtime'][key]=state[key]
@@ -108,6 +112,10 @@ def build_report(state, events):
              'second_leg':choice(g,'second_leg',('binance','mt5')),
              **numbers(g,'opened_ms closed_ms qty lots contract entry entry_signal exit exit_signal entry_threshold grid_index retry_limit')}
         if g.get('reason'): row.update(safe_reason(g))
+        if g.get('commission_reference'):
+            row['commission_reference']=safe_references(g['commission_reference'])
+        if g.get('commission_estimates'):
+            row['commission_estimates']=numbers(g['commission_estimates'],'binance_open binance_close mt5_open mt5_close')
         if g.get('pair',{}).get('type') in ('mt5_mt5','exchange_mt5'):
             row['pair']={'type':g['pair']['type']}
             if g['pair']['type']=='mt5_mt5': row['direction']=g.get('direction','forward') if g.get('direction','forward') in ('forward','reverse') else 'unknown'
@@ -131,6 +139,8 @@ def build_report(state, events):
         if g.get('cost_verification_stage') in ('binance_fees','mt5_fees','binance_funding','verified'):
             row['cost_verification_stage']=g['cost_verification_stage']
         row['costs']=numbers(g.get('costs',{}),'usdt_usd binance_rebate_percent mt5_rebate_percent mt5_short_rebate_percent mt5_short_commission_per_lot_side mt5_commission_per_lot_side')
+        for key in ('mt5_fee_auto','mt5_short_fee_auto'):
+            if type(g.get('costs',{}).get(key)) is bool: row['costs'][key]=g['costs'][key]
         row['valuation']=numbers(g.get('valuation',{}),'pnl_schema_version binance_pnl_usdt mt5_pnl_usd valuation_fx gross fees estimated_exit_fee net_before_rebate estimated_rebate estimated_rebate_binance estimated_rebate_mt5 net')
         if isinstance(g.get('exit_decision'),dict):
             decision=g['exit_decision']

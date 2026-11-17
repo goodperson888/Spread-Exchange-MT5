@@ -15,6 +15,7 @@ from market_push import TickFreshness
 from runtime_maintenance import evidence
 import external_closes
 import close_cause
+import commission_reference
 
 
 def settings_for(config):
@@ -146,7 +147,7 @@ class NativePairObserver:
         self.runtime=runtime;self.stopped=threading.Event();self.lock=threading.Lock();self.terminals={}
         self.threads=[]
     def start(self):
-        for lane in ('account','history'):
+        for lane in ('account','history','commission'):
             t=threading.Thread(target=self._loop,args=(lane,),name='mt5-pair-'+lane,daemon=True)
             self.threads.append(t);t.start()
     def close(self):
@@ -311,6 +312,12 @@ class NativePairObserver:
                                          message=errors[0] if errors else 'MT5 双腿持仓与成交后台核对中')
             r.market_wake.set()
     def _loop(self,lane):
+        if lane=='commission':
+            while not self.stopped.is_set():
+                try: commission_reference.refresh(self,lambda:self._terminal('commission'))
+                except Exception: pass
+                self.stopped.wait(60)
+            return
         while not self.stopped.is_set():
             try: self.step(lane)
             except Exception as exc:
