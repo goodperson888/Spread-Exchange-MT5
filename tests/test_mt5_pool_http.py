@@ -64,11 +64,39 @@ class PoolHttpTests(unittest.TestCase):
             code,result=self.request('/api/mt5/pool/check',dict(expected_pair_id=c['pair']['id'],endpoint_id=e['id']))
         self.assertEqual(code,200,result);self.assertFalse(result['applied']);self.assertEqual(server.load_config(),c)
         c['mt5_pool']['endpoints'][0].update(account='',server='');server.write_config(c)
-        probe=dict(connected=True,identity_matches=True,identity=dict(account='123456',server='Demo-A'),symbol=dict(name='XAUUSD'))
+        probe=dict(connected=True,identity_matches=True,endpoint_ready=True,blockers=[],identity=dict(account='123456',server='Demo-A'),symbol=dict(name='XAUUSD'))
         with patch.object(server,'run_probe',return_value=probe):
             code,result=self.request('/api/mt5/pool/check',dict(expected_pair_id=c['pair']['id'],endpoint_id=e['id']))
         self.assertEqual(code,200,result);self.assertTrue(result['applied'])
         self.assertEqual(server.load_config()['mt5_pool']['endpoints'][0]['account'],'123456')
+    def test_pool_check_uses_real_single_endpoint_probe_and_current_lots(self):
+        import mt5_connector as connector
+        from test_native_pair_probe import PairTerminal
+        c=self.install();e=c['mt5_pool']['endpoints'][1]
+        e.update(account='',server='',symbol='XAUUSD.s')
+        server.write_config(c);fake=PairTerminal();fake.symbols[1].name='XAUUSD.s'
+        def probe(settings):
+            self.assertTrue(settings['pool_endpoint_check'])
+            self.assertNotIn('pair_symbols',settings)
+            self.assertEqual(settings['pair_lots'],c['strategy']['mt5_lots'])
+            self.assertEqual(settings['pair_execution_mode'],c['execution']['mode'])
+            self.assertEqual(settings['terminal_path'],e['terminal_path'])
+            return connector.inspect_terminal(settings,fake)
+        with patch.object(server,'run_probe',side_effect=probe),patch.object(connector.Path,'is_file',return_value=True):
+            code,result=self.request('/api/mt5/pool/check',dict(expected_pair_id=c['pair']['id'],endpoint_id=e['id']))
+        self.assertEqual(code,200,result);self.assertTrue(result['applied'],result)
+        self.assertEqual(result['result']['symbol']['name'],'XAUUSD.s')
+        self.assertEqual(server.load_config()['mt5_pool']['endpoints'][1]['account'],'123')
+        self.assertEqual(server.load_config()['mt5_pool']['endpoints'][0],c['mt5_pool']['endpoints'][0])
+        fake.symbol_info.assert_called_once_with('XAUUSD.s')
+        fake.order_send.assert_not_called();fake.order_check.assert_not_called();fake.order_calc_margin.assert_not_called()
+    def test_incomplete_endpoint_validation_does_not_apply_identity(self):
+        c=self.install();e=c['mt5_pool']['endpoints'][0]
+        for extra in ({},{'endpoint_ready':False},{'endpoint_ready':True,'blockers':['权限未开启']}):
+            probe=dict(connected=True,identity_matches=True,identity=dict(account='123456',server='Demo-A'),symbol=dict(name='XAUUSD'),**extra)
+            with patch.object(server,'run_probe',return_value=probe):
+                code,result=self.request('/api/mt5/pool/check',dict(expected_pair_id=c['pair']['id'],endpoint_id=e['id']))
+            self.assertEqual(code,200,result);self.assertFalse(result['applied']);self.assertEqual(server.load_config(),c)
     def test_view_switch_requires_connected_pool_and_never_changes_saved_strategy(self):
         c=self.install();code,_=self.request('/api/mt5/pool/chart',dict(edge='t1~t2'))
         self.assertEqual(code,400);self.assertEqual(server.load_config(),c)

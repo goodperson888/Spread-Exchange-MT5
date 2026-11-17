@@ -144,7 +144,7 @@
       await save();const id=check.dataset.poolCheck;
       const result=await api('/api/mt5/pool/check',{expected_pair_id:current.pair.id,endpoint_id:id});
       const r=result.result,output=el('pool-endpoint-editors').querySelector(`[data-pool-check-result="${id}"]`);
-      const s=r.symbol;output.textContent=[r.message,r.identity?`账户 ${r.identity.account} · ${r.identity.server} · ${r.identity.currency}`:'',s?`${s.name}：每手 ${s.contract_size_oz}；最小/步长 ${s.volume_min}/${s.volume_step}`:'',...(r.blockers||[])].filter(Boolean).join('\n');
+      const s=r.symbol;output.textContent=[r.message,r.identity?`账户 ${r.identity.account} · ${r.identity.server} · ${r.identity.currency}`:'',s?`${s.name}：每手 ${s.contract_size_oz}；最小/步长 ${s.volume_min}/${s.volume_step}`:'',...(r.blockers||[]),...(r.warnings||[])].filter(Boolean).join('\n');
       output.classList.toggle('error',!result.applied);
       if(result.applied){current=result.config;draft=clone(current.mt5_pool);
         const card=output.closest('[data-pool-endpoint]'),e=draft.endpoints.find(x=>x.id===id);

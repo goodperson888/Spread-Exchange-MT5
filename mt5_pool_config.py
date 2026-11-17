@@ -72,6 +72,16 @@ def endpoint_settings(config, e):
             'adapter':'native','pair_symbols':[e['symbol']]}
 
 
+def endpoint_probe_settings(config, e):
+    # Workers use pair_symbols to restrict their clock/identity scope. The
+    # connection probe instead validates exactly one endpoint and its own symbol.
+    settings=endpoint_settings(config,e)
+    settings.pop('pair_symbols')
+    settings.update(pool_endpoint_check=True,pair_lots=config['strategy']['mt5_lots'],
+                    pair_execution_mode=config['execution']['mode'])
+    return settings
+
+
 def candidates(config):
     pool=clean_pool(config['mt5_pool'])
     result={};base={k:v for k,v in config.items() if k!='mt5_pool'}

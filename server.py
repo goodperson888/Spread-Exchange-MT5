@@ -1730,7 +1730,7 @@ class Handler(BaseHTTPRequestHandler):
                     write_config(replacement)
                 self.send_json({'ok':True,'config':replacement});return
             if path=='/api/mt5/pool/check':
-                from mt5_pool_config import endpoint_settings
+                from mt5_pool_config import endpoint_probe_settings
                 if not PROBE_LOCK.acquire(blocking=False):raise ValueError('已有连接检查正在进行，请稍候')
                 try:
                     with LOCK:
@@ -1738,10 +1738,11 @@ class Handler(BaseHTTPRequestHandler):
                         if not pool_pair(config) or body.get('expected_pair_id')!=config['pair']['id']:raise ValueError('当前组合已变化')
                         endpoint=next((e for e in config['mt5_pool']['endpoints'] if e['id']==body.get('endpoint_id')),None)
                         if not endpoint:raise ValueError('终端不存在')
-                        settings=endpoint_settings(config,endpoint)
+                        settings=endpoint_probe_settings(config,endpoint)
                     result=run_probe(settings)
                     updated=False
-                    if result.get('connected') and result.get('identity_matches') and result.get('symbol'):
+                    if (result.get('connected') and result.get('identity_matches') and
+                            result.get('endpoint_ready') and not result.get('blockers') and result.get('symbol')):
                         with TRADING.lock,LOCK:
                             latest=load_config()
                             if latest!=config:raise ValueError('检查期间配置有修改，请重新检查')

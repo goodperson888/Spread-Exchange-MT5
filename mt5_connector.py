@@ -134,26 +134,29 @@ def verify_cfd_profit(api, info, account, tick, spec, *, linear=False):
     return result
 
 
-def inspect_pair_terminal(settings, api, terminal, account, result):
-    """Inspect both symbols in this bounded, read-only probe, including failures."""
-    names = settings['pair_symbols']
-    result.update(pair_check=True, pair_ready=False, pair_checks={}, pair_specs={}, candidates=[],
-                  code='PAIR_BLOCKED', message='双品种检查未通过；此次检查不下单。')
-    if not isinstance(names, list) or len(names) != 2 or not all(isinstance(n, str) and n.strip() for n in names):
-        result['blockers'].append('请先在组合管理中填写品种 A 和品种 B 的完整名称')
+def inspect_linear_terminal(settings, api, terminal, account, result, *, endpoint=False):
+    """Read-only validation for one pool endpoint or both same-terminal symbols."""
+    names = [settings.get('symbol')] if endpoint else settings['pair_symbols']
+    prefix = 'endpoint' if endpoint else 'pair'
+    result.update({prefix+'_check':True, prefix+'_ready':False, prefix+'_checks':{}, prefix+'_specs':{}})
+    result.update(candidates=[], code='ENDPOINT_BLOCKED' if endpoint else 'PAIR_BLOCKED',
+                  message='此终端检查未通过；此次检查不下单。' if endpoint else '双品种检查未通过；此次检查不下单。')
+    if not isinstance(names, list) or len(names) != (1 if endpoint else 2) or not all(isinstance(n, str) and n.strip() for n in names):
+        result['blockers'].append('请在此终端卡片填写完整黄金品种名' if endpoint else '请先在组合管理中填写品种 A 和品种 B 的完整名称')
         return result
-    if names[0] == names[1]: result['blockers'].append('两条腿必须选择不同品种')
+    if not endpoint and names[0] == names[1]: result['blockers'].append('两条腿必须选择不同品种')
     if result['identity']['currency'] != 'USD' or result['identity']['margin_mode'] != 2:
-        result['blockers'].append('同一 MT5 双品种目前仅支持 USD 对冲账户')
+        result['blockers'].append('终端池目前仅支持 USD 对冲账户' if endpoint else '同一 MT5 双品种目前仅支持 USD 对冲账户')
     permitted = (getattr(terminal, 'trade_allowed', False) and not getattr(terminal, 'tradeapi_disabled', True)
                  and getattr(account, 'trade_allowed', False) and getattr(account, 'trade_expert', False))
     result['trade_allowed'] = bool(permitted)
     if not permitted:
         target = result['blockers'] if settings.get('pair_execution_mode') == 'live' else result['warnings']
         target.append('MT5 程序交易权限未开启，请检查 Algo Trading、外部 Python API 和账户交易权限')
-    for leg, side, name in zip(('binance', 'mt5'), ('品种 A', '品种 B'), names):
+    entries = [('mt5', '本终端品种', names[0])] if endpoint else zip(('binance', 'mt5'), ('品种 A', '品种 B'), names)
+    for leg, side, name in entries:
         row = dict(name=name, side=side, passed=False, errors=[])
-        result['pair_checks'][leg] = row
+        result[prefix+'_checks'][leg] = row
         try:
             info = api.symbol_info(name)
             if info is None: raise ValueError('终端未找到完整品种名，请核对经纪商后缀')
@@ -169,6 +172,8 @@ def inspect_pair_terminal(settings, api, terminal, account, result):
             row['spec'] = spec
             if spec['volume_min'] > spec['volume_max']: raise ValueError('最小手数大于最大手数')
             if getattr(info, 'custom', False): raise ValueError('自定义品种不能用于实盘双品种组合')
+            if endpoint and str(getattr(info, 'currency_base', '')).upper() != 'XAU' and not any(token in name.upper() for token in ('XAU', 'GOLD')):
+                raise ValueError('终端池仅支持已核验的黄金品种')
             if info.currency_profit != 'USD': raise ValueError('盈亏币种不是 USD')
             if info.trade_mode != getattr(api, 'SYMBOL_TRADE_MODE_FULL', 4): raise ValueError('品种未开放完整双向交易')
             if spec['expiration_time'] and spec['expiration_time'] <= time.time(): raise ValueError('该合约已到期')
@@ -180,7 +185,7 @@ def inspect_pair_terminal(settings, api, terminal, account, result):
             row['verification'] = verification
             if not verification['passed']: raise ValueError(verification['reason'])
             spec['linear_usd_verified'] = True
-            result['pair_specs'][leg] = spec
+            result[prefix+'_specs'][leg] = spec
             if quote['age_ms'] > 5000 or quote['age_ms'] < -1000:
                 result['warnings'].append(f'{side} {name} 原始时间与本机有偏差；这不是网络延迟，需连接实时行情核对持续更新')
             lots = Decimal(str(settings['pair_lots']))
@@ -190,7 +195,13 @@ def inspect_pair_terminal(settings, api, terminal, account, result):
         except Exception as exc:
             row['errors'].append(str(exc) or '品种检查失败')
             result['blockers'].append(f'{side} {name}：{row["errors"][-1]}')
-    specs = result['pair_specs']
+    specs = result[prefix+'_specs']
+    if endpoint:
+        if not result['blockers'] and row['passed']:
+            result.update(endpoint_ready=True, symbol=specs['mt5'], quote=row['quote'],
+                          symbol_verification=row['verification'], endpoint_lots=float(settings['pair_lots']),
+                          code='ENDPOINT_CHECKED', message='此终端账户、黄金品种、手数及 USD 盈亏计算校验通过；检查不会下单。')
+        return result
     if len(specs) == 2:
         steps = [Decimal(str(s['volume_step'])) for s in specs.values()]
         scale = 10 ** max(max(0, -s.as_tuple().exponent) for s in steps)
@@ -246,8 +257,10 @@ def inspect_terminal(settings, api=None, platform=None):
             result['blockers'].append(result['message'])
             return result
         result['identity_matches'] = True
+        if settings.get('pool_endpoint_check') is True:
+            return inspect_linear_terminal(settings, api, terminal, account, result, endpoint=True)
         if 'pair_symbols' in settings:
-            return inspect_pair_terminal(settings, api, terminal, account, result)
+            return inspect_linear_terminal(settings, api, terminal, account, result)
         symbols = api.symbols_get()
         if symbols is None:
             return failure('SYMBOLS_UNAVAILABLE', '无法读取 MT5 品种列表，请检查终端连接后重试。')
