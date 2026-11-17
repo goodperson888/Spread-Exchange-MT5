@@ -929,7 +929,7 @@
     const closed=groups.filter(g=>g.closed_ms>=firstTime&&g.closed_ms<=lastTime).map(g=>({name:'#'+g.id,value:[g.closed_ms,Number.isFinite(g.exit)?canonical(g,g.exit):nearest(g.closed_ms,'exit')?.[1]]})).filter(x=>Number.isFinite(x.value[1]));
     const entries=samples.map(x=>x.entry).filter(Number.isFinite), exits=samples.map(x=>x.exit).filter(Number.isFinite);
     const average=values=>values.length?values.reduce((a,b)=>a+b,0)/values.length:null;
-    const live=latestLive||last?.quote;
+    const live=latestLive&&last?.quote&&latestLive.key===last.quote.key&&latestLive.time_ms>last.quote.time_ms?latestLive:last?.quote;
     const latest=native&&live&&live.key===last?.quote?.key?live:rawSamples.at(-1),all=entries.concat(exits);
     const effective=last?.connected?last.strategy_runtime?.entry_spread_usd:null;
     const threshold=Number.isFinite(effective)?effective:null;

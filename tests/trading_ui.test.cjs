@@ -1083,6 +1083,11 @@ test('native single-line view never treats the other quote touching the upper bo
  assert.match(hint,/反向入场[^<]*3.020[^<]*≤ 2.100：未达到/);
  assert.match(hint,/两侧报价差：0.590/);
  assert.ok(f.calls.every(c=>c.method==='GET'));
+ // A delayed stream tick must not override a newer status quote in the cards.
+ f.listeners.visibilitychange();await flushUI();
+ f.streams.at(-1).emit({samples:[{...snapshot.quote,time_ms:snapshot.quote.time_ms+1,entry:2.44}]});await flushUI();
+ snapshot.quote={...snapshot.quote,time_ms:snapshot.quote.time_ms+2,entry:2.5};await f.refresh();
+ assert.match(f.el('spread-stats').innerHTML,/正向入场[^]*?<strong>2.500<\/strong>/);
 });
 
 test('native chart perspective switches quote sides and bounds locally without trading or history calls',async()=>{
