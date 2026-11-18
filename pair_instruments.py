@@ -20,6 +20,22 @@ def reverse_pair(group):
     return native_pair(group) and group.get('direction')=='reverse'
 
 
+def native_thresholds(config, quote):
+    """Return effective forward/reverse entry thresholds for a native pair."""
+    s=config.get('strategy', {})
+    upper=s.get('entry_spread_usd', 0)
+    lower=s.get('entry_lower_usd', -5)
+    if not native_pair(config) or not s.get('dynamic_reference_enabled') or not quote:
+        return upper, lower
+    if not quote.get('reference_ready'):
+        return upper, lower
+    deviation=s.get('entry_deviation_usd', 0)
+    ref_entry=quote.get('reference_entry');ref_exit=quote.get('reference_exit')
+    if isinstance(ref_entry,(int,float)) and math.isfinite(ref_entry): upper=ref_entry+deviation
+    if isinstance(ref_exit,(int,float)) and math.isfinite(ref_exit): lower=ref_exit-deviation
+    return upper, lower
+
+
 def position_side(group,leg):
     return (1 if leg=='binance' else 0) ^ int(reverse_pair(group))
 
@@ -42,13 +58,14 @@ def entry_direction(config,quote,active=()):
     """Choose only an allowed, reached direction; open groups lock the pair."""
     if not native_pair(config): return 'forward'
     s=config['strategy'];mode=s.get('direction_mode','forward')
+    upper, lower=native_thresholds(config,quote)
     directions={'forward','reverse'} if mode=='auto' else {mode}
     held={g.get('direction','forward') for g in active}
     if held:
         if len(held)!=1: return None
         directions &= held
-    if 'forward' in directions and quote['entry']>=s['entry_spread_usd']: return 'forward'
-    if 'reverse' in directions and quote['exit']<=s.get('entry_lower_usd',-5): return 'reverse'
+    if 'forward' in directions and quote['entry']>=upper: return 'forward'
+    if 'reverse' in directions and quote['exit']<=lower: return 'reverse'
     return None
 
 

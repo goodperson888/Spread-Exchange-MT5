@@ -66,7 +66,9 @@ def activate(config, profile):
     if profile.get('mode')=='pool':
         c['pair']['mode']='pool';c['mt5_pool']=copy.deepcopy(profile['mt5_pool'])
     c['symbol']=profile['short_symbol'];c['mt5']['symbol']=profile['long_symbol']
-    for key in ('strategy','costs'): c[key]=copy.deepcopy(profile[key])
+    # Older saved profiles may predate newly added strategy controls.
+    c['strategy']=copy.deepcopy(config.get('strategy',{}));c['strategy'].update(copy.deepcopy(profile.get('strategy',{})))
+    c['costs']=copy.deepcopy(profile.get('costs',config.get('costs',{})))
     c['risk_alerts']=copy.deepcopy(profile.get('risk_alerts',{}))
     c['execution'].update(copy.deepcopy(profile['execution']))
     if profile['type']=='mt5_mt5':

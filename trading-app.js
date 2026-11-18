@@ -340,8 +340,10 @@
         const held=(last?.state?.groups||[]).find(g=>g.status!=='closed');
         const locked=held&&(held.direction||'forward');
         const options=[];
-        if(mode!=='reverse'&&(!locked||locked==='forward')&&Number.isFinite(threshold))options.push({name:'正向',distance:Math.max(0,threshold-q.entry)});
-        if(mode!=='forward'&&(!locked||locked==='reverse')&&Number.isFinite(settings.entry_lower_usd))options.push({name:'反向',distance:Math.max(0,q.exit-settings.entry_lower_usd)});
+        const upper=Number.isFinite(Number(q.entry_threshold))?Number(q.entry_threshold):threshold;
+        const lower=Number.isFinite(Number(q.entry_lower_threshold))?Number(q.entry_lower_threshold):settings.entry_lower_usd;
+        if(mode!=='reverse'&&(!locked||locked==='forward')&&Number.isFinite(upper))options.push({name:'正向',distance:Math.max(0,upper-q.entry)});
+        if(mode!=='forward'&&(!locked||locked==='reverse')&&Number.isFinite(lower))options.push({name:'反向',distance:Math.max(0,q.exit-lower)});
         options.sort((a,b)=>a.distance-b.distance);
         const nearest=options[0];
         text('live-distance',nearest?n(nearest.distance)+' USD · '+nearest.name:'—');
@@ -500,13 +502,18 @@
       const settings=result.strategy_runtime||{},mode=settings.direction_mode||'forward';
       const held=(state.groups||[]).filter(g=>g.status!=='closed');
       const locked=held.length?(held[0].direction||'forward'):null;
-      const forward=q&&q.entry>=settings.entry_spread_usd,backward=q&&q.exit<=settings.entry_lower_usd;
+      const forwardThreshold=Number.isFinite(Number(q?.entry_threshold))?Number(q.entry_threshold):settings.entry_spread_usd;
+      const reverseThreshold=Number.isFinite(Number(q?.entry_lower_threshold))?Number(q.entry_lower_threshold):settings.entry_lower_usd;
+      const forward=q&&q.entry>=forwardThreshold,backward=q&&q.exit<=reverseThreshold;
       const summary=locked?`已有持仓锁定${locked==='reverse'?'买 A／卖 B':'卖 A／买 B'}，平仓确认前不反手。`:'当前空仓，可按生效模式选择方向。';
-      nativeStatus.textContent=`生效模式：${{auto:'自动双向',forward:'固定卖 A／买 B',reverse:'固定买 A／卖 B'}[mode]}。正向 ${n(q?.entry)} ≥ ${n(settings.entry_spread_usd)}：${forward?'达到上限':'等待'}；反向 ${n(q?.exit)} ≤ ${n(settings.entry_lower_usd)}：${backward?'达到下限':'等待'}。${summary}${state.enabled?' 满足阈值后仍须通过数量、冷却和风控检查。':' 新开仓未启用。'}`;
-      el('entry-lower-effective').textContent=`当前生效下限：${n(settings.entry_lower_usd)} · 点击应用开仓阈值更新上下限。`;
+      const reference=q?.reference_ready&&settings.dynamic_reference_enabled?`动态参考 ${n(q.reference_entry)} / ${n(q.reference_exit)}，偏离 ${n(settings.entry_deviation_usd)}，样本 ${q.reference_samples}`:'使用固定阈值';
+      nativeStatus.textContent=`生效模式：${{auto:'自动双向',forward:'固定卖 A／买 B',reverse:'固定买 A／卖 B'}[mode]}。正向 ${n(q?.entry)} ≥ ${n(forwardThreshold)}：${forward?'达到上限':'等待'}；反向 ${n(q?.exit)} ≤ ${n(reverseThreshold)}：${backward?'达到下限':'等待'}。${reference}。${summary}${state.enabled?' 满足阈值后仍须通过数量、冷却和风控检查。':' 新开仓未启用。'}`;
+      el('entry-lower-effective').textContent=`当前生效下限：${n(reverseThreshold)} · 点击应用开仓阈值更新固定上下限。`;
+      el('native-reference-effective').textContent=settings.dynamic_reference_enabled?(q?.reference_ready?`动态参考已生效：正向 ${n(forwardThreshold)}，反向 ${n(reverseThreshold)}。`:`动态参考预热中：${q?.reference_samples||0}/20 个报价。`):'动态参考关闭，使用固定正向上限和反向下限。';
     } else if(isNative(result)) {
       nativeStatus.textContent='尚未连接。保存并重新连接后显示生效方向和上下限；已有组保留原方向。';
       el('entry-lower-effective').textContent='当前生效下限：未连接';
+      el('native-reference-effective').textContent='尚未连接，保存并重新连接后开始积累参考报价。';
     }
     const pf=result.entry_preflight;
     if(pf) {

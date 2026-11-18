@@ -5,7 +5,7 @@ import uuid
 from trading_config import pair_key
 from execution_evidence import reason_code, REASON_LABELS, result_evidence, validation_issues
 from execution_dispatch import dispatch_order, dispatch_pair, not_dispatched
-from pair_instruments import (native_pair, pair_info, native_valuation, reverse_pair,
+from pair_instruments import (native_pair, pair_info, native_valuation, native_thresholds, reverse_pair,
                               position_side, order_sells, direction_quote, entry_direction)
 from commission_reference import fee_rate, attach as attach_commission_reference
 
@@ -1009,7 +1009,8 @@ class Engine:
         q=market_quote
         s=c['strategy'];all_active=self.active();active=[g for g in all_active if not g.get('imported')];grid_index=0;grid_allowed=True
         direction=entry_direction(c,q,scoped() if getattr(self,'multi_pair',False) else all_active)
-        open_threshold=-s.get('entry_lower_usd',-5) if direction=='reverse' else s['entry_spread_usd']
+        effective_upper,effective_lower=native_thresholds(c,q)
+        open_threshold=-effective_lower if direction=='reverse' else effective_upper
         entry_q=direction_quote(q,{'pair':c.get('pair',{}),'direction':direction})
         if s.get('grid_enabled') and active:
             # Grid additions are separate paired groups. They only continue

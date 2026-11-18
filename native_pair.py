@@ -10,7 +10,7 @@ import time
 from trading_brokers import Terminal, PaperBroker
 from trading_config import pair_key
 from trading_engine import valid_group_quote, stamp
-from pair_instruments import short_symbol, equal_lot_plan, pair_info, position_side
+from pair_instruments import short_symbol, equal_lot_plan, native_thresholds, pair_info, position_side
 from market_push import TickFreshness
 from runtime_maintenance import evidence
 import external_closes
@@ -65,6 +65,7 @@ class NativePairPump:
         self.config=copy.deepcopy(config if config is not None else runtime.config)
         self.changed=threading.Event();self.stopped=threading.Event();self.lock=threading.Lock()
         self.latest=None;self.version=0;self.error='';self.last_stamp=0
+        self.reference_entry=None;self.reference_exit=None;self.reference_samples=0;self.reference_time_ms=None
         self.mt5_transport='MT5 双品种报价轮询';self.binance_transport='MT5 品种 A'
         self.thread=threading.Thread(target=self._loop,name='mt5-pair-quotes',daemon=True)
 
@@ -90,7 +91,27 @@ class NativePairPump:
         q=dict(key=pair_key(c),time_ms=stamp(),usdt_usd=1.,**quotes,
                pair=pair_info(c),entry=quotes['binance']['bid']-quotes['mt5']['ask'],
                exit=quotes['binance']['ask']-quotes['mt5']['bid'])
+        self._add_reference(q)
         return self.publish(q) if publish else q
+
+    def _add_reference(self,q):
+        """Attach a time-based EMA without blocking the quote path."""
+        now=int(q['time_ms']);previous=self.reference_time_ms
+        dt=max(1,now-previous) if previous is not None else 1
+        window=max(1,int(self.config.get('strategy',{}).get('reference_window_minutes',240)))*60000
+        alpha=1-math.exp(-dt/window)
+        if self.reference_entry is None:
+            self.reference_entry=float(q['entry']);self.reference_exit=float(q['exit'])
+        else:
+            self.reference_entry+=alpha*(float(q['entry'])-self.reference_entry)
+            self.reference_exit+=alpha*(float(q['exit'])-self.reference_exit)
+        self.reference_time_ms=now;self.reference_samples+=1
+        ready=self.reference_samples>=20
+        q.update(reference_entry=self.reference_entry,reference_exit=self.reference_exit,
+                 reference_samples=self.reference_samples,reference_ready=ready,
+                 dynamic_reference_enabled=bool(self.config.get('strategy',{}).get('dynamic_reference_enabled')))
+        upper,lower=native_thresholds(self.config,q)
+        q.update(entry_threshold=upper,entry_lower_threshold=lower)
 
     def publish(self,q):
         if self.stopped.is_set(): return q

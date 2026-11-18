@@ -8,7 +8,7 @@ from trading_brokers import PaperBroker
 from trading_config import validate, pair_key
 from trading_engine import Engine
 from trading_store import Store
-from pair_instruments import equal_lot_plan, direction_quote, entry_direction
+from pair_instruments import equal_lot_plan, direction_quote, entry_direction, native_thresholds
 from execution_diagnostics import build_report
 from exit_observations import ExitObservations
 from test_trading_engine import config, quote
@@ -60,6 +60,15 @@ class DirectionEngineTests(unittest.TestCase):
         self.e.tick(self.c,self.p,self.market(110,100));g=self.e.active()[0]
         self.assertEqual(g['direction'],'forward')
         self.assertEqual([o['native_position_side'] for o in self.e.state['orders']],[1,0])
+
+    def test_dynamic_reference_uses_ready_ema_thresholds_and_falls_back_before_warmup(self):
+        self.c['strategy'].update(dynamic_reference_enabled=True,entry_spread_usd=5,entry_lower_usd=-5,entry_deviation_usd=1)
+        q=self.market(100,100)
+        self.assertEqual(native_thresholds(self.c,q),(5,-5))
+        q.update(reference_ready=True,reference_entry=3,reference_exit=-2)
+        self.assertEqual(native_thresholds(self.c,q),(4,-3))
+        self.assertEqual(entry_direction(self.c,{**q,'entry':4.01,'exit':0},()),'forward')
+        self.assertEqual(entry_direction(self.c,{**q,'entry':0,'exit':-3.01},()),'reverse')
 
     def test_active_reverse_blocks_opposite_signal_even_if_exit_never_passes(self):
         g=self.opened();g['parameters']['take_contraction_usd']=1000

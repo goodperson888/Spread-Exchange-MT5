@@ -13,7 +13,7 @@ const sectionFields = {
   mt5: new Set([...Object.values(bindings.mt5), 'mt5-mcp-token']),
   binance: new Set(['symbol','recv-window','binance-proxy','trading-api-key','trading-api-secret']),
   execution: new Set(['exec-mode','entry-leg','poll-ms','magic','close-retries']),
-  strategy: new Set([...Object.values(bindings.strategy),'grid-enabled','cooldown','max-total','exit-mode','target-mode',
+  strategy: new Set([...Object.values(bindings.strategy),'grid-enabled','cooldown','max-total','exit-mode','target-mode','native-dynamic-reference','native-reference-window','native-entry-deviation',
     'absolute-exit','direction-mode','entry-lower','require-net','min-net','group-loss-on','group-loss','total-loss-on','total-loss','max-hold']),
   risk_alerts: new Set(Object.values(bindings.risk_alerts)),
 };
@@ -74,7 +74,7 @@ function formConfig() {
     mode:'paper', symbol:window.GoldPairPairs?.native({pair:window.GoldPairPairs.info()})?window.GoldPairPairs.info().short_symbol:value('symbol').toUpperCase(), mt5,
     risk_alerts:Object.fromEntries(Object.entries(bindings.risk_alerts).map(([key,id])=>[key,Number(value(id))])),
     binance:{recv_window_ms:Number(value('recv-window')),proxy_url:value('binance-proxy'),api_key:value('trading-api-key'),api_secret:value('trading-api-secret')},
-    strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),direction_mode:value('direction-mode')||'forward',entry_lower_usd:Number(value('entry-lower')||-5),grid_enabled:$('grid-enabled').checked,
+    strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),direction_mode:value('direction-mode')||'forward',entry_lower_usd:Number(value('entry-lower')||-5),dynamic_reference_enabled:$('native-dynamic-reference').checked,reference_window_minutes:Number(value('native-reference-window')||240),entry_deviation_usd:Number(value('native-entry-deviation')||0),grid_enabled:$('grid-enabled').checked,
       cooldown_seconds:Number(value('cooldown')),max_total_lots:Number(value('max-total')),exit_mode:value('exit-mode'),target_mode:value('target-mode'),exit_spread_usd:Number(value('absolute-exit')),
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
       total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold'))},
@@ -149,7 +149,7 @@ function populate(c) {
   $('magic').value = c.execution?.magic ?? 9121701;
   $('close-retries').value = c.execution?.close_retry_limit ?? 3;
   const s=c.strategy || {}, costs=c.costs || {};
-  $('direction-mode').value=s.direction_mode||'forward';$('entry-lower').value=s.entry_lower_usd??-5;
+  $('direction-mode').value=s.direction_mode||'forward';$('entry-lower').value=s.entry_lower_usd??-5;$('native-dynamic-reference').checked=Boolean(s.dynamic_reference_enabled);$('native-reference-window').value=s.reference_window_minutes??240;$('native-entry-deviation').value=s.entry_deviation_usd??1;
   $('pair-parameter-scope').textContent=`参数属于「${configPairName}」；策略、执行、费用及风险提醒按组合保存，账户连接共用。已有组保留原规则。`;
   const extra={cooldown_seconds:'cooldown',max_total_lots:'max-total',exit_mode:'exit-mode',target_mode:'target-mode',exit_spread_usd:'absolute-exit',min_net_profit_usd:'min-net',group_max_loss_usd:'group-loss',total_max_loss_usd:'total-loss',max_hold_minutes:'max-hold'};
   for(const [key,id] of Object.entries(extra)) $(id).value=s[key] ?? $(id).value;
@@ -173,7 +173,7 @@ function syncConditionalFields(source='') {
   let live=value('exec-mode')==='live';
   const same=window.GoldPairPairs?.info()?.type==='mt5_mt5';
   const pool=window.GoldPairPool?.enabled();
-  $('native-direction-settings').hidden=!same||pool;$('entry-lower-field').hidden=!same||pool;
+  $('native-direction-settings').hidden=!same||pool;$('entry-lower-field').hidden=!same||pool;$('native-reference-settings').hidden=!same||pool;
   $('entry').min=same?'-100000':'0';
   const mcpAdapter=value('mt5-adapter')==='mcp';
   const incompatible=live && mcpAdapter;

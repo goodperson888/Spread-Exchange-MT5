@@ -42,6 +42,10 @@ def validate(c):
         if c['strategy']['exit_mode']!='group': raise ValueError('多终端择优请使用逐组退出，各组绑定原终端')
         return
     s, e, costs = c['strategy'], c['execution'], c['costs']
+    # Keep older in-memory configs and saved combination profiles compatible.
+    s.setdefault('dynamic_reference_enabled', False)
+    s.setdefault('reference_window_minutes', 240)
+    s.setdefault('entry_deviation_usd', 1)
     validate_alerts(c.get('risk_alerts', {}))
     validate_proxy_url(c.get('binance', {}).get('proxy_url', ''))
     if not native_pair(c) and not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
@@ -71,7 +75,8 @@ def validate(c):
         raise ValueError('实盘必须使用真实行情及 Windows MT5 终端')
     if s['exit_mode'] not in ('group', 'basket') or s['target_mode'] not in ('contraction', 'absolute'):
         raise ValueError('退出方式无效')
-    for k in ('require_net_profit', 'group_loss_enabled', 'total_loss_enabled', 'grid_enabled'):
+    for k in ('require_net_profit', 'group_loss_enabled', 'total_loss_enabled', 'grid_enabled',
+              'dynamic_reference_enabled'):
         if type(s[k]) is not bool:
             raise ValueError(k+' 必须是开关')
     bounds = {
@@ -81,6 +86,7 @@ def validate(c):
         'take_contraction_usd': (0.000001, 100000), 'exit_spread_usd': (-100000, 100000),
         'min_net_profit_usd': (0, 1e9), 'group_max_loss_usd': (0.01, 1e9), 'total_max_loss_usd': (0.01, 1e9),
         'max_hold_minutes': (0, 525600), 'max_quote_age_ms': (100, 10000),
+        'reference_window_minutes': (1, 43200), 'entry_deviation_usd': (0, 100000),
         'max_clock_skew_ms': (0, 5000), 'max_unhedged_ms': (100, 30000), 'max_slippage_usd': (0.01, 1000),
         'unwind_slippage_usd': (0.01, 1000),
     }

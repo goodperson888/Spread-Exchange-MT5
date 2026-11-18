@@ -739,7 +739,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 self.engine.observe_exit_wait(c,q,'QUOTE_UNAVAILABLE')
                 raise ValueError(error)
             self.quote = q
-            if self.entry_preflight and q.get('entry', -float('inf')) >= c['strategy']['entry_spread_usd'] - self.entry_preflight.NEAR_USD:
+            forward_threshold=q.get('entry_threshold',c['strategy']['entry_spread_usd'])
+            if self.entry_preflight and q.get('entry', -float('inf')) >= forward_threshold - self.entry_preflight.NEAR_USD:
                 self.entry_preflight.update(dict(key=q.get('key'), symbol=c['symbol'],
                                                   position_mode=self.binance.position_mode,
                                                   price=float(q['binance']['bid']), qty=float(self.plan['qty'])))
@@ -1270,6 +1271,9 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 'strategy_runtime': {'entry_spread_usd': display_config['strategy']['entry_spread_usd'],
                                      'entry_lower_usd':display_config['strategy'].get('entry_lower_usd',-5),
                                      'direction_mode':display_config['strategy'].get('direction_mode','forward'),
+                                     'dynamic_reference_enabled':display_config['strategy'].get('dynamic_reference_enabled',False),
+                                     'reference_window_minutes':display_config['strategy'].get('reference_window_minutes',240),
+                                     'entry_deviation_usd':display_config['strategy'].get('entry_deviation_usd',0),
                                      'max_quote_age_ms': self.config['strategy']['max_quote_age_ms'],
                                      'mt5_symbol': self.config['mt5']['symbol'], 'symbol': self.config['symbol']} if self.config else None,
                 'config_pending': bool(self.connected and self.config_changed(saved_config)),
