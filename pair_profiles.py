@@ -68,6 +68,10 @@ def activate(config, profile):
     c['symbol']=profile['short_symbol'];c['mt5']['symbol']=profile['long_symbol']
     # Older saved profiles may predate newly added strategy controls.
     c['strategy']=copy.deepcopy(config.get('strategy',{}));c['strategy'].update(copy.deepcopy(profile.get('strategy',{})))
+    saved_strategy=profile.get('strategy',{})
+    c['strategy']['entry_spread_guard_enabled']=saved_strategy.get('entry_spread_guard_enabled',False)
+    c['strategy']['entry_spread_slippage_usd']=saved_strategy.get('entry_spread_slippage_usd',
+        saved_strategy.get('max_slippage_usd',c['strategy'].get('max_slippage_usd',.5)))
     c['costs']=copy.deepcopy(profile.get('costs',config.get('costs',{})))
     c['risk_alerts']=copy.deepcopy(profile.get('risk_alerts',{}))
     c['execution'].update(copy.deepcopy(profile['execution']))

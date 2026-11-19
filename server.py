@@ -927,6 +927,10 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 config=next((ctx.config for ctx in self.pool.contexts.values() if pair_key(ctx.config) in keys),None)
                 if config is None:raise ValueError('找不到原终端对，不能修改规则')
             ids=exit_rules.apply(self.engine,config,body)
+            # Resume evaluation using the new locked rules, without issuing any
+            # platform reads or orders inside this settings request.
+            wake=getattr(self,'market_wake',None)
+            if wake is not None:wake.set()
             return {**self.snapshot(),'message':f'已更新 {len(ids)} 组的退出规则及所填返佣比例；预计返佣计入净收益，下一次有效行情检查起生效，满足条件可能立即平仓。'}
 
     def apply_entry_threshold(self, value, entry_lower_usd=None):
@@ -1370,6 +1374,10 @@ def load_config():
             strategy['unwind_slippage_usd'] = normal_slippage
     except (TypeError, ValueError):
         pass
+    if 'entry_spread_guard_enabled' not in saved.get('strategy',{}):
+        strategy['entry_spread_guard_enabled']=False
+    if 'entry_spread_slippage_usd' not in saved.get('strategy',{}):
+        strategy['entry_spread_slippage_usd']=strategy.get('max_slippage_usd',0.5)
     legacy_paper = config.get('mt5', {}).get('adapter') == 'paper' and (
         config['mt5'].get('account') == 'PAPER-MT5' or config['mt5'].get('server') == 'local-paper')
     if legacy_paper:
@@ -1462,7 +1470,7 @@ def validate_config(config):
         errors.append("单边敞口时间范围应为 0 到 60000 毫秒")
     if not all(math.isfinite(x) for x in (lots, contract, step, vmin)):
         errors.append('数量和规格必须是有限数值')
-    for key in ('entry_spread_usd', 'take_contraction_usd', 'max_slippage_usd', 'unwind_slippage_usd'):
+    for key in ('entry_spread_usd', 'take_contraction_usd', 'max_slippage_usd', 'unwind_slippage_usd', 'entry_spread_slippage_usd'):
         value = float(strategy.get(key, 0))
         if not math.isfinite(value) or (value < 0 and not (key=='entry_spread_usd' and native_pair(config))):
             errors.append('价差、目标和滑点应为有限的非负数')

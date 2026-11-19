@@ -8,6 +8,7 @@ REASON_LABELS = {
     'USER_PAUSE': '手动暂停新开仓',
     'ORDER_UNCONFIRMED': '订单成交待确认，暂停新开仓',
     'ENTRY_WINDOW_EXPIRED': '开仓确认超过单边敞口时限，保护性撤回',
+    'ENTRY_SPREAD_SLIPPAGE': '组合成交价差恶化超限，暂停新开仓并保护性平仓',
     'FIRST_LEG_INCOMPLETE': '第一腿拒单或未完全成交，保护性撤回',
     'SECOND_LEG_INCOMPLETE': '第二腿拒单、部分成交或状态未知，保护性撤回',
     'QUOTE_UNAVAILABLE': '报价过期或不可用',
@@ -39,6 +40,7 @@ def reason_code(reason):
         ('已暂停新开仓；已有仓位继续管理', 'USER_PAUSE'),
         ('平台确认强平', 'LIQUIDATION'),
         ('程序重启', 'RESTART'),
+        ('组合成交价差滑移超限', 'ENTRY_SPREAD_SLIPPAGE'),
         ('开仓确认窗口已结束', 'ENTRY_WINDOW_EXPIRED'),
         ('超出敞口期限', 'ENTRY_WINDOW_EXPIRED'),
         ('第一腿成交后报价过期', 'ENTRY_WINDOW_EXPIRED'),
@@ -219,6 +221,12 @@ def result_evidence(result):
     for key in ('qty','price','request_ms','response_received_ms','ack_received_ms','retcode','ack_volume','ack_price','http_status','native_error_code'):
         value=result.get(key)
         if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value): data[key]=value
+    timings=result.get('timings')
+    if isinstance(timings,dict):
+        data['timings']={key:timings[key] for key in ('terminal_queue_ms','terminal_roundtrip_ms','worker_preflight_ms',
+            'order_check_ms','order_send_ms','fill_normalize_ms','worker_submit_ms')
+            if isinstance(timings.get(key),(int,float)) and not isinstance(timings[key],bool)
+            and math.isfinite(timings[key]) and timings[key]>=0}
     if result.get('status') in ('done','pending','unknown'): data['status']=result['status']
     if isinstance(result.get('raw_status'),str) and result['raw_status'] in PLATFORM_STATUSES: data['raw_status']=result['raw_status']
     code=result.get('error_code')

@@ -65,16 +65,19 @@ class NativePairPump:
         self.config=copy.deepcopy(config if config is not None else runtime.config)
         self.changed=threading.Event();self.stopped=threading.Event();self.lock=threading.Lock()
         self.latest=None;self.version=0;self.error='';self.last_stamp=0
+        self.pending_sample=None;self.sample_wake=threading.Event();self.sampling_error=''
         self.reference_entry=None;self.reference_exit=None;self.reference_samples=0;self.reference_time_ms=None
         self.mt5_transport='MT5 双品种报价轮询';self.binance_transport='MT5 品种 A'
         self.thread=threading.Thread(target=self._loop,name='mt5-pair-quotes',daemon=True)
+        self.sample_thread=threading.Thread(target=self._samples,name='mt5-pair-history',daemon=True)
 
-    def start(self): self.thread.start()
+    def start(self): self.sample_thread.start();self.thread.start()
     def close(self):
-        self.stopped.set();self.changed.set();self.terminal.close()
+        self.stopped.set();self.changed.set();self.sample_wake.set();self.terminal.close()
         if self.thread.is_alive() and threading.current_thread() is not self.thread:self.thread.join(timeout=.5)
+        if self.sample_thread.is_alive() and threading.current_thread() is not self.sample_thread:self.sample_thread.join(timeout=.5)
     def read(self):
-        with self.lock: return self.latest,self.version,self.error
+        with self.lock: return self.latest,self.version,self.error or self.sampling_error
 
     def refresh(self,publish=True,timeout_seconds=None):
         r=self.runtime;c=self.config
@@ -123,8 +126,21 @@ class NativePairPump:
             if not changed: return self.latest
             q['time_ms']=max(q['time_ms'],self.last_stamp+1);self.last_stamp=q['time_ms']
             self.latest=q;self.version+=1
-        r.store.sample(q);r.quote_events.publish(q);r.market_wake.set()
+            self.pending_sample=q
+        r.quote_events.publish(q);r.market_wake.set();self.sample_wake.set()
         return q
+
+    def _samples(self):
+        # Bound chart history to the latest sample per 100 ms. Live decisions
+        # use the latest quote without waiting for the history write.
+        while not self.stopped.is_set():
+            self.sample_wake.wait(.1);self.sample_wake.clear()
+            with self.lock:pending=self.pending_sample;self.pending_sample=None
+            if pending is not None:
+                try:self.runtime.store.sample(pending)
+                except Exception as exc:
+                    self.sampling_error='行情历史写入失败：'+str(exc);self.runtime.market_wake.set()
+            self.stopped.wait(.1)
 
     def _loop(self):
         while not self.stopped.is_set():

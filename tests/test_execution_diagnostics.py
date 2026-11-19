@@ -9,6 +9,14 @@ from trading_store import Store
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_stage_timings_export_is_bounded_and_rejects_arbitrary_fields(self):
+        state={'groups':[{'id':'private'}],'orders':[{'id':'private-order','group':'private','result':{
+            'timings':{'terminal_queue_ms':0,'order_send_ms':875,'private-account':'SECRET',
+                       'order_check_ms':float('nan'),'worker_submit_ms':-1,'fill_normalize_ms':True}}}]}
+        report=build_report(state,[])
+        self.assertEqual(report['orders'][0]['result']['timings'],{'terminal_queue_ms':0,'order_send_ms':875})
+        self.assertNotIn('SECRET',json.dumps(report))
+
     def test_allowlist_excludes_private_fields_and_keeps_execution_evidence(self):
         secret='PRIVATE-DO-NOT-EXPORT'
         state={'key':secret,'config':{'api_secret':secret},'groups':[

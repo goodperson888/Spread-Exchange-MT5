@@ -51,6 +51,8 @@ def validate(c):
     s.setdefault('rollover_utc_hour', 22)
     s.setdefault('rollover_utc_minute', 0)
     s.setdefault('rollover_guard_minutes', 30)
+    s.setdefault('entry_spread_guard_enabled', False)
+    s.setdefault('entry_spread_slippage_usd', s.get('max_slippage_usd', 0.5))
     validate_alerts(c.get('risk_alerts', {}))
     validate_proxy_url(c.get('binance', {}).get('proxy_url', ''))
     if not native_pair(c) and not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
@@ -84,6 +86,8 @@ def validate(c):
               'dynamic_reference_enabled', 'rollover_guard_enabled'):
         if type(s[k]) is not bool:
             raise ValueError(k+' 必须是开关')
+    if type(s['entry_spread_guard_enabled']) is not bool:
+        raise ValueError('entry_spread_guard_enabled 必须是开关')
     bounds = {
         'mt5_lots': (0.000001, 10000), 'max_groups': (1, 50), 'cooldown_seconds': (1, 86400),
         'max_total_lots': (0.000001, 10000), 'entry_spread_usd': (0, 100000),
@@ -96,6 +100,7 @@ def validate(c):
         'rollover_guard_minutes': (0, 720),
         'max_clock_skew_ms': (0, 5000), 'max_unhedged_ms': (100, 30000), 'max_slippage_usd': (0.01, 1000),
         'unwind_slippage_usd': (0.01, 1000),
+        'entry_spread_slippage_usd': (0.01, 1000),
     }
     if native_pair(c): bounds['entry_spread_usd']=(-100000,100000)
     for k, (lo, hi) in bounds.items():

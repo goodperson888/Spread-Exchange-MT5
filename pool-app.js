@@ -10,13 +10,16 @@
     direction_mode:'auto',target_mode:current.strategy.target_mode,take_contraction_usd:current.strategy.take_contraction_usd,
     exit_spread_usd:current.strategy.exit_spread_usd,require_net_profit:current.strategy.require_net_profit,
     min_net_profit_usd:current.strategy.min_net_profit_usd,group_loss_enabled:current.strategy.group_loss_enabled,
-    group_max_loss_usd:current.strategy.group_max_loss_usd,max_hold_minutes:current.strategy.max_hold_minutes});
+    group_max_loss_usd:current.strategy.group_max_loss_usd,max_hold_minutes:current.strategy.max_hold_minutes,
+    entry_spread_guard_enabled:current.strategy.entry_spread_guard_enabled===true,
+    entry_spread_slippage_usd:current.strategy.entry_spread_slippage_usd??current.strategy.max_slippage_usd??0.5});
   const note=(text,error=false)=>{el('pool-settings-result').textContent=text;el('pool-settings-result').classList.toggle('error',error);};
   function change(){dirty=true;note('有未保存的终端或独立规则修改；点击“保存终端与独立规则”。');}
   function field(label,key,value,{type='number',min='',max='',step='any'}={}) {
     return `<label>${label}<input data-pool-field="${key}" type="${type}" value="${escape(value)}" ${min!==''?`min="${min}"`:''} ${max!==''?`max="${max}"`:''} step="${step}" spellcheck="false"></label>`;
   }
   function select(label,key,value,options){return `<label>${label}<select data-pool-rule="${key}">${Object.entries(options).map(([v,t])=>`<option value="${v}"${String(value)===v?' selected':''}>${t}</option>`).join('')}</select></label>`;}
+  const ruleSummary=(a,b,r,unsaved=false)=>`${a.name} × ${b.name} · 上限 ${r.entry_spread_usd??'待填写'} / 下限 ${r.entry_lower_usd??'待填写'}${unsaved?' · 未保存':''}`;
   function renderEditors() {
     if(!draft)return;
     const expanded=new Set([...el('pool-rule-editors').querySelectorAll('details[open]')].map(x=>x.dataset.poolEdge));
@@ -38,16 +41,18 @@
     bulkCount();
     for(const key of Object.keys(draft.rules))if(!ids.has(key))delete draft.rules[key];
     el('pool-rule-editors').innerHTML=list.map(({id,a,b})=>{
-      const r=draft.rules[id]??=defaults();
+      const r=draft.rules[id]={...defaults(),...draft.rules[id]};
       const number=(label,key)=>field(label,key,r[key]).replace('data-pool-field','data-pool-rule');
-      return `<details class="pool-rule" data-pool-edge="${escape(id)}"${expanded.has(id)?' open':''}><summary>${escape(a.name)} × ${escape(b.name)} · 上限 ${escape(r.entry_spread_usd)} / 下限 ${escape(r.entry_lower_usd)}</summary><p class="note">A = ${escape(a.name)}，B = ${escape(b.name)}。正向卖 A 买 B，A Bid − B Ask ≥ 上限；反向买 A 卖 B，A Ask − B Bid ≤ 下限。</p><div class="grid">`+
+      return `<details class="pool-rule" data-pool-edge="${escape(id)}"${expanded.has(id)?' open':''}><summary>${escape(ruleSummary(a,b,r))}</summary><p class="note">A = ${escape(a.name)}，B = ${escape(b.name)}。正向卖 A 买 B，A Bid − B Ask ≥ 上限；反向买 A 卖 B，A Ask − B Bid ≤ 下限。</p><div class="grid">`+
         select('允许方向','direction_mode',r.direction_mode,{auto:'自动双向',forward:'只卖 A 买 B',reverse:'只买 A 卖 B'})+
         number('正向开仓上限（A−B）','entry_spread_usd')+number('反向开仓下限（A−B）','entry_lower_usd')+
         select('止盈方式','target_mode',r.target_mode,{contraction:'相对实际开仓价差收窄',absolute:'绝对 A−B 退出阈值'})+
         number('收窄目标 USD/报价单位','take_contraction_usd')+number('绝对退出价差 A−B','exit_spread_usd')+
         select('平仓净收益门槛','require_net_profit',r.require_net_profit,{true:'要求达到最低净收益',false:'不要求净收益'})+
         number('最低净收益 USD','min_net_profit_usd')+select('单组亏损保护','group_loss_enabled',r.group_loss_enabled,{false:'关闭',true:'开启'})+
-        number('最大单组亏损 USD','group_max_loss_usd')+number('最长持仓分钟，0 关闭','max_hold_minutes')+'</div></details>';
+        number('最大单组亏损 USD','group_max_loss_usd')+number('最长持仓分钟，0 关闭','max_hold_minutes')+
+        select('组合价差滑移保护','entry_spread_guard_enabled',r.entry_spread_guard_enabled,{true:'开启：超限暂停并保护性平仓',false:'关闭'})+
+        number('允许组合价差恶化 USD/报价单位','entry_spread_slippage_usd')+'</div><p class="note">两腿都成交后比较触发价差与实际成交价差；恶化超过阈值会暂停新开仓，并按保护滑点平掉两腿。</p></details>';
     }).join('');
   }
   function configure(config) {
@@ -96,6 +101,10 @@
     const result=await api('/api/mt5/pool/save',{expected_pair_id:current.pair.id,pool});
     if(JSON.stringify(draft)!==submitted)throw Error('保存期间终端或规则又有修改，请核对后重新保存。');
     current=result.config;draft=clone(current.mt5_pool);dirty=false;
+    for(const {id,a,b} of pairs(draft.endpoints)){
+      const editor=[...el('pool-rule-editors').querySelectorAll('[data-pool-edge]')].find(x=>x.dataset.poolEdge===id);
+      if(editor)editor.querySelector('summary').textContent=ruleSummary(a,b,draft.rules[id]);
+    }
     note('已保存终端和独立规则。检查各终端后，重新连接使新参数生效；已有组保留原规则。');
   }
   async function work(fn){
@@ -111,6 +120,10 @@
     const endpoint=input.closest('[data-pool-endpoint]'),edge=input.closest('[data-pool-edge]');
     const target=endpoint?draft.endpoints.find(e=>e.id===endpoint.dataset.poolEndpoint):draft.rules[edge.dataset.poolEdge];
     target[key]=input.type==='checkbox'?input.checked:input.tagName==='SELECT'?(['true','false'].includes(input.value)?input.value==='true':input.value):input.type==='number'?(input.value.trim()===''?null:Number(input.value)):input.value;
+    if(edge){
+      const pair=pairs(draft.endpoints).find(p=>p.id===edge.dataset.poolEdge);
+      edge.querySelector('summary').textContent=ruleSummary(pair.a,pair.b,target,true);
+    }
     change();
   });
   el('pool-add').onclick=()=>{
@@ -172,7 +185,10 @@
       const risk=e.risk?.message||'等待账户与保证金快照';
       return `<article class="pool-status-card" data-state="${e.error||!valid?'error':'ready'}"><strong>${escape(e.name)} · ${escape(e.symbol)}</strong><p>Bid ${fmt(book?.bid)} / Ask ${fmt(book?.ask)} · ${valid?Math.max(0,age)+' ms':'报价待更新'}</p><p>剩余终端额度 ${fmt(e.remaining_lots)} 手</p><p>${escape(e.error||risk)}</p>${e.risk?.margin_level!=null?`<p>保证金水平 ${fmt(e.risk.margin_level)}% · 强平线 ${fmt(e.risk.margin_so_so)}${e.risk.margin_so_mode===0?'%':'（金额）'}</p>`:''}</article>`;
     }).join('');
-    el('pool-candidate-rows').innerHTML=pool.candidates.map(row=>`<tr data-selected="${row.selected}"><td>${escape(row.buy)} → ${escape(row.sell)}</td><td>${fmt(row.spread)}</td><td>≥ ${fmt(row.threshold)}</td><td>${fmt(row.score)}</td><td>${row.selected?'优先候选 · ':''}${escape(row.reason)}</td></tr>`).join('');
+    el('pool-candidate-rows').innerHTML=pool.candidates.map(row=>{
+      const reverse=row.direction==='reverse',spread=reverse&&Number.isFinite(row.spread)?-row.spread:row.spread,threshold=reverse?-row.threshold:row.threshold;
+      return `<tr data-selected="${row.selected}"><td>${escape(row.buy)} → ${escape(row.sell)}<br><small>${reverse?'反向：买 A 卖 B':'正向：卖 A 买 B'}</small></td><td title="${reverse?'A Ask − B Bid':'A Bid − B Ask'}">${fmt(spread)}</td><td>${reverse?'≤':'≥'} ${fmt(threshold)}</td><td>${fmt(row.score)}</td><td>${row.selected?'优先候选 · ':''}${escape(row.reason)}</td></tr>`;
+    }).join('');
     const ready=pool.candidates.filter(x=>x.ready).length;
     el('pool-candidate-summary').textContent=`${ready} / ${pool.candidates.length} 个方向满足候选条件${result.state?.enabled?'':' · 新开仓暂停'}`;
     const errors=pool.endpoints.filter(e=>e.error);

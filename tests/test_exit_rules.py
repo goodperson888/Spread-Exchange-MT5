@@ -25,6 +25,7 @@ class ExitRulesTests(unittest.TestCase):
         self.r=TradingRuntime.__new__(TradingRuntime);self.r.lock=threading.RLock()
         self.r.connected=True;self.r.reconciled=True;self.r.config=self.c;self.r.engine=self.e
         self.r.snapshot=Mock(return_value={});self.r.binance=Mock();self.r.terminal=Mock()
+        self.r.market_wake=threading.Event()
 
     def body(self, groups=None, **changes):
         groups=groups or [self.g]
@@ -45,6 +46,7 @@ class ExitRulesTests(unittest.TestCase):
         self.assertEqual(change['before']['take_contraction_usd'],2)
         self.assertEqual(change['after']['take_contraction_usd'],1.5)
         self.assertIn('下一次有效行情',result['message'])
+        self.assertTrue(self.r.market_wake.is_set())
         self.broker.submit.assert_not_called();self.r.binance.assert_not_called();self.r.terminal.assert_not_called()
 
     def test_new_conditions_take_effect_on_next_valid_tick_while_entry_is_paused(self):
@@ -85,6 +87,32 @@ class ExitRulesTests(unittest.TestCase):
         body['expected_revisions'][self.g['id']]=99
         with self.assertRaises(ValueError):self.r.apply_exit_rules(body)
         self.assertEqual(self.g,before)
+
+    def test_native_pool_existing_group_rebates_use_a_b_mapping_and_current_valuation(self):
+        from test_mt5_pool import config as pool_config, spec
+        from mt5_pool_config import candidates
+        from pair_instruments import equal_lot_plan
+        c=candidates(pool_config(2))['t1~t2'];self.e.state['groups']=[];self.e.state['orders']=[]
+        self.e.state['last_open_ms']=0
+        c['costs'].update(mt5_short_commission_per_lot_side=3,mt5_commission_per_lot_side=5,
+                          mt5_short_rebate_percent=0,mt5_rebate_percent=0)
+        self.e.start(c);q=quote(c);self.e.tick(c,equal_lot_plan(c,{leg:spec() for leg in ('binance','mt5')}),q)
+        g=self.e.active()[0];self.g=g;self.r.config=pool_config(2)
+        self.r.pool=Mock(contexts={'t1~t2':Mock(config=c)})
+        before=self.e.valuation(g,q)
+        body=self.body(take_contraction_usd=.5);body['rebates']=dict(binance_rebate_percent=90,mt5_rebate_percent=20)
+        self.r.apply_exit_rules(body)
+        after=self.e.valuation(g,q)
+        self.assertEqual(g['parameters']['take_contraction_usd'],.5)
+        self.assertEqual(g['costs']['mt5_short_rebate_percent'],90);self.assertEqual(g['costs']['mt5_rebate_percent'],20)
+        self.assertAlmostEqual(after['gross'],before['gross']);self.assertAlmostEqual(after['fees'],before['fees'])
+        self.assertAlmostEqual(after['estimated_rebate_binance'],.06*.9)
+        self.assertAlmostEqual(after['estimated_rebate_mt5'],.10*.2)
+        self.assertAlmostEqual(after['net'],before['net']+.074)
+        # A rebate percentage creates no credit when both fee bases are zero.
+        for o in self.e.state['orders']:o['result']['fee']=0
+        g['costs'].update(mt5_short_commission_per_lot_side=0,mt5_commission_per_lot_side=0)
+        zero=self.e.valuation(g,q);self.assertEqual(zero['estimated_rebate'],0)
 
     def test_rebate_edit_commit_failure_rolls_back_rates_rules_and_revision(self):
         before=copy.deepcopy(self.g);body=self.body(take_contraction_usd=1)

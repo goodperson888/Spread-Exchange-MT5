@@ -587,6 +587,28 @@ test('existing group exits require a preview and explicit apply without saving m
  assert.ok(!f.calls.some(c=>c.url==='/api/config'||c.url.includes('/close')));
 });
 
+test('native exit editor previews the actual negative target and maps A B rebates',async()=>{
+ const snapshot=editableSnapshot(),pair={type:'mt5_mt5',name:'A × B',short_symbol:'GC',long_symbol:'XAUUSD'};
+ snapshot.pair=pair;const group=snapshot.state.groups[0];
+ Object.assign(group,{pair,entry:-.55,direction:'forward',leg_contracts:{binance:100,mt5:100},
+   costs:{mt5_short_rebate_percent:30,mt5_rebate_percent:50}});
+ let applied;
+ const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,'/api/trading/exit-rules':body=>{
+   applied=body;return {...snapshot,message:'已更新已有组'};
+ }});
+ await f.el('trading-reconcile').onclick();
+ f.el('exit-rule-group').value='group:g1';f.el('exit-rule-load').onclick();
+ assert.equal(f.el('exit-rule-binance-rebate').value,'30');assert.equal(f.el('exit-rule-mt5-rebate').value,'50');
+ f.el('exit-rule-take').value='.5';f.el('exit-rule-binance-rebate').value='60';
+ f.el('exit-rule-preview').onclick();
+ assert.match(f.el('exit-rule-result').textContent,/A−B 平仓价差 ≤ -1\.05/);
+ assert.match(f.el('exit-rule-result').textContent,/品种 A 60%.*品种 B 50%/);
+ assert.match(f.el('exit-rule-result').textContent,/无手续费则返佣为 0/);
+ await f.el('exit-rule-apply').onclick();
+ assert.equal(applied.rules.take_contraction_usd,.5);
+ assert.deepEqual(applied.rebates,{binance_rebate_percent:60,mt5_rebate_percent:50});
+});
+
 test('editing after preview and a newer server rule version both invalidate apply',async()=>{
  let snapshot=editableSnapshot();
  const f=pageFixture(false,{'/api/trading/reconcile':()=>snapshot,'/api/trading/status':()=>snapshot});

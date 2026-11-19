@@ -471,11 +471,18 @@ class PoolRuntime:
             q=quotes.get(edge)
             if not q:continue
             self.engine.entry_candidate_key=None
-            self.engine.tick(ctx.config,ctx.plan,q)
+            self._pool_tick(ctx,q)
         self.engine.entry_candidate_key=winner['key'] if winner else None
         if winner and len(self.engine.state['orders'])==orders_before:
             ctx=owner.contexts[winner['edge']]
-            self.engine.tick(ctx.config,ctx.plan,quotes[winner['edge']])
+            self._pool_tick(ctx,quotes[winner['edge']])
+    def _pool_tick(self,ctx,q):
+        latency=getattr(self,'latency',None)
+        if latency:latency.quote(q,stamp())
+        started=time.monotonic()
+        try:self.engine.tick(ctx.config,ctx.plan,q)
+        finally:
+            if latency:latency.record('strategy_pass_ms',(time.monotonic()-started)*1000)
     def _pool_reconcile(self):
         owner=self.pool;mode=self.config['execution']['mode']
         if self.engine.state.get('enabled'):self.engine.pause('正在核对所有原终端持仓')

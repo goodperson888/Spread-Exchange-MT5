@@ -80,6 +80,16 @@ test('rebate percentages restore and save independently of the exchange fee rate
  assert.equal(f.el('binance-rebate').value,'12.5');assert.equal(f.el('mt5-rebate').value,'0');
 });
 
+test('combined entry spread guard is opt-in and saves separately from per-leg slippage',async()=>{
+ const f=await fixture();assert.equal(f.el('entry-spread-guard-on').checked,false);
+ f.el('entry-spread-guard-on').checked=true;f.edit('entry-spread-slippage','0.25');
+ const saved=f.run('formConfig()');
+ assert.equal(saved.strategy.entry_spread_guard_enabled,true);assert.equal(saved.strategy.entry_spread_slippage_usd,.25);
+ assert.equal(saved.strategy.max_slippage_usd,f.config.strategy.max_slippage_usd);
+ f.run('populate({...formConfig(),strategy:{...formConfig().strategy,entry_spread_guard_enabled:false}})');
+ assert.equal(f.el('entry-spread-guard-on').checked,false);
+});
+
 test('MT5 commission references show source samples and preserve manual fallback and separate switches',async()=>{
  const ref={symbol:'GOLD-A',checked_ms:Date.now(),profiles:{
    open_0:{state:'ready',rate:6,samples:3},close_1:{state:'ready',rate:0,samples:4},

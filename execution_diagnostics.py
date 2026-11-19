@@ -131,6 +131,13 @@ def build_report(state, events):
             row['quantity_unit']='lot';row['leg_contracts']=numbers(g.get('leg_contracts',{}),'binance mt5')
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd entry_lower_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
+        if type(g.get('parameters',{}).get('entry_spread_guard_enabled')) is bool:
+            row['parameters']['entry_spread_guard_enabled']=g['parameters']['entry_spread_guard_enabled']
+        row['parameters'].update(numbers(g.get('parameters',{}),'entry_spread_slippage_usd'))
+        if isinstance(g.get('entry_spread_guard'),dict):
+            guard=g['entry_spread_guard']
+            row['entry_spread_guard']=numbers(guard,'signal entry_threshold actual slippage limit time_ms')
+            row['entry_spread_guard']['action']=choice(guard,'action',('pause_and_protective_close',))
         if g.get('parameters',{}).get('direction_mode') in ('auto','forward','reverse'):
             row['parameters']['direction_mode']=g['parameters']['direction_mode']
         row.update(numbers(g,'exit_rules_revision'))
@@ -235,6 +242,12 @@ def build_report(state, events):
                                        'rebates_before':numbers(change.get('rebates_before',{}),'binance_rebate_percent mt5_rebate_percent'),
                                        'rebates_after':numbers(change.get('rebates_after',{}),'binance_rebate_percent mt5_rebate_percent')})
             if changes:report['events'].append({'kind':'exit_rules_updated',**numbers(event,'time'),'data':{'changes':changes}})
+            continue
+        if event.get('kind')=='entry_spread_guard_triggered':
+            gid=group_ids.get(data.get('group'))
+            if gid:report['events'].append({'kind':event['kind'],**numbers(event,'time'),
+                'data':dict(group=gid,**numbers(data,'signal entry_threshold actual slippage limit time_ms'),
+                            **safe_reason(data))})
             continue
         if event.get('kind') not in kinds: continue
         oid=order_ids.get(data.get('id'));gid=group_ids.get(data.get('group'))

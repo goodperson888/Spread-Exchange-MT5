@@ -520,13 +520,19 @@ class Terminal:
         self.responses.put({'ok':False,'error':'MT5 工作进程已退出'})
 
     def call(self, command, *, timeout_seconds=12, **args):
+        queued=time.monotonic() if command=='submit' else 0
         with self.lock:
+            entered=time.monotonic() if command=='submit' else 0
             if self.process.poll() is not None: raise ValueError('MT5 会话已断开，需要重新连接及对账')
             self.process.stdin.write(json.dumps(dict(command=command,**args))+'\n'); self.process.stdin.flush()
             try: result=self.responses.get(timeout=timeout_seconds)
             except queue.Empty:
                 self.close(); raise ValueError('MT5 请求超时，若涉及下单则成交状态未知，必须对账') from None
             if not result.get('ok'): raise ValueError(result.get('error','MT5 请求失败'))
+            if command=='submit' and isinstance(result.get('data'),dict):
+                result['data'].setdefault('timings',{}).update(
+                    terminal_queue_ms=round((entered-queued)*1000,3),
+                    terminal_roundtrip_ms=round((time.monotonic()-entered)*1000,3))
             return result['data']
 
     def close(self):
@@ -697,10 +703,16 @@ class NativeMT5Fills:
             if data['status']!='done':
                 data.setdefault('error','MT5 成交数量或价格待核对，正在查询订单及成交历史')
             return data
-        # Keep the normal path to one position read; fees are verified later.
-        # Do not assume that an order ticket or position identifier is its ticket.
+        # A complete direct fill already proves exposure. The new execution
+        # path defers ticket binding to the observer / exact-ownership close
+        # lookup, so hedging the second leg never waits for positions_get.
+        # Partial or unusual replies retain the strict recovery path.
+        defer=(order.get('defer_position_lookup') is True and result.order and result.deal
+               and result.retcode==getattr(self.mt,'TRADE_RETCODE_DONE',10009)
+               and abs(qty-order['requested'])<=1e-8)
+        # Never infer a position ticket from an order or position identifier.
         position = order.get('position')
-        if order['action']=='open':
+        if order['action']=='open' and not defer:
             try: current = self.positions(order)
             except Exception: current = ()  # Fill acknowledgement remains known.
             if len(current)==1:
@@ -969,6 +981,7 @@ def worker_main():
                     except Exception: value=None
                     data=dict(required=value,available=a.margin_free)
                 elif cmd=='submit':
+                    submit_started=time.monotonic();timings={}
                     o=r['order']; opening=o['action']=='open'
                     if not (t.trade_allowed and not t.tradeapi_disabled and a.trade_allowed and a.trade_expert):
                         raise ValueError('MT5 自动交易权限未开启')
@@ -1002,12 +1015,17 @@ def worker_main():
                                 raise ValueError('MT5 待平仓位不属于本策略，已拒绝操作')
                             if req['volume']>pos[0].volume+1e-9: raise ValueError('MT5 平仓量大于实际持仓')
                             req['position']=int(o['position'])
+                        check_started=time.monotonic()
+                        timings['worker_preflight_ms']=round((check_started-submit_started)*1000,3)
                         check=mt.order_check(req)
+                        timings['order_check_ms']=round((time.monotonic()-check_started)*1000,3)
                         if not check or check.retcode!=0:
                             data=dict(status='done',qty=0,price=0,submitted=False,error='MT5 订单预检查未通过')
                         else:
-                            result=mt.order_send(req)
+                            send_started=time.monotonic();result=mt.order_send(req)
+                            timings['order_send_ms']=round((time.monotonic()-send_started)*1000,3)
                             ack_received_ms=int(time.time()*1000)
+                            normalize_started=time.monotonic()
                             if result is None: data=dict(status='unknown',qty=0,price=0)
                             elif result.retcode in (mt.TRADE_RETCODE_DONE,mt.TRADE_RETCODE_DONE_PARTIAL):
                                 data=NativeMT5Fills(mt,s.name,magic).submitted(o,result,s.trade_contract_size)
@@ -1020,6 +1038,7 @@ def worker_main():
                             # already recovered a fill via history in the same call.
                             if 'receipt' not in data: data['receipt']=capture_receipt('mt5',result)
                             data['ack_received_ms']=ack_received_ms
+                            timings['fill_normalize_ms']=round((time.monotonic()-normalize_started)*1000,3)
                         data['precheck_receipt']=capture_receipt('mt5',check)
                         if check is None or (check.retcode==0 and result is None):
                             try:
@@ -1027,6 +1046,8 @@ def worker_main():
                                 if isinstance(native_error,(tuple,list)) and isinstance(native_error[0],int):
                                     data['native_error_code']=native_error[0]
                             except Exception: pass
+                    timings['worker_submit_ms']=round((time.monotonic()-submit_started)*1000,3)
+                    data['timings']=timings
                 else: raise ValueError('未知 MT5 指令')
             print(json.dumps(dict(ok=True,data=data),allow_nan=False),flush=True)
         except Exception as exc:

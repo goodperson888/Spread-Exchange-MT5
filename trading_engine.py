@@ -1,5 +1,6 @@
 """Durable paired execution. Order intent is committed before every broker write."""
 import copy
+import math
 import time
 import uuid
 from trading_config import pair_key, rollover_status
@@ -190,6 +191,8 @@ class Engine:
                created_ms=stamp(),result={'status':'unknown','qty':0,'price':0})
         o['slippage_mode']='protective' if protective else 'normal'
         o['dispatch_mode']='serial'
+        if action=='open' and (leg=='mt5' or g.get('pair',{}).get('type')=='mt5_mt5'):
+            o['defer_position_lookup']=True
         if action=='close':
             if isinstance(g.get('close_attempts'),dict): o['close_attempt']=g['close_attempts'].get(leg,0)
             if residual:
@@ -587,6 +590,29 @@ class Engine:
             g['entry_signal']=g.get('entry_signal',g['entry']);g['entry']=actual
             self._complete_execution(g,'open')
             if threshold is None: threshold=g.get('entry_threshold',g['parameters']['entry_spread_usd'])
+            signal=g['entry_signal']
+            spread_slippage=actual-signal
+            guard_enabled=g['parameters'].get('entry_spread_guard_enabled') is True
+            guard_limit=g['parameters'].get('entry_spread_slippage_usd',g['parameters'].get('max_slippage_usd',0))
+            try:
+                guard_limit=float(guard_limit)
+            except (TypeError,ValueError):
+                guard_enabled=False;guard_limit=0.
+            if (guard_enabled and math.isfinite(guard_limit)
+                    and guard_limit>=0 and spread_slippage < -guard_limit-1e-8):
+                reason=(f'组合成交价差滑移超限：触发 {signal:.6f}，实际 {actual:.6f}，'
+                        f'偏移 {spread_slippage:.6f}，允许恶化 {guard_limit:.6f}；'
+                        '已暂停新开仓并使用保护滑点平仓')
+                g['entry_spread_guard']=dict(enabled=True,signal=signal,entry_threshold=threshold,actual=actual,
+                                             slippage=spread_slippage,limit=guard_limit,time_ms=stamp(),
+                                             action='pause_and_protective_close')
+                g['execution_warning']=reason
+                g['status']='unwinding';g['reason']=reason
+                self.pause(reason)
+                self.save('entry_spread_guard_triggered',{'group':g['id'],'reason':reason,
+                          **g['entry_spread_guard']})
+                self.close_group(g,q)
+                return True
             if actual < threshold:
                 g['execution_warning']=f'实际成交价差 {actual:.6f} 低于触发阈值 {threshold:.6f}，按实际开仓价差管理；未反向平仓'
             self.save('group_opened',{'group':g['id'],'entry':g['entry']})

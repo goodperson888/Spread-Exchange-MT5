@@ -121,6 +121,17 @@ class PoolTests(unittest.TestCase):
         self.assertEqual([e['id'] for e in g['pair']['endpoints'].values()],['t1','t3'])
         self.assertEqual({o['endpoint']['id'] for o in self.r.engine.state['orders']},{'t1','t3'})
         self.assertEqual(len(self.owner.ranking),6)
+        phases=self.r.latency.snapshot()['phases']
+        self.assertIn('quote_wait_ms',phases);self.assertIn('strategy_pass_ms',phases)
+
+    def test_negative_lower_bound_selects_reverse_only_using_ask_minus_bid(self):
+        ctx=self.owner.contexts['t1~t2'];ctx.config['strategy'].update(entry_spread_usd=.7,entry_lower_usd=-.4)
+        self.books([4000,4001,4000])
+        self.owner.rank(self.owner.pump.all())
+        rows={r['direction']:r for r in self.owner.ranking if r['edge']=='t1~t2'}
+        self.assertAlmostEqual(rows['reverse']['spread'],.9)
+        self.assertEqual(rows['reverse']['threshold'],.4);self.assertTrue(rows['reverse']['ready'])
+        self.assertFalse(rows['forward']['ready'])
 
     def test_history_reader_is_shared_by_endpoint_across_pairs_and_replaced_after_failure(self):
         a=self.owner.contexts['t1~t2'].maintenance;b=self.owner.contexts['t1~t3'].maintenance

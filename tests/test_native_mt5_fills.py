@@ -44,6 +44,45 @@ class NativeMT5FillTests(unittest.TestCase):
         self.mt.history_deals_get.assert_not_called();self.mt.history_orders_get.assert_not_called()
         self.mt.orders_get.assert_not_called()
 
+    def test_complete_ack_fast_path_defers_binding_and_records_worker_timings(self):
+        self.ack.volume=.01;self.ack.price=4000
+        r=self.run_worker({**self.o,'defer_position_lookup':True})
+        self.assertTrue(r['ok']);data=r['data']
+        self.assertEqual((data['status'],data['qty'],data['ticket'],data['deal']),('done',1,'500','600'))
+        self.assertNotIn('position',data);self.assertNotIn('position_identifier',data)
+        self.mt.positions_get.assert_not_called();self.mt.history_deals_get.assert_not_called()
+        for key in ('worker_preflight_ms','order_check_ms','order_send_ms','fill_normalize_ms','worker_submit_ms'):
+            self.assertGreaterEqual(data['timings'][key],0)
+        self.mt.order_check.assert_called_once();self.mt.order_send.assert_called_once()
+
+    def test_partial_or_missing_deal_ack_does_not_use_fast_binding_path(self):
+        self.mt.TRADE_RETCODE_DONE=10009;self.ack.price=4000
+        for volume,deal in ((.005,600),(.01,0)):
+            with self.subTest(volume=volume,deal=deal):
+                self.mt.positions_get.reset_mock();self.ack.volume=volume;self.ack.deal=deal
+                r=self.f.submitted({**self.o,'defer_position_lookup':True},self.ack,100)
+                self.mt.positions_get.assert_called_once_with(symbol='XAUUSD')
+                self.assertEqual(r['position'],'900')
+
+    def test_fast_path_malformed_ack_still_uses_verified_history(self):
+        r=self.run_worker({**self.o,'defer_position_lookup':True})
+        self.assertEqual(r['data']['qty'],1)
+        self.mt.history_deals_get.assert_called_once_with(ticket=500)
+
+    def test_close_without_deferred_ticket_binds_exact_owned_opening(self):
+        self.ack.volume=.01;self.ack.price=3999.9
+        closing={**self.o,'id':'gptest-close','action':'close','opening_id':self.o['id'],'limit':3999}
+        result=self.run_worker(closing)
+        self.assertTrue(result['ok']);self.assertEqual(result['data']['qty'],1)
+        self.assertEqual(self.mt.order_send.call_args.args[0]['position'],900)
+        self.mt.positions_get.assert_called_once_with(symbol='XAUUSD')
+
+    def test_close_without_deferred_ticket_rejects_foreign_position(self):
+        self.p.magic=77
+        closing={**self.o,'id':'gptest-close','action':'close','opening_id':self.o['id'],'limit':3999}
+        self.assertFalse(self.run_worker(closing)['ok'])
+        self.mt.order_send.assert_not_called()
+
     def test_history_error_preserves_identifiers_and_continues_reading(self):
         self.mt.history_deals_get.side_effect=TimeoutError('delayed')
         r=self.f.submitted(self.o,self.ack,100)

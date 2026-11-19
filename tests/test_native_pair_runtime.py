@@ -189,6 +189,26 @@ class NativePairRuntimeTests(unittest.TestCase):
         sample.assert_not_called();reader.call.assert_called_once_with('pair_quotes')
         self.assertEqual(q['pair']['type'],'mt5_mt5')
 
+    def test_quote_publish_wakes_strategy_without_chart_disk_io_and_coalesces(self):
+        self.r.push_bridge=None;self.r.quote_events=QuoteEvents();self.r.market_wake=threading.Event()
+        pump=NativePairPump(self.r,Mock())
+        q=copy.deepcopy(self.r.quote)
+        with patch.object(self.store,'sample',side_effect=AssertionError('disk on quote thread')):
+            pump.publish(q)
+            q2=copy.deepcopy(q);q2['binance']['bid']+=.1
+            pump.publish(q2)
+        self.assertTrue(self.r.market_wake.is_set())
+        self.assertEqual(pump.read()[1],2)
+        self.assertEqual(pump.pending_sample,q2)
+
+    def test_chart_write_error_is_visible_and_wakes_runtime(self):
+        self.r.push_bridge=None;self.r.market_wake=threading.Event()
+        pump=NativePairPump(self.r,Mock());pump.pending_sample=self.r.quote
+        def fail(q):pump.stopped.set();raise OSError('disk full')
+        with patch.object(self.store,'sample',side_effect=fail):pump._samples()
+        self.assertIn('行情历史写入失败',pump.read()[2])
+        self.assertTrue(self.r.market_wake.is_set())
+
 
 class NativePairConnectionTests(unittest.TestCase):
     def setUp(self):
