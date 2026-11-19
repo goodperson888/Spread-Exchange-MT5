@@ -487,6 +487,11 @@
     }
     const state=result.state||{}, q=(latestLive&&result.quote&&latestLive.key===result.quote.key&&latestLive.time_ms>result.quote.time_ms?latestLive:result.quote);
     renderPositions(result.position_report);
+    const rollover=result.strategy_runtime?.rollover_status;
+    if(el('rollover-status')) {
+      el('rollover-status').textContent=rollover?.message||'经纪商结算保护状态待连接；请按经纪商实际时间填写。';
+      el('rollover-status').classList.toggle('inline-warning',Boolean(rollover?.blocked));
+    }
     const mode=result.capabilities?.mode||'paper';
     const reconciled=result.capabilities?.reconciled === true;
     const positionMode=result.capabilities?.position_mode;
@@ -825,7 +830,12 @@
     }
     if(report && report.time_ms!==adoptionReportTime) {
       const selected=new Set(Array.from(el('adoption-tickets').querySelectorAll('input:checked'),x=>x.value));
-      el('adoption-tickets').innerHTML=report.mt5.filter(p=>p.side===0&&!p.managed).map(p=>`<label class="check"><input type="checkbox" value="${escape(p.ticket)}" ${selected.has(String(p.ticket))?'checked':''} />票据 ${escape(p.ticket)} · ${n(p.lots)} 手 · 开仓 ${n(p.price_open)} · ${dateTime(p.time_ms)}</label>`).join('')||'没有可接管的 MT5 多头票据。';
+      // Terminal pools return per-endpoint snapshots, not the legacy mt5[]
+      // report. Keep reconciliation rendering safe; adoption remains a
+      // single-terminal workflow for now.
+      const mt5Positions=Array.isArray(report.mt5)?report.mt5:[];
+      el('adoption-tickets').innerHTML=mt5Positions.filter(p=>p.side===0&&!p.managed).map(p=>`<label class="check"><input type="checkbox" value="${escape(p.ticket)}" ${selected.has(String(p.ticket))?'checked':''} />票据 ${escape(p.ticket)} · ${n(p.lots)} 手 · 开仓 ${n(p.price_open)} · ${dateTime(p.time_ms)}</label>`).join('')||(
+        report.pool_endpoints?'终端池持仓请在“平台当前持仓”中按终端核对；当前接管面板只支持单个 MT5 品种。':'没有可接管的 MT5 多头票据。');
       adoptionReportTime=report.time_ms;
       invalidateAdoption();
     }

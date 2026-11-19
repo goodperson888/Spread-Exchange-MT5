@@ -25,7 +25,7 @@
     el('pool-endpoint-editors').innerHTML=draft.endpoints.map(e=>`<article class="pool-endpoint-card" data-pool-endpoint="${escape(e.id)}"><div class="heading"><h3>${escape(e.name)}</h3></div>`+
       field('终端名称','name',e.name,{type:'text'})+field('Windows MT5 完整路径','terminal_path',e.terminal_path,{type:'text'})+
       '<div class="grid">'+field('目标账号（可先检查读取）','account',e.account,{type:'text'})+field('服务器（可先检查读取）','server',e.server,{type:'text'})+
-      field('完整黄金品种名','symbol',e.symbol,{type:'text'})+field('本终端最大持仓手数','max_lots',e.max_lots,{min:.000001})+'</div>'+
+      field('完整品种名','symbol',e.symbol,{type:'text'})+field('本终端最大持仓手数','max_lots',e.max_lots,{min:.000001})+'</div>'+
       '<details><summary>本终端费用与返佣</summary><div class="grid">'+field('备用佣金 USD/手/单边','commission',e.commission,{min:0})+field('预计佣金返还 %','rebate',e.rebate,{min:0,max:100})+
       (current.execution.mode==='paper'?field('纸面 Swap 成本 USD/手/日','swap',e.swap):'')+
       `</div><label class="check"><input data-pool-field="fee_auto" type="checkbox"${e.fee_auto?' checked':''}>后台学习真实成交佣金参考</label><p class="note">成交后按实际手续费核验；未成交的平仓费仍需估算。返佣比例由你填写，参与净收益判断。</p></details>`+

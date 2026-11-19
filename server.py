@@ -26,7 +26,7 @@ from mt5_mcp import DEFAULT_URL as DEFAULT_MCP_URL, McpTerminal, inspect_mcp_ter
 from mt5_paper import inspect_paper_terminal
 from paper_engine import default_state, step as paper_step
 from trading_brokers import Binance, BinanceBookTicker, Terminal, LiveBroker, PaperBroker
-from trading_config import validate as validate_trading, plan as executable_plan, pair_key
+from trading_config import validate as validate_trading, plan as executable_plan, pair_key, rollover_status
 from trading_engine import Engine, valid_group_quote
 from trading_store import Store, storage_error_message
 from maintenance_work import MaintenanceWork
@@ -1274,6 +1274,11 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                                      'dynamic_reference_enabled':display_config['strategy'].get('dynamic_reference_enabled',False),
                                      'reference_window_minutes':display_config['strategy'].get('reference_window_minutes',240),
                                      'entry_deviation_usd':display_config['strategy'].get('entry_deviation_usd',0),
+                                     'rollover_guard_enabled':display_config['strategy'].get('rollover_guard_enabled',False),
+                                     'rollover_utc_hour':display_config['strategy'].get('rollover_utc_hour',22),
+                                     'rollover_utc_minute':display_config['strategy'].get('rollover_utc_minute',0),
+                                     'rollover_guard_minutes':display_config['strategy'].get('rollover_guard_minutes',30),
+                                     'rollover_status':rollover_status(display_config['strategy']),
                                      'max_quote_age_ms': self.config['strategy']['max_quote_age_ms'],
                                      'mt5_symbol': self.config['mt5']['symbol'], 'symbol': self.config['symbol']} if self.config else None,
                 'config_pending': bool(self.connected and self.config_changed(saved_config)),

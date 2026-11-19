@@ -2,7 +2,7 @@
 import copy
 import time
 import uuid
-from trading_config import pair_key
+from trading_config import pair_key, rollover_status
 from execution_evidence import reason_code, REASON_LABELS, result_evidence, validation_issues
 from execution_dispatch import dispatch_order, dispatch_pair, not_dispatched
 from pair_instruments import (native_pair, pair_info, native_valuation, native_thresholds, reverse_pair,
@@ -1021,10 +1021,14 @@ class Engine:
                 grid_allowed=grid_index<=int(s['grid_max_adds'])
             else:
                 grid_allowed=False
+        rollover=rollover_status(s) if s.get('rollover_guard_enabled') else {'blocked':False}
         should_open = (self.state['enabled'] and getattr(self,'entry_candidate_key',q['key'])==q['key'] and not exit_event and all(g['status']=='open' for g in all_active)
             and grid_allowed and len(active)<s['max_groups']
             and sum(g['lots'] for g in all_active)+p['lots']<=s['max_total_lots']+1e-9
-            and direction is not None and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and entry_q['entry']>=open_threshold)
+            and direction is not None and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and entry_q['entry']>=open_threshold
+            and not rollover.get('blocked'))
+        if self.state['enabled'] and rollover.get('blocked'):
+            self.state['alarm']=rollover['message']
         if measure: self._latency('decision_ms', (decision_elapsed+time.monotonic()-started)*1000)
         if should_open:
             self.open(c,p,q,grid_index=grid_index,min_entry_spread=open_threshold,direction=direction)

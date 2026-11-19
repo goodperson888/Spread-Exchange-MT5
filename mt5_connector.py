@@ -172,8 +172,13 @@ def inspect_linear_terminal(settings, api, terminal, account, result, *, endpoin
             row['spec'] = spec
             if spec['volume_min'] > spec['volume_max']: raise ValueError('最小手数大于最大手数')
             if getattr(info, 'custom', False): raise ValueError('自定义品种不能用于实盘双品种组合')
-            if endpoint and str(getattr(info, 'currency_base', '')).upper() != 'XAU' and not any(token in name.upper() for token in ('XAU', 'GOLD')):
-                raise ValueError('终端池仅支持已核验的黄金品种')
+            # A pool may compare broker-specific gold symbols such as
+            # XAUUSDm, XAUUSD.s or GC. Keep a product-family guard so an
+            # accidentally entered EURUSD cannot pass just because its P/L is
+            # linear; the USD linear P/L check below remains authoritative.
+            base=str(getattr(info,'currency_base','')).upper()
+            if endpoint and base not in ('XAU','USD') and not any(token in name.upper() for token in ('XAU','GOLD','GC')):
+                raise ValueError('终端池品种需是可核验的黄金现货或黄金期货（例如 XAUUSD、GC）')
             if info.currency_profit != 'USD': raise ValueError('盈亏币种不是 USD')
             if info.trade_mode != getattr(api, 'SYMBOL_TRADE_MODE_FULL', 4): raise ValueError('品种未开放完整双向交易')
             if spec['expiration_time'] and spec['expiration_time'] <= time.time(): raise ValueError('该合约已到期')
@@ -200,7 +205,7 @@ def inspect_linear_terminal(settings, api, terminal, account, result, *, endpoin
         if not result['blockers'] and row['passed']:
             result.update(endpoint_ready=True, symbol=specs['mt5'], quote=row['quote'],
                           symbol_verification=row['verification'], endpoint_lots=float(settings['pair_lots']),
-                          code='ENDPOINT_CHECKED', message='此终端账户、黄金品种、手数及 USD 盈亏计算校验通过；检查不会下单。')
+                          code='ENDPOINT_CHECKED', message='此终端账户、品种、手数及 USD 线性盈亏计算校验通过；检查不会下单。')
         return result
     if len(specs) == 2:
         steps = [Decimal(str(s['volume_step'])) for s in specs.values()]

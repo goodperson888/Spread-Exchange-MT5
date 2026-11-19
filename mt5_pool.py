@@ -387,8 +387,11 @@ class PoolRuntime:
                 account=snap['account']
                 if account['currency']!='USD' or account['margin_mode']!=2:raise ValueError(e['name']+' 需要 USD 对冲账户')
                 if c['execution']['mode']=='live' and not snap['allowed']:raise ValueError(e['name']+' 未开启自动交易')
-                if spec.get('currency_base')!='XAU' and not any(x in spec['name'].upper() for x in ('XAU','GOLD')):
-                    raise ValueError(e['name']+' 首版终端池仅支持已核验的黄金品种')
+                # Broker-specific symbols such as GC are allowed after the
+                # worker's USD-linear P/L, contract and trading checks pass.
+                base=str(spec.get('currency_base','')).upper(); name=str(spec.get('name',e['symbol'])).upper()
+                if base not in ('XAU','USD') and not any(token in name for token in ('XAU','GOLD','GC')):
+                    raise ValueError(e['name']+'：终端池品种需是可核验的黄金现货或黄金期货（例如 XAUUSD、GC）')
                 # Worker also checks configured identity on EVERY call.
                 identity=(account.get('login',e['account']),account.get('server',e['server']))
                 if identity in identities:raise ValueError('终端池发现重复的实际账户，不能作为独立两腿')

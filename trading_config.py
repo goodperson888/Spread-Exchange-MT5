@@ -1,6 +1,7 @@
 """Validated configuration and executable equal-ounce order sizes."""
 import math
 import re
+import time
 from decimal import Decimal
 from urllib.parse import urlsplit
 from liquidation_risk import validate_alerts
@@ -46,6 +47,10 @@ def validate(c):
     s.setdefault('dynamic_reference_enabled', False)
     s.setdefault('reference_window_minutes', 240)
     s.setdefault('entry_deviation_usd', 1)
+    s.setdefault('rollover_guard_enabled', False)
+    s.setdefault('rollover_utc_hour', 22)
+    s.setdefault('rollover_utc_minute', 0)
+    s.setdefault('rollover_guard_minutes', 30)
     validate_alerts(c.get('risk_alerts', {}))
     validate_proxy_url(c.get('binance', {}).get('proxy_url', ''))
     if not native_pair(c) and not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
@@ -76,7 +81,7 @@ def validate(c):
     if s['exit_mode'] not in ('group', 'basket') or s['target_mode'] not in ('contraction', 'absolute'):
         raise ValueError('退出方式无效')
     for k in ('require_net_profit', 'group_loss_enabled', 'total_loss_enabled', 'grid_enabled',
-              'dynamic_reference_enabled'):
+              'dynamic_reference_enabled', 'rollover_guard_enabled'):
         if type(s[k]) is not bool:
             raise ValueError(k+' 必须是开关')
     bounds = {
@@ -87,6 +92,8 @@ def validate(c):
         'min_net_profit_usd': (0, 1e9), 'group_max_loss_usd': (0.01, 1e9), 'total_max_loss_usd': (0.01, 1e9),
         'max_hold_minutes': (0, 525600), 'max_quote_age_ms': (100, 10000),
         'reference_window_minutes': (1, 43200), 'entry_deviation_usd': (0, 100000),
+        'rollover_utc_hour': (0, 23), 'rollover_utc_minute': (0, 59),
+        'rollover_guard_minutes': (0, 720),
         'max_clock_skew_ms': (0, 5000), 'max_unhedged_ms': (100, 30000), 'max_slippage_usd': (0.01, 1000),
         'unwind_slippage_usd': (0.01, 1000),
     }
@@ -118,6 +125,26 @@ def validate(c):
     if not 0 <= costs['mt5_commission_per_lot_side'] <= 10000:
         raise ValueError('MT5 佣金参数无效')
     rebate_rates(costs)
+
+
+def rollover_status(strategy, now=None):
+    """Return the next explicitly configured broker rollover window in UTC."""
+    enabled=bool(strategy.get('rollover_guard_enabled', False))
+    hour=int(strategy.get('rollover_utc_hour', 22)); minute=int(strategy.get('rollover_utc_minute', 0))
+    guard=max(0,int(strategy.get('rollover_guard_minutes', 30)))
+    now=float(time.time() if now is None else now)
+    import datetime
+    current=datetime.datetime.fromtimestamp(now,datetime.timezone.utc)
+    target=current.replace(hour=hour,minute=minute,second=0,microsecond=0)
+    if target.timestamp()<=now: target+=datetime.timedelta(days=1)
+    seconds=max(0.0,target.timestamp()-now)
+    return dict(enabled=enabled,rollover_utc=f'{hour:02d}:{minute:02d}',guard_minutes=guard,
+                next_ms=int(target.timestamp()*1000),seconds=round(seconds,3),
+                blocked=enabled and seconds<=guard*60,
+                message=(f'距离下次经纪商结算约 {int(seconds//60)} 分钟；保护窗口内暂停新开仓'
+                         if enabled and seconds<=guard*60 else
+                         f'下次经纪商结算时间 UTC {hour:02d}:{minute:02d}，剩余约 {int(seconds//60)} 分钟'
+                         if enabled else '未启用结算前保护；MT5 实际结算时间需按经纪商设置填写'))
 
 
 def pair_key(c):

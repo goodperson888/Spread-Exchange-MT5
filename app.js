@@ -14,7 +14,7 @@ const sectionFields = {
   binance: new Set(['symbol','recv-window','binance-proxy','trading-api-key','trading-api-secret']),
   execution: new Set(['exec-mode','entry-leg','poll-ms','magic','close-retries']),
   strategy: new Set([...Object.values(bindings.strategy),'grid-enabled','cooldown','max-total','exit-mode','target-mode','native-dynamic-reference','native-reference-window','native-entry-deviation',
-    'absolute-exit','direction-mode','entry-lower','require-net','min-net','group-loss-on','group-loss','total-loss-on','total-loss','max-hold']),
+    'absolute-exit','direction-mode','entry-lower','require-net','min-net','group-loss-on','group-loss','total-loss-on','total-loss','max-hold','rollover-guard-on','rollover-utc-hour','rollover-utc-minute','rollover-guard-minutes']),
   risk_alerts: new Set(Object.values(bindings.risk_alerts)),
 };
 let credentialsDirty = false;
@@ -77,7 +77,8 @@ function formConfig() {
     strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),direction_mode:value('direction-mode')||'forward',entry_lower_usd:Number(value('entry-lower')||-5),dynamic_reference_enabled:$('native-dynamic-reference').checked,reference_window_minutes:Number(value('native-reference-window')||240),entry_deviation_usd:Number(value('native-entry-deviation')||0),grid_enabled:$('grid-enabled').checked,
       cooldown_seconds:Number(value('cooldown')),max_total_lots:Number(value('max-total')),exit_mode:value('exit-mode'),target_mode:value('target-mode'),exit_spread_usd:Number(value('absolute-exit')),
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
-      total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold'))},
+      total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold')),
+      rollover_guard_enabled:$('rollover-guard-on').checked,rollover_utc_hour:Number(value('rollover-utc-hour')),rollover_utc_minute:Number(value('rollover-utc-minute')),rollover_guard_minutes:Number(value('rollover-guard-minutes'))},
     execution:{mode:value('exec-mode'), quote_source:'market', entry_leg:value('entry-leg'), poll_ms:Number(value('poll-ms')), magic:Number(value('magic')), close_retry_limit:Number(value('close-retries'))},
     costs:{usdt_usd_auto:$('auto-fx').checked,usdt_usd:Number(value('usdt-fx')),binance_fee_auto:$('auto-binance-fee').checked,binance_taker_percent:Number(value('binance-fee')), mt5_commission_per_lot_side:Number(value('mt5-fee')),binance_rebate_percent:Number(value('binance-rebate')),mt5_rebate_percent:Number(value('mt5-rebate')), mt5_swap_per_lot_day:Number(value('mt5-swap')), paper_funding_percent_day:Number(value('paper-funding')),
       mt5_fee_auto:$('auto-mt5-fee').checked,mt5_short_fee_auto:$('auto-mt5-short-fee').checked,
@@ -151,9 +152,10 @@ function populate(c) {
   const s=c.strategy || {}, costs=c.costs || {};
   $('direction-mode').value=s.direction_mode||'forward';$('entry-lower').value=s.entry_lower_usd??-5;$('native-dynamic-reference').checked=Boolean(s.dynamic_reference_enabled);$('native-reference-window').value=s.reference_window_minutes??240;$('native-entry-deviation').value=s.entry_deviation_usd??1;
   $('pair-parameter-scope').textContent=`参数属于「${configPairName}」；策略、执行、费用及风险提醒按组合保存，账户连接共用。已有组保留原规则。`;
-  const extra={cooldown_seconds:'cooldown',max_total_lots:'max-total',exit_mode:'exit-mode',target_mode:'target-mode',exit_spread_usd:'absolute-exit',min_net_profit_usd:'min-net',group_max_loss_usd:'group-loss',total_max_loss_usd:'total-loss',max_hold_minutes:'max-hold'};
+  const extra={cooldown_seconds:'cooldown',max_total_lots:'max-total',exit_mode:'exit-mode',target_mode:'target-mode',exit_spread_usd:'absolute-exit',min_net_profit_usd:'min-net',group_max_loss_usd:'group-loss',total_max_loss_usd:'total-loss',max_hold_minutes:'max-hold',rollover_utc_hour:'rollover-utc-hour',rollover_utc_minute:'rollover-utc-minute',rollover_guard_minutes:'rollover-guard-minutes'};
   for(const [key,id] of Object.entries(extra)) $(id).value=s[key] ?? $(id).value;
   for(const [key,id] of Object.entries({require_net_profit:'require-net',group_loss_enabled:'group-loss-on',total_loss_enabled:'total-loss-on',grid_enabled:'grid-enabled'})) $(id).checked=Boolean(s[key]);
+  $('rollover-guard-on').checked=Boolean(s.rollover_guard_enabled);
   for(const [key,id] of Object.entries({usdt_usd:'usdt-fx',binance_taker_percent:'binance-fee',mt5_commission_per_lot_side:'mt5-fee',binance_rebate_percent:'binance-rebate',mt5_rebate_percent:'mt5-rebate',mt5_swap_per_lot_day:'mt5-swap',paper_funding_percent_day:'paper-funding'})) $(id).value=costs[key] ?? $(id).value;
   $('auto-fx').checked=costs.usdt_usd_auto ?? true;
   $('auto-binance-fee').checked=costs.binance_fee_auto ?? true;
@@ -219,6 +221,17 @@ function syncConditionalFields(source='') {
 function controls() {
   for (const id of ['save-config','clear-credentials','check-binance','check-mt5','check-public-ip','paper-toggle','paper-step','paper-reset']) if($(id)) $(id).disabled = busy || !loaded;
   $('copy-public-ip').disabled = busy || !loaded || !publicIpValue;
+  updateSaveButton();
+}
+function updateSaveButton() {
+  const button=$('save-config');
+  if(!button)return;
+  const dirty=dirtyFields.size>0||credentialsDirty;
+  button.textContent=dirty?'保存修改':'已保存';
+  button.classList.toggle('primary',dirty);
+  button.classList.toggle('saved',!dirty);
+  button.setAttribute('aria-label',dirty?'保存修改并应用到本机':'配置已保存');
+  button.title=dirty?'保存修改。阈值类参数保存后可立即应用；手数、账户和执行通道类参数需重新连接后生效。':'当前配置已保存到本机';
 }
 async function action(button, job) {
   if (busy || window.goldPairUiBusy || !loaded) return;
@@ -255,6 +268,7 @@ function saveConfigPayload(payload, sections=null) {
         saveDraft();
       }
       message('config-status',sections===null?`已保存「${configPairName}」的参数到本机。`:'已保存本次检查所需配置到本机。');
+      updateSaveButton();
     } else { saveDraft(); queueAutoSave(); }
     window.dispatchEvent(new Event('gold-config-saved'));
     return at;
@@ -530,7 +544,7 @@ for(const input of document.querySelectorAll('input:not([readonly]), select')) {
     revision++;
     if(SECRET_IDS.has(input.id)) {
       credentialsDirty=true; dirtySecrets.add(input.id);
-      message('config-status','连接凭据已修改，等待保存到本机…'); queueAutoSave();
+      message('config-status','连接凭据已修改，等待保存到本机…'); queueAutoSave(); updateSaveButton();
     } else {
       dirtyFields.add(input.id);
       // Normalize dependent fields before capturing the draft.
@@ -540,6 +554,7 @@ for(const input of document.querySelectorAll('input:not([readonly]), select')) {
       } else syncConditionalFields();
       saveDraft();
       message('config-status','有修改，等待保存到本机…'); queueAutoSave();
+      updateSaveButton();
     }
     if(input.id==='binance-proxy') {
       publicIpValue=''; controls();
@@ -580,7 +595,8 @@ async function loadInitialConfig() {
     if(dirtyFields.size) {
       revision++; saveDraft(); queueAutoSave();
       message('config-status','已恢复未保存的输入，正在继续保存；其余字段已读取本机配置。');
-    } else message('config-status','已读取本机配置；修改后自动保存，凭据也会保存在本机。');
+    } else message('config-status','已读取本机配置；修改后会标记为未保存，并在后台保留草稿。');
+    updateSaveButton();
     window.dispatchEvent(new Event('gold-config-ready'));
   } catch(error) { message('config-status','读取本机配置失败：'+error.message+'；暂不提交表单，稍后自动重试。',true); }
   finally { configLoading=false; }
