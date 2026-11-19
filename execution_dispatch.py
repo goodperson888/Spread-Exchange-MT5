@@ -15,15 +15,18 @@ def not_dispatched(code, error='', clock_ms=wall_ms):
 
 def dispatch_order(broker, order, started=None, ready=None, clock_ms=wall_ms):
     started=time.monotonic() if started is None else started
+    # Serial callers pass the journal-ready time before copying the intent.
+    # Keep request_ms compatible, but measure actual adapter dispatch separately.
+    dispatched_monotonic=time.monotonic()
     dispatched=clock_ms()
     order['dispatch_ms']=dispatched
     try: result=broker.submit(order)
     except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
     received=time.monotonic()
-    return dict(result=result,dispatch_ms=dispatched,dispatch_monotonic=started,
+    return dict(result=result,dispatch_ms=dispatched,dispatch_monotonic=dispatched_monotonic,
                 request_ms=round((received-started)*1000),
                 response_received_ms=clock_ms(),received_monotonic=received,
-                **({'dispatch_queue_ms':round((started-ready)*1000,3)} if ready is not None else {}))
+                **({'dispatch_queue_ms':round((dispatched_monotonic-ready)*1000,3)} if ready is not None else {}))
 
 
 def dispatch_pair(broker, orders, ready, clock_ms=wall_ms, can_start=None):

@@ -81,6 +81,9 @@ class Store:
                 [(int(time.time()*1000),kind,json.dumps(data or {},allow_nan=False)) for kind,data in events])
 
     def sample(self, quote):
+        # A monotonic publication marker is meaningful only in this process.
+        if '_published_monotonic' in quote:
+            quote={key:value for key,value in quote.items() if key!='_published_monotonic'}
         with self.lock, self.db:
             # The timestamp is the sample identity. A duplicate timestamp must
             # not mutate an already-rendered historical point.

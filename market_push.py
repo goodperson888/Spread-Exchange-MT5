@@ -8,6 +8,7 @@ import socket
 import socketserver
 import threading
 import time
+from execution_latency import LatencyStats
 
 
 def milliseconds():
@@ -226,6 +227,7 @@ class QuotePump:
         self.last_stamp = q['time_ms']; self.last_signature = signature
         if self.stopped.is_set(): return
         with self.lock:
+            LatencyStats.published(q)
             self.latest, self.version, self.error = q, self.version + 1, ''
         self.wake_strategy.set()
         # History/chart publication can include disk I/O. Let the strategy

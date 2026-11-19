@@ -19,6 +19,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 from urllib.error import HTTPError, URLError
 from liquidation_risk import mt5_risk_fields
 from execution_evidence import confirmation_evidence, capture_receipt
+from execution_latency import PROCESS_LATENCY
 
 
 def _utc_datetime_from_timestamp(seconds):
@@ -520,20 +521,26 @@ class Terminal:
         self.responses.put({'ok':False,'error':'MT5 工作进程已退出'})
 
     def call(self, command, *, timeout_seconds=12, **args):
-        queued=time.monotonic() if command=='submit' else 0
+        quote_read=command in ('quote','pair_quotes')
+        queued=time.monotonic() if command=='submit' or quote_read else 0
         with self.lock:
-            entered=time.monotonic() if command=='submit' else 0
-            if self.process.poll() is not None: raise ValueError('MT5 会话已断开，需要重新连接及对账')
-            self.process.stdin.write(json.dumps(dict(command=command,**args))+'\n'); self.process.stdin.flush()
-            try: result=self.responses.get(timeout=timeout_seconds)
-            except queue.Empty:
-                self.close(); raise ValueError('MT5 请求超时，若涉及下单则成交状态未知，必须对账') from None
-            if not result.get('ok'): raise ValueError(result.get('error','MT5 请求失败'))
-            if command=='submit' and isinstance(result.get('data'),dict):
-                result['data'].setdefault('timings',{}).update(
-                    terminal_queue_ms=round((entered-queued)*1000,3),
-                    terminal_roundtrip_ms=round((time.monotonic()-entered)*1000,3))
-            return result['data']
+            entered=time.monotonic() if command=='submit' or quote_read else 0
+            try:
+                if self.process.poll() is not None: raise ValueError('MT5 会话已断开，需要重新连接及对账')
+                self.process.stdin.write(json.dumps(dict(command=command,**args))+'\n'); self.process.stdin.flush()
+                try: result=self.responses.get(timeout=timeout_seconds)
+                except queue.Empty:
+                    self.close(); raise ValueError('MT5 请求超时，若涉及下单则成交状态未知，必须对账') from None
+                if not result.get('ok'): raise ValueError(result.get('error','MT5 请求失败'))
+                if command=='submit' and isinstance(result.get('data'),dict):
+                    result['data'].setdefault('timings',{}).update(
+                        terminal_queue_ms=round((entered-queued)*1000,3),
+                        terminal_roundtrip_ms=round((time.monotonic()-entered)*1000,3))
+                return result['data']
+            finally:
+                if quote_read:
+                    PROCESS_LATENCY.record_many((('mt5_quote_queue_ms',(entered-queued)*1000),
+                        ('mt5_quote_roundtrip_ms',(time.monotonic()-entered)*1000)))
 
     def close(self):
         if self.process.poll() is None:

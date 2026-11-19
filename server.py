@@ -801,7 +801,10 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
         while not self.stop_event.is_set():
             changed = self.market_wake.wait(.1)
             self.market_wake.clear()
+            lock_queued=time.monotonic()
             with self.lock:
+                latency=getattr(self,'latency',None)
+                if latency: latency.record('strategy_lock_wait_ms',(time.monotonic()-lock_queued)*1000)
                 if not self.connected or not self.config:
                     continue
                 poll = self.config['execution']['poll_ms'] / 1000
@@ -809,6 +812,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 if not changed and time.monotonic() - last < poll:
                     continue
                 self._last_poll = time.monotonic()
+                cycle_started=time.monotonic()
                 try:
                     self._poll()
                     self.last_error = ''
@@ -826,6 +830,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                             self.engine.state['enabled']=False
                             self.last_error += '；暂停记录也未能写入：' + storage_error_message(pause_exc)
                             self.engine.state['alarm']=self.last_error
+                finally:
+                    if latency: latency.record('strategy_cycle_ms',(time.monotonic()-cycle_started)*1000)
 
     def config_changed(self, current_config):
         incoming=copy.deepcopy(current_config);effective=copy.deepcopy(self.config)

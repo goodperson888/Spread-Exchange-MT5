@@ -247,9 +247,30 @@ class Engine:
             **{key:o[key] for key in ('close_attempt','slippage_mode','dispatch_mode','close_batch') if key in o}}
 
     def _accept_order_result(self, g, o, receipt):
+        latency=getattr(self,'latency',None)
+        accepted=time.monotonic() if latency is not None else 0
         result=receipt['result'];qty=o['requested']
         initial_evidence=result_evidence(result)
         valid=self.result_valid(result,qty)
+        if latency is not None:
+            latency.outcome(o,result,valid)
+            latency.record_many(('mt5_'+key,value) for key,value in initial_evidence.get('timings',{}).items())
+            if 'received_monotonic' in receipt:
+                latency.record('receipt_handling_wait_ms',(accepted-receipt['received_monotonic'])*1000)
+        origin=self._execution_timers.get((g['id'],o['action']))
+        dispatched=receipt.get('dispatch_monotonic')
+        if origin is not None and dispatched is not None:
+            o['execution_to_dispatch_ms']=round((dispatched-origin)*1000,3)
+            self._latency(o['action']+'_execution_to_dispatch_ms',o['execution_to_dispatch_ms'])
+            if o['action']=='open':
+                # Keep just two offsets in the existing group, never scan the
+                # growing historical order list for telemetry on the hot path.
+                offsets=g['execution_open'].setdefault('dispatch_offsets_ms',{})
+                offsets[o['leg']]=o['execution_to_dispatch_ms']
+                if 'binance' in offsets and 'mt5' in offsets:
+                    gap=round(abs(offsets['binance']-offsets['mt5']),3)
+                    g['execution_open']['dispatch_gap_ms']=gap
+                    self._latency('open_dispatch_gap_ms',gap)
         # Never let an invalid result look like a completed zero-volume fill.
         if not valid:
             initial_evidence['validation_issues']=validation_issues(result,qty)
@@ -275,7 +296,10 @@ class Engine:
                             'cancel_sent':False}
         o['initial_result']={**initial_evidence,**({'request_ms':result['request_ms']} if 'request_ms' in result else {}),
                              'response_received_ms':result['response_received_ms'],'valid':valid}
-        o['result']=result;self.save('order_result',{'id':o['id'],'result':result})
+        o['result']=result
+        journal_started=time.monotonic() if latency is not None else 0
+        self.save('order_result',{'id':o['id'],'result':result})
+        if latency is not None: latency.record('result_journal_ms',(time.monotonic()-journal_started)*1000)
         if (o['action']=='close' and (o['leg']=='mt5' or o.get('platform')=='mt5') and valid and result.get('status')=='unknown'
                 and result.get('retcode')==10009 and result.get('ack_price')==0
                 and result.get('ack_volume')==o['requested']/g['contract'] and result.get('ticket')
@@ -299,7 +323,13 @@ class Engine:
         g[key]={'started_ms':stamp() if started_ms is None else started_ms}
         if q:
             g[key].update(signal_time_ms=q.get('time_ms'),signal_spread=q.get('entry' if action=='open' else 'exit'))
-        self._execution_timers[(g['id'],action)]=time.monotonic() if started is None else started
+        origin=time.monotonic() if started is None else started
+        self._execution_timers[(g['id'],action)]=origin
+        published=q.get('_published_monotonic') if q else None
+        if isinstance(published,(int,float)) and not isinstance(published,bool) and math.isfinite(published) and 0<=published<=origin:
+            elapsed=round((origin-published)*1000,3)
+            g[key]['quote_to_execution_ms']=elapsed
+            self._latency(action+'_quote_to_execution_ms',elapsed)
 
     def _complete_execution(self, g, action):
         timing=g.get('execution_'+action)
@@ -568,7 +598,10 @@ class Engine:
             second_q=q
             provider=getattr(self,'quote_provider',None)
             if provider:
-                try: second_q=provider(g) if g.get('pair',{}).get('endpoints') else provider()
+                quote_started=time.monotonic()
+                try:
+                    try: second_q=provider(g) if g.get('pair',{}).get('endpoints') else provider()
+                    finally: self._latency('second_leg_quote_ms',(time.monotonic()-quote_started)*1000)
                 except Exception as exc:
                     g['status']='unwinding';g['reason']='第二腿前无法取得新报价，正在保护性平仓：'+str(exc);self.pause(g['reason']);self.close_group(g,q);return True
             if (stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms'] or

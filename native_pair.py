@@ -12,6 +12,7 @@ from trading_config import pair_key
 from trading_engine import valid_group_quote, stamp
 from pair_instruments import short_symbol, equal_lot_plan, native_thresholds, pair_info, position_side
 from market_push import TickFreshness
+from execution_latency import LatencyStats
 from runtime_maintenance import evidence
 import external_closes
 import close_cause
@@ -92,6 +93,7 @@ class NativePairPump:
                 if quotes[leg] is None:
                     quotes[leg]=r.mt5_freshness.observe(rows[name],{**c['mt5'],'symbol':name})
         q=dict(key=pair_key(c),time_ms=stamp(),usdt_usd=1.,**quotes,
+               binance_transport=self.binance_transport,mt5_transport=self.mt5_transport,
                pair=pair_info(c),entry=quotes['binance']['bid']-quotes['mt5']['ask'],
                exit=quotes['binance']['ask']-quotes['mt5']['bid'])
         self._add_reference(q)
@@ -125,6 +127,7 @@ class NativePairPump:
             self.error=''
             if not changed: return self.latest
             q['time_ms']=max(q['time_ms'],self.last_stamp+1);self.last_stamp=q['time_ms']
+            LatencyStats.published(q)
             self.latest=q;self.version+=1
             self.pending_sample=q
         r.quote_events.publish(q);r.market_wake.set();self.sample_wake.set()

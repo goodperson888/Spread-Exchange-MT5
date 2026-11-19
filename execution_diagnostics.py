@@ -164,7 +164,7 @@ def build_report(state, events):
             if decision.get('target_mode') in ('contraction','absolute'): row['exit_decision']['target_mode']=decision['target_mode']
         for action in ('open','close'):
             if 'execution_'+action in g:
-                row['execution_'+action]=numbers(g['execution_'+action],'started_ms signal_time_ms signal_spread confirmed_ms elapsed_ms parallel_batches last_dispatch_gap_ms')
+                row['execution_'+action]=numbers(g['execution_'+action],'started_ms signal_time_ms signal_spread confirmed_ms elapsed_ms parallel_batches last_dispatch_gap_ms dispatch_gap_ms quote_to_execution_ms')
         report['groups'].append(row)
     for o in orders:
         result=o.get('result',{})
@@ -172,7 +172,7 @@ def build_report(state, events):
              'leg':choice(o,'leg',('binance','mt5')),'action':choice(o,'action',('open','close')),
              'symbol':symbol(o.get('symbol')),'imported':bool(o.get('imported')),
              'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
-             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms dispatch_queue_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt close_batch')}
+             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms dispatch_queue_ms execution_to_dispatch_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt close_batch')}
         if o.get('dispatch_mode') in ('serial','parallel'): row['dispatch_mode']=o['dispatch_mode']
         if o.get('platform')=='mt5': row['platform']='mt5'
         if isinstance(o.get('endpoint'),dict):row['endpoint']=terminal_alias(o['endpoint'])
@@ -285,5 +285,8 @@ def export_report(path):
     report['exit_observations']=PROCESS_EXIT_OBSERVATIONS.snapshot(aliases)
     report['notes'].append('exit_observations为本次连接内策略实际检查过的退出条件，最多512段；原因、规则或报价有效性改变及每30秒开启新段，first/latest为该段首末证据，samples累计检查次数，min_exit_spread/max_net为段内极值，极值未必同时出现。仅用限量内存，不增加平台请求或日志提交；重启/重新连接清空。报价无效、恢复等待等提前返回不重新估值，缺少net不能当作零。规则中revision对应当时锁定版本，整篮子按加权入场与篮子净收益检查。图表记录与策略取样独立；未被策略取用的瞬时行情、导出前旧版未采集的瞬间及已淘汰段无法还原。内存与持久化快照不是原子快照，未映射组仅统计数量。')
     report['latency']=PROCESS_LATENCY.snapshot()
-    report['notes'].append('latency为当前进程内最近最多512个阶段样本的统计，重启或重新连接清空，mode区分纸面与实盘；不增加平台查询或日志提交。strategy_pass为一次engine.tick，含执行与确认，decision为条件评估及估值；quote_wait为最新一侧报价首次被策略取用时距本机接收的时间，两边quote_age分别为策略取用时的本机报价年龄，不能当作跨平台网络延迟。')
+    report['notes'].append('latency为当前进程内每阶段最近最多512个样本的中位数、P95、P99、最大值和最新值，重启或重新连接清空，mode区分纸面与实盘；P99少于100个样本时标记p99_low_sample，不可视为稳定结论。不增加平台查询或日志提交。strategy_cycle包含锁内整轮调度，strategy_lock_wait为调度线程取得共享锁的等待；strategy_pass为一次engine.tick，含执行与确认，decision为条件评估及估值。')
+    report['notes'].append('quote_pickup为本进程发布双边报价至首次策略取用的单调时钟耗时；quote_wait及两边quote_age沿用本机接收墙钟计算，不能当作跨平台网络延迟。counters中quote_push/poll/unknown为策略首次取用的报价样本传输方式，非收包率；binance/mt5在双MT5模式分别代表A/B腿。')
+    report['notes'].append('execution_to_dispatch_ms为本进程本次开/平仓流程开始至该腿调用适配器的单调耗时，execution_open.dispatch_gap_ms为两腿发送间隔；quote_to_execution_ms为触发报价发布至该流程开始的单调耗时。重启缺少计时起点则留空。receipt_handling_wait为收到回报到主线程处理前的等待；result_journal为原有回报落盘耗时。每笔初始回执及其timings可对照actual_spread/spread_slippage，不把后续核验替换后的回执当作初始请求。')
+    report['notes'].append('MT5的terminal_roundtrip包含工作进程内部阶段；worker_submit包含preflight、order_check、order_send和fill_normalize；request还包含适配器处理。上述计时以及strategy_cycle/strategy_pass是包含关系，不能相加；order_send也不等于纯网络耗时。counters中的full_fill/partial_fill/zero_fill/unconfirmed仅统计直接回执，不表示后续对账的最终结果。')
     return report

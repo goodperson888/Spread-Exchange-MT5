@@ -15,6 +15,7 @@ from trading_config import pair_key
 from trading_engine import stamp, valid_group_quote
 from trading_brokers import Terminal, PaperBroker
 from market_push import TickFreshness
+from execution_latency import LatencyStats
 from native_pair import NativePairBroker, NativePairObserver
 import external_closes
 
@@ -133,6 +134,7 @@ class PoolPump:
                        entry=books['binance']['bid']-books['mt5']['ask'],exit=books['binance']['ask']-books['mt5']['bid'])
                 previous=self.quotes.get(edge)
                 if previous: q['time_ms']=max(q['time_ms'],previous['time_ms']+1)
+                LatencyStats.published(q)
                 self.quotes[edge]=q;ctx.quote=q;self.version+=1
                 self.pending_samples[edge]=q
                 if edge==self.owner.chart_key:chart_quote=q
@@ -449,6 +451,7 @@ class PoolRuntime:
         self.engine.entry_preflight_detail=dict(state='waiting' if reason else 'ready',reason=reason)
         return not reason
     def _pool_poll(self):
+        prepared=time.monotonic();latency=getattr(self,'latency',None)
         if self.pool.pump.sampling_error:raise ValueError('行情历史写入失败：'+self.pool.pump.sampling_error)
         quotes=self.pool.pump.all();owner=self.pool
         active_keys={g['key'] for g in self.engine.active()}
@@ -460,10 +463,14 @@ class PoolRuntime:
                 for g in ctx.engine.active():
                     if valid_group_quote(q,g['key'],g['parameters']):g['valuation']=self.engine.valuation(g,q)
         self.quote=quotes.get(owner.chart_key)
+        if latency:latency.record('pool_prepare_ms',(time.monotonic()-prepared)*1000)
         if self.config['execution']['mode']=='live' and not self.reconciled:
             for edge,ctx in owner.contexts.items():self.engine.observe_exit_wait(ctx.config,quotes.get(edge),'RECOVERY_PENDING')
             return
-        winner=owner.rank(quotes)
+        ranked=time.monotonic()
+        try:winner=owner.rank(quotes)
+        finally:
+            if latency:latency.record('pool_rank_ms',(time.monotonic()-ranked)*1000)
         self.engine.entry_candidate_key=winner['key'] if winner else None
         # Manage every fixed pair first. Only then admit at most one ranked entry.
         orders_before=len(self.engine.state['orders'])
