@@ -227,7 +227,7 @@ function updateSaveButton() {
   const button=$('save-config');
   if(!button)return;
   const dirty=dirtyFields.size>0||credentialsDirty;
-  button.textContent=dirty?'保存修改':'已保存';
+  button.textContent=dirty?'未保存 · 点击保存':'已保存';
   button.classList.toggle('primary',dirty);
   button.classList.toggle('saved',!dirty);
   button.setAttribute('aria-label',dirty?'保存修改并应用到本机':'配置已保存');
