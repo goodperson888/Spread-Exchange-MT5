@@ -33,6 +33,7 @@ from maintenance_work import MaintenanceWork
 from runtime_maintenance import MaintenanceMonitor
 from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
+from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from execution_diagnostics import export_report
 from chart_reference import ReferenceHistory
 import position_adoption
@@ -102,6 +103,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
         self.latency = PROCESS_LATENCY
         self.engine.latency = self.latency
         self.engine.exit_observations = PROCESS_EXIT_OBSERVATIONS
+        self.engine.entry_observations = PROCESS_ENTRY_OBSERVATIONS
         self.maintenance = None
         self.binance = None
         self.market_stream = None
@@ -312,6 +314,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             self.plan, self.config, self.engine.broker = new_plan, config, broker
             self.latency.reset(mode)
             PROCESS_EXIT_OBSERVATIONS.reset(mode)
+            PROCESS_ENTRY_OBSERVATIONS.reset(mode)
             self.engine.quote_provider = self._execution_quote
             self.engine.close_quote_provider = self._cached_close_quote
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None

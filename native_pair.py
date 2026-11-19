@@ -13,6 +13,7 @@ from trading_engine import valid_group_quote, stamp
 from pair_instruments import short_symbol, equal_lot_plan, native_thresholds, pair_info, position_side
 from market_push import TickFreshness
 from execution_latency import LatencyStats
+from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from runtime_maintenance import evidence
 import external_closes
 import close_cause
@@ -463,7 +464,7 @@ class NativePairRuntime:
                 self.engine.state.pop('entry_margin',None)
                 self.position_report=None;self.adoption_preview=None;self.external_close_status=None
                 self.market_meta=dict(pair=pair_info(c),strategy_trigger='双品种报价驱动；同一 MT5 请求由持久会话有序发送')
-                self.latency.reset(mode);self._restore_push_bridge()
+                self.latency.reset(mode);PROCESS_ENTRY_OBSERVATIONS.reset(mode);self._restore_push_bridge()
                 self.pump=pump;pump_installed=True;self.pump.bridge=self.push_bridge
                 self.pump.publish(quote);self.pump.start()
                 if mode=='live':
@@ -534,6 +535,7 @@ class NativePairRuntime:
 
     def _native_entry_guard(self,q,threshold):
         error=self._account_health_error()
+        self.engine.entry_preflight_detail=dict(state='waiting' if error else 'ready',reason=error,reason_code='ACCOUNT_UNVERIFIED' if error else '')
         if error: self.engine.pause(error);return False
         return True
 

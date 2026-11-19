@@ -13,6 +13,7 @@ import time
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from pair_instruments import equal_lot_plan
+from mt5_session import terminal_path, initialize_options, binding_info, binding_error, initialize_error
 
 
 def failure(code, message):
@@ -235,23 +236,31 @@ def inspect_terminal(settings, api=None, platform=None):
             api = importlib.import_module('MetaTrader5')
         except ImportError:
             return failure('DEPENDENCY_MISSING', '当前运行包缺少内置 MT5 组件。请使用包含组件的 Windows 构建包；源码开发者先安装 requirements-windows.txt。')
-    path = str(settings.get('terminal_path', '')).strip().strip('"')
+    path = terminal_path(settings)
+    if settings.get('require_terminal_path') and not path:
+        return failure('TERMINAL_PATH', binding_error(settings, binding_info(settings, None)))
     if path and (not Path(path).is_file() or Path(path).suffix.lower() != '.exe'):
         return failure('TERMINAL_PATH', '终端路径无效，请选择本机 MT5 的 terminal64.exe；只有一个终端时可留空自动查找。')
     try:
         # Attach to the last logged-in session. Do not switch accounts/login.
         args = [path] if path else []
-        if not api.initialize(*args, timeout=10000):
+        if not api.initialize(*args, **initialize_options(settings)):
             code = api.last_error()[0]
-            return failure('INITIALIZE_FAILED', f'无法连接 MT5（错误码 {code}）。请先打开并登录 MT5；有多个终端时填写具体路径。')
+            return {**failure('INITIALIZE_FAILED', initialize_error(code)),
+                    'terminal_binding': binding_info(settings, None)}
         terminal, account = api.terminal_info(), api.account_info()
+        binding = binding_info(settings, terminal)
+        error = binding_error(settings, binding)
+        if error:
+            return {**failure('TERMINAL_MISMATCH', error), 'terminal_binding': binding}
         if terminal is None or not getattr(terminal, 'connected', False) or account is None or not getattr(account, 'login', 0):
-            return failure('NOT_LOGGED_IN', 'MT5 尚未连接交易服务器，请在终端中登录并检查网络。')
+            return {**failure('NOT_LOGGED_IN', 'MT5 尚未连接交易服务器，请在终端中登录并检查网络。'),
+                    'terminal_binding': binding}
         identity = dict(account=str(account.login), server=str(account.server),
                         currency=str(account.currency), margin_mode=int(account.margin_mode))
         result = dict(connected=True, real_order_enabled=False,
                       checked_at_ms=int(time.time() * 1000), identity=identity,
-                      terminal_path=str(getattr(terminal, 'path', '')), candidates=[],
+                      terminal_path=str(getattr(terminal, 'path', '')), terminal_binding=binding, candidates=[],
                       symbol=None, quote=None, blockers=[], warnings=[])
         expected_account = str(settings.get('account', '')).strip()
         expected_server = str(settings.get('server', '')).strip()

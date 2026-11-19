@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from liquidation_risk import mt5_risk_fields
 from execution_evidence import confirmation_evidence, capture_receipt
 from execution_latency import PROCESS_LATENCY
+from mt5_session import terminal_path, initialize_options, binding_info, binding_error, initialize_error
 
 
 def _utc_datetime_from_timestamp(seconds):
@@ -881,6 +882,8 @@ def worker_main():
     def identity():
         a,t=mt.account_info(),mt.terminal_info()
         if not a or not t or not t.connected: raise ValueError('MT5 未连接')
+        error=binding_error(settings,binding_info(settings,t))
+        if error: raise ValueError(error)
         if str(a.login)!=str(settings['account']) or a.server!=settings['server']:
             raise ValueError('MT5 账户发生变化，已阻止交易')
         return a,t
@@ -891,8 +894,11 @@ def worker_main():
                 settings=r['settings'];magic=int(r['magic']);read_only=bool(r.get('read_only',False))
                 if not settings.get('account') or not settings.get('server') or not settings.get('symbol'):
                     raise ValueError('先检查并应用 MT5 账户和品种')
-                path=settings.get('terminal_path','');args=[path] if path else []
-                if not mt.initialize(*args,timeout=10000): raise ValueError('MT5 初始化失败')
+                path=terminal_path(settings);args=[path] if path else []
+                if settings.get('require_terminal_path') and not path:
+                    raise ValueError(binding_error(settings,binding_info(settings,None)))
+                if not mt.initialize(*args,**initialize_options(settings)):
+                    raise ValueError(initialize_error(mt.last_error()[0]))
                 identity()
                 for name in settings.get('pair_symbols',[settings['symbol']]):
                     if not mt.symbol_select(name,True): raise ValueError('MT5 品种不可用：'+name)

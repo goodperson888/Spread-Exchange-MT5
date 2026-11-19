@@ -21,6 +21,7 @@ from external_closes import external_order
 from execution_latency import LatencyStats
 from market_push import QuoteEvents
 from execution_diagnostics import build_report
+from entry_observations import EntryObservations
 from test_pair_combinations import native_config
 import pair_profiles
 
@@ -42,6 +43,21 @@ def spec():
 
 
 class DefinitionTests(unittest.TestCase):
+    def test_portable_default_preserves_ownership_and_opt_in_requires_a_new_identity(self):
+        from mt5_pool_config import fingerprint,endpoint_settings
+        import hashlib
+        import ntpath
+        c=config(2);e=c['mt5_pool']['endpoints'][0]
+        fields=[ntpath.normcase(ntpath.normpath(e['terminal_path'])),e['account'],e['server'],e['symbol']]
+        legacy=hashlib.sha256(json.dumps(fields,ensure_ascii=False).encode()).hexdigest()[:24]
+        self.assertEqual(fingerprint(e),legacy)
+        e['portable']=False;self.assertEqual(fingerprint(e),legacy)
+        e['portable']=True;self.assertNotEqual(fingerprint(e),legacy)
+        settings=endpoint_settings(c,e)
+        self.assertTrue(settings['portable']);self.assertTrue(settings['require_terminal_path'])
+        e['portable']='true'
+        with self.assertRaisesRegex(ValueError,'便携模式'):clean_pool(c['mt5_pool'])
+
     def test_pool_accepts_more_than_three_and_keeps_canonical_pair_orientation(self):
         c=config(12);validate(c);rows=candidates(c)
         self.assertEqual(len(rows),66)
@@ -132,6 +148,47 @@ class PoolTests(unittest.TestCase):
         self.assertAlmostEqual(rows['reverse']['spread'],.9)
         self.assertEqual(rows['reverse']['threshold'],.4);self.assertTrue(rows['reverse']['ready'])
         self.assertFalse(rows['forward']['ready'])
+
+    def test_actual_pool_evaluations_record_reached_blocker_without_writes_or_queries(self):
+        observer=self.r.engine.entry_observations=EntryObservations()
+        # A read-only UI ranking must not masquerade as an actual strategy evaluation.
+        self.owner.rank(self.owner.pump.all())
+        self.assertFalse(observer.snapshot()['episodes'])
+        with patch.object(self.owner,'block_info',return_value=('MARGIN','保证金不足')), \
+             patch.object(self.r.engine,'save',side_effect=AssertionError('diagnostics must not persist')):
+            self.r._pool_poll()
+        reached=[r for r in observer.snapshot()['episodes'] if r['code']=='MARGIN' and r['latest']['threshold_reached']]
+        self.assertTrue(reached)
+        self.assertFalse(self.r.engine.state['orders'])
+        for session in self.owner.sessions.values():self.assertEqual(session.mock_calls,[])
+
+    def test_pool_preflight_exports_stricter_execution_quote_age_failure(self):
+        observer=self.r.engine.entry_observations=EntryObservations()
+        self.books([4005,4000,3998],ages=[500,500,500])
+        ctx=self.owner.contexts['t1~t3'];q=self.owner.pump.all()['t1~t3']
+        self.assertTrue(self.owner.rank(self.owner.pump.all()))
+        self.r.engine.open(ctx.config,ctx.plan,q,direction='forward')
+        self.assertFalse(self.r.engine.state['orders'])
+        row=observer.snapshot()['episodes'][-1]
+        self.assertEqual(row['code'],'EXECUTION_QUOTE_STALE')
+        self.assertEqual(row['stage'],'preflight')
+        self.assertTrue(row['latest']['threshold_reached'])
+        self.assertGreaterEqual(row['latest']['a_age_ms'],500)
+
+    def test_entry_observation_terminal_aliases_match_group_export_and_hide_identity(self):
+        observer=EntryObservations()
+        self.r._pool_poll()
+        ctx=self.owner.contexts['t1~t3']
+        observer.observe(ctx.config,self.owner.pump.all()['t1~t3'],'COOLDOWN',direction='forward')
+        with patch('execution_diagnostics.PROCESS_ENTRY_OBSERVATIONS',observer):
+            report=build_report(self.r.engine.state,[])
+        observation=report['entry_observations']['episodes'][0]
+        group=report['groups'][0]
+        self.assertEqual(observation['endpoints']['a'],group['pair']['endpoints']['binance'])
+        self.assertEqual(observation['endpoints']['b'],group['pair']['endpoints']['mt5'])
+        data=json.dumps(report['entry_observations'])
+        for private in ('Broker-','MT5-','1001','terminal64','mt5_edge'):
+            self.assertNotIn(private,data)
 
     def test_history_reader_is_shared_by_endpoint_across_pairs_and_replaced_after_failure(self):
         a=self.owner.contexts['t1~t2'].maintenance;b=self.owner.contexts['t1~t3'].maintenance

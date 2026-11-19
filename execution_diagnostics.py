@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
+from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from execution_evidence import reason_code, REASON_LABELS, result_evidence
 from commission_reference import safe_references
 from reference_diagnostics import PROCESS_REFERENCE_DIAGNOSTICS
@@ -262,6 +263,8 @@ def build_report(state, events):
         if oid: row['data']['order']=oid
         if gid: row['data']['group']=gid
         report['events'].append(row)
+    report['entry_observations']=PROCESS_ENTRY_OBSERVATIONS.snapshot(terminal_alias)
+    report['notes'].append('entry_observations为本次连接内实际策略评估的开仓证据，内存最多512段；每段记录对应方向的真实可成交价差、当前生效阈值、到价与阻拦原因、首末样本和方向极值。pool_rank表示候选筛选，engine表示执行条件检查，preflight表示下单前复查；ENTRY_SUBMIT仅表示进入开仓流程，不保证成交。反向仍统一使用A Ask−B Bid≤下限；P为本段内匿名配对，端点T与组内别名一致。记录不写盘、不新增平台查询；重新连接/重启清空，图表触线但未被策略取用的瞬时行情不能还原。')
     return report
 
 

@@ -1,4 +1,5 @@
 import copy
+import ntpath
 import unittest
 from unittest.mock import patch
 import server
@@ -75,6 +76,7 @@ class PoolHttpTests(unittest.TestCase):
         c=self.install();e=c['mt5_pool']['endpoints'][1]
         e.update(account='',server='',symbol='XAUUSD.s')
         server.write_config(c);fake=PairTerminal();fake.symbols[1].name='XAUUSD.s'
+        fake.terminal.path=ntpath.dirname(e['terminal_path'])
         def probe(settings):
             self.assertTrue(settings['pool_endpoint_check'])
             self.assertNotIn('pair_symbols',settings)
@@ -90,6 +92,21 @@ class PoolHttpTests(unittest.TestCase):
         self.assertEqual(server.load_config()['mt5_pool']['endpoints'][0],c['mt5_pool']['endpoints'][0])
         fake.symbol_info.assert_called_once_with('XAUUSD.s')
         fake.order_send.assert_not_called();fake.order_check.assert_not_called();fake.order_calc_margin.assert_not_called()
+    def test_third_terminal_check_uses_only_its_path_and_applies_only_its_identity(self):
+        c=config(3);e=c['mt5_pool']['endpoints'][2]
+        e.update(account='',server='',portable=True);server.write_config(c)
+        probe=dict(connected=True,identity_matches=True,endpoint_ready=True,blockers=[],
+                   identity=dict(account='333',server='Third'),symbol=dict(name='XAUUSD'))
+        with patch.object(server,'run_probe',return_value=probe) as run:
+            code,result=self.request('/api/mt5/pool/check',dict(expected_pair_id=c['pair']['id'],endpoint_id='t3'))
+        self.assertEqual(code,200,result);self.assertTrue(result['applied'])
+        settings=run.call_args.args[0]
+        self.assertEqual(settings['terminal_path'],e['terminal_path'])
+        self.assertTrue(settings['portable']);self.assertTrue(settings['require_terminal_path'])
+        saved=server.load_config()['mt5_pool']['endpoints']
+        self.assertEqual(saved[:2],c['mt5_pool']['endpoints'][:2])
+        self.assertEqual(saved[2]['account'],'333');self.assertEqual(saved[2]['server'],'Third')
+
     def test_incomplete_endpoint_validation_does_not_apply_identity(self):
         c=self.install();e=c['mt5_pool']['endpoints'][0]
         for extra in ({},{'endpoint_ready':False},{'endpoint_ready':True,'blockers':['权限未开启']}):

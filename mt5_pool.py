@@ -9,13 +9,14 @@ import threading
 import time
 from types import SimpleNamespace
 
-from mt5_pool_config import (candidates, clean_pool, endpoint_ref, endpoint_settings, fingerprint)
+from mt5_pool_config import (candidates, clean_pool, endpoint_ref, endpoint_settings, fingerprint, RULE_FIELDS)
 from pair_instruments import equal_lot_plan, pair_info, position_side, direction_quote
 from trading_config import pair_key
 from trading_engine import stamp, valid_group_quote
 from trading_brokers import Terminal, PaperBroker
 from market_push import TickFreshness
 from execution_latency import LatencyStats
+from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from native_pair import NativePairBroker, NativePairObserver
 import external_closes
 
@@ -313,22 +314,24 @@ class PoolOwner:
         return (not h.get('error') and 0<=stamp()-h.get('checked_ms',0)<=5000 and h.get('snapshot')
                 and endpoint_exposure_matches(self.runtime.engine,e,h['snapshot']))
     def block(self,ctx,direction):
+        return self.block_info(ctx,direction)[1]
+    def block_info(self,ctx,direction):
         r=self.runtime;c=ctx.config;lots=c['strategy']['mt5_lots']
         for leg,e in c['pair']['endpoints'].items():
             held=sum(r.engine.amounts(g)[l] for g,l in owned_on(r.engine,e))
-            if held+lots>e['max_lots']+1e-8:return e['name']+' 手数额度不足'
+            if held+lots>e['max_lots']+1e-8:return 'TERMINAL_QUOTA',e['name']+' 手数额度不足'
             if self.config['execution']['mode']=='paper':continue
-            if not self._health_matches(e):return e['name']+' 等待有效账户/持仓核验'
+            if not self._health_matches(e):return 'ACCOUNT_UNVERIFIED',e['name']+' 等待有效账户/持仓核验'
             h=self.health[e['id']];snap=h['snapshot'];account=snap.get('account',{})
             if account.get('currency')!='USD' or account.get('margin_mode')!=2 or not snap.get('allowed'):
-                return e['name']+' 账户或自动交易权限不符'
+                return 'PERMISSION',e['name']+' 账户或自动交易权限不符'
             side=position_side({'pair':c['pair'],'direction':direction},leg)
             margin=h['margins'].get(side,{})
             required=margin.get('required');available=margin.get('available')
             if (not all(isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v) for v in (required,available))
-                    or required<=0 or required>available):return e['name']+' 保证金不足或尚未核验'
-        return ''
-    def rank(self,quotes):
+                    or required<=0 or required>available):return 'MARGIN',e['name']+' 保证金不足或尚未核验'
+        return '', ''
+    def rank(self,quotes,*,observe=False,recovery=False):
         rows=[]
         for edge,ctx in self.contexts.items():
             c=ctx.config;q=quotes.get(edge);s=c['strategy']
@@ -336,19 +339,19 @@ class PoolOwner:
                 projected=direction_quote(q,dict(pair=c['pair'],direction=direction)) if q else None
                 threshold=s['entry_spread_usd'] if direction=='forward' else -s.get('entry_lower_usd',-5)
                 enabled=s.get('direction_mode','auto') in ('auto',direction)
-                reason=''
-                if not enabled:reason='此方向已关闭'
-                elif not valid_group_quote(q,pair_key(c),s):reason='等待新鲜同步报价'
-                elif any(g.get('direction','forward')!=direction for g in ctx.engine.active()):reason='此终端对已有相反方向持仓'
-                elif projected['entry']<threshold:reason='未到独立开仓阈值'
-                else:reason=self.block(ctx,direction)
+                code='';reason=''
+                if not enabled:code,reason='DIRECTION_DISABLED','此方向已关闭'
+                elif not valid_group_quote(q,pair_key(c),s):code,reason='QUOTE_INVALID','等待新鲜同步报价'
+                elif any(g.get('direction','forward')!=direction for g in ctx.engine.active()):code,reason='OPPOSITE_POSITION','此终端对已有相反方向持仓'
+                elif projected['entry']<threshold:code,reason='WAIT_THRESHOLD','未到独立开仓阈值'
+                else:code,reason=self.block_info(ctx,direction)
                 if not reason:
                     active=self.runtime.engine.active()
-                    if self.runtime.engine.state.get('recovery'):reason='等待恢复对账'
-                    elif any(g['status']!='open' for g in active):reason='等待未完成或异常交易组核对'
-                    elif len(active)>=s['max_groups']:reason='全池最大组数已用满'
-                    elif sum(g['lots'] for g in active)+ctx.plan['lots']>s['max_total_lots']+1e-9:reason='全池总手数额度不足'
-                    elif stamp()-self.runtime.engine.state['last_open_ms']<s['cooldown_seconds']*1000:reason='开仓冷却中'
+                    if self.runtime.engine.state.get('recovery'):code,reason='RECOVERY_PENDING','等待恢复对账'
+                    elif any(g['status']!='open' for g in active):code,reason='ORDER_PENDING','等待未完成或异常交易组核对'
+                    elif len(active)>=s['max_groups']:code,reason='GROUP_LIMIT','全池最大组数已用满'
+                    elif sum(g['lots'] for g in active)+ctx.plan['lots']>s['max_total_lots']+1e-9:code,reason='LOTS_LIMIT','全池总手数额度不足'
+                    elif stamp()-self.runtime.engine.state['last_open_ms']<s['cooldown_seconds']*1000:code,reason='COOLDOWN','开仓冷却中'
                 gross=projected['entry'] if projected else None
                 # Prospective round trip commissions; rebate remains an estimate.
                 from commission_reference import fee_rate
@@ -360,11 +363,18 @@ class PoolOwner:
                 endpoints=c['pair']['endpoints'];sell='binance' if direction=='forward' else 'mt5';buy='mt5' if sell=='binance' else 'binance'
                 rows.append(dict(edge=edge,key=pair_key(c),direction=direction,buy=endpoints[buy]['name'],sell=endpoints[sell]['name'],
                     spread=gross,threshold=threshold,estimated_roundtrip_cost=fee,score=gross-fee if gross is not None else None,
-                    ready=not reason,reason=reason or '报价及账户条件满足',selected=False))
+                    ready=not reason,reason=reason or '报价及账户条件满足',reason_code=code or 'CANDIDATE_READY',selected=False))
         rows.sort(key=lambda x:(not x['ready'],-(x['score'] if x['score'] is not None else -1e20),x['edge'],x['direction']))
         winner=next((x for x in rows if x['ready']),None)
         if winner:winner['selected']=True
         self.ranking=rows
+        if observe:
+            for row in rows:
+                code=('RECOVERY_PENDING' if recovery else 'ENTRY_PAUSED' if not self.runtime.engine.state.get('enabled') else
+                      row['reason_code'] if not row['ready'] else 'OTHER_CANDIDATE' if not row['selected'] else None)
+                if code:
+                    self.runtime.engine.observe_entry(self.contexts[row['edge']].config,quotes.get(row['edge']),code,
+                                                      direction=row['direction'],stage='pool_rank')
         return winner
 
 
@@ -418,6 +428,7 @@ class PoolRuntime:
                 self._restore_push_bridge()
                 self.position_report=None;self.external_close_status=None;self.last_error=''
                 self.latency.reset(c['execution']['mode'])
+                PROCESS_ENTRY_OBSERVATIONS.reset(c['execution']['mode'])
                 for e in owner.endpoints:owner.pump.ingest(e,initial[e['id']])
                 self.quote=owner.pump.read()[0]
                 owner.start();self.connection_attempt.update(state='connected',stage='终端池已连接',elapsed_ms=round((time.monotonic()-self._connection_started)*1000))
@@ -443,12 +454,14 @@ class PoolRuntime:
         return direction_quote(book,dict(pair=self.config['pair'],direction=q.get('_spread_direction','forward'))) if book else None
     def _pool_entry_guard(self,q,threshold):
         ctx=next((c for c in self.pool.contexts.values() if pair_key(c.config)==q['key']),None)
-        if not ctx:return False
+        if not ctx:
+            self.engine.entry_preflight_detail=dict(state='waiting',reason='等待有效终端对',reason_code='ACCOUNT_UNVERIFIED')
+            return False
         direction=q.get('_spread_direction','forward')
         limits={**ctx.config['strategy'],'max_quote_age_ms':min(250,ctx.config['strategy']['max_quote_age_ms'])}
-        reason='' if valid_group_quote(q,pair_key(ctx.config),limits) else '等待更新的双边执行报价'
-        reason=reason or self.pool.block(ctx,direction)
-        self.engine.entry_preflight_detail=dict(state='waiting' if reason else 'ready',reason=reason)
+        code,reason=('', '') if valid_group_quote(q,pair_key(ctx.config),limits) else ('EXECUTION_QUOTE_STALE', '等待更新的双边执行报价')
+        if not reason:code,reason=self.pool.block_info(ctx,direction)
+        self.engine.entry_preflight_detail=dict(state='waiting' if reason else 'ready',reason=reason,reason_code=code)
         return not reason
     def _pool_poll(self):
         prepared=time.monotonic();latency=getattr(self,'latency',None)
@@ -465,10 +478,11 @@ class PoolRuntime:
         self.quote=quotes.get(owner.chart_key)
         if latency:latency.record('pool_prepare_ms',(time.monotonic()-prepared)*1000)
         if self.config['execution']['mode']=='live' and not self.reconciled:
+            owner.rank(quotes,observe=True,recovery=True)
             for edge,ctx in owner.contexts.items():self.engine.observe_exit_wait(ctx.config,quotes.get(edge),'RECOVERY_PENDING')
             return
         ranked=time.monotonic()
-        try:winner=owner.rank(quotes)
+        try:winner=owner.rank(quotes,observe=True)
         finally:
             if latency:latency.record('pool_rank_ms',(time.monotonic()-ranked)*1000)
         self.engine.entry_candidate_key=winner['key'] if winner else None
@@ -483,6 +497,8 @@ class PoolRuntime:
         if winner and len(self.engine.state['orders'])==orders_before:
             ctx=owner.contexts[winner['edge']]
             self._pool_tick(ctx,quotes[winner['edge']])
+        elif winner:
+            self.engine.observe_entry(owner.contexts[winner['edge']].config,quotes.get(winner['edge']),'EXIT_PROCESSING',direction=winner['direction'])
     def _pool_tick(self,ctx,q):
         latency=getattr(self,'latency',None)
         if latency:latency.quote(q,stamp())
@@ -529,4 +545,4 @@ class PoolRuntime:
                 remaining_lots=max(0,e['max_lots']-sum(self.engine.amounts(g)[leg] for g,leg in owned_on(self.engine,e)))))
         return dict(endpoints=endpoints,candidates=copy.deepcopy(owner.ranking),chart_pair=owner.chart_key,
                     chart_strategy=copy.deepcopy(owner.contexts[owner.chart_key].config['strategy']),
-                    pairs=[dict(id=edge,name=ctx.config['pair']['name']) for edge,ctx in owner.contexts.items()])
+                    pairs=[dict(id=edge,name=ctx.config['pair']['name'],rules={k:ctx.config['strategy'][k] for k in RULE_FIELDS if k in ctx.config['strategy']}) for edge,ctx in owner.contexts.items()])

@@ -1,4 +1,5 @@
 import copy
+import ntpath
 import unittest
 from unittest.mock import patch
 
@@ -22,9 +23,10 @@ class NativePoolProbeTests(unittest.TestCase):
 
     def inspect(self, index=0, **changes):
         settings = endpoint_probe_settings(self.config, self.config['mt5_pool']['endpoints'][index])
+        self.fake.terminal.path = changes.pop('actual_path', ntpath.dirname(settings['terminal_path']))
         with patch.object(connector.Path, 'is_file', return_value=True):
             result = connector.inspect_terminal({**settings, **changes}, self.fake)
-        self.assertTrue(self.fake.closed)
+        if changes.get('terminal_path') != '': self.assertTrue(self.fake.closed)
         self.fake.order_send.assert_not_called()
         self.fake.order_check.assert_not_called()
         self.fake.order_calc_margin.assert_not_called()
@@ -45,6 +47,34 @@ class NativePoolProbeTests(unittest.TestCase):
                 self.fake.symbols_get.assert_not_called()
                 self.assertEqual(self.fake.order_calc_profit.call_count, 4)
                 self.assertFalse(result['real_order_enabled'])
+
+    def test_wrong_actual_directory_blocks_before_reading_symbols(self):
+        result = self.inspect(actual_path=r'C:\MT5-previous')
+        self.assertFalse(result['connected'])
+        self.assertEqual(result['code'], 'TERMINAL_MISMATCH')
+        self.assertFalse(result['terminal_binding']['path_matches'])
+        self.assertEqual(result['terminal_binding']['actual_path'], r'C:\MT5-previous')
+        self.fake.symbol_info.assert_not_called()
+        self.fake.symbols_get.assert_not_called()
+
+    def test_missing_pool_path_never_auto_discovers_an_old_terminal(self):
+        from unittest.mock import Mock
+        self.fake.initialize = Mock(return_value=True)
+        result = self.inspect(terminal_path='')
+        self.assertEqual(result['code'], 'TERMINAL_PATH')
+        self.fake.initialize.assert_not_called()
+
+    def test_explicit_portable_option_and_failed_initialization_diagnostics(self):
+        from unittest.mock import Mock
+        self.fake.initialize = Mock(return_value=False)
+        self.fake.last_error = Mock(return_value=(-10001, 'private platform text'))
+        result = self.inspect(portable=True)
+        self.assertEqual(result['code'], 'INITIALIZE_FAILED')
+        self.assertIn('本机通信发送失败', result['message'])
+        self.assertNotIn('private platform text', str(result))
+        self.fake.initialize.assert_called_once_with(self.config['mt5_pool']['endpoints'][0]['terminal_path'], timeout=10000, portable=True)
+        self.assertTrue(result['terminal_binding']['portable'])
+        self.fake.symbol_info.assert_not_called()
 
     def test_probe_settings_keep_endpoint_identity_lots_mode_and_worker_scope(self):
         before = copy.deepcopy(self.config)

@@ -225,22 +225,38 @@ class NativeMT5FillTests(unittest.TestCase):
         self.assertEqual(r['confirmation']['filled_lots'],.02)
         self.assertEqual(r['confirmation']['deal_lots'],.01)
 
-    def run_worker(self, order, command='submit'):
+    def run_worker(self, order, command='submit', settings=None, terminal=None):
         self.mt.TRADE_RETCODE_DONE=10009;self.mt.TRADE_RETCODE_DONE_PARTIAL=10010
         self.mt.ORDER_FILLING_IOC=1;self.mt.ORDER_FILLING_FOK=0
         self.mt.ORDER_TYPE_BUY=0;self.mt.ORDER_TYPE_SELL=1
         self.mt.TRADE_ACTION_DEAL=1;self.mt.ORDER_TIME_GTC=0
         self.mt.account_info.return_value=NS(login=123,server='TEST',trade_allowed=True,trade_expert=True,margin_free=1000)
-        self.mt.terminal_info.return_value=NS(connected=True,trade_allowed=True,tradeapi_disabled=False)
+        self.mt.terminal_info.return_value=terminal or NS(connected=True,trade_allowed=True,tradeapi_disabled=False)
         self.mt.symbol_info_tick.return_value=NS(ask=4000,bid=3999.9)
         self.mt.order_check.return_value=NS(retcode=0);self.mt.order_send.return_value=self.ack
-        messages=[dict(command='init',settings=dict(account='123',server='TEST',symbol='XAUUSD'),magic=42),
+        messages=[dict(command='init',settings=dict(account='123',server='TEST',symbol='XAUUSD',**(settings or {})),magic=42),
                   dict(command=command,order=order,**({'lots':.01} if command=='margin' else {}))]
         output=io.StringIO()
         with patch.dict(sys.modules,{'MetaTrader5':self.mt}),patch('sys.stdin',io.StringIO(
                 '\n'.join(json.dumps(x) for x in messages))),patch('sys.stdout',output):
             worker_main()
         return [json.loads(x) for x in output.getvalue().splitlines()][-1]
+
+    def test_pool_worker_rejects_wrong_directory_even_with_matching_account(self):
+        terminal=NS(connected=True,path=r'C:\wrong',trade_allowed=True,tradeapi_disabled=False)
+        result=self.run_worker(self.o,settings=dict(terminal_path=r'C:\third\terminal64.exe',require_terminal_path=True),terminal=terminal)
+        self.assertFalse(result['ok']);self.assertIn('目录与所填路径不一致',result['error'])
+        self.mt.order_send.assert_not_called();self.mt.order_check.assert_not_called()
+        self.mt.symbol_select.assert_not_called()
+
+    def test_pool_worker_uses_exact_program_and_portable_without_extra_platform_reads(self):
+        terminal=NS(connected=True,path=r'C:\third',data_path=r'C:\third',trade_allowed=True,tradeapi_disabled=False)
+        result=self.run_worker(self.o,settings=dict(terminal_path=r'C:\third\terminal64.exe',require_terminal_path=True,portable=True),terminal=terminal)
+        self.assertTrue(result['ok'],result)
+        self.mt.initialize.assert_called_once_with(r'C:\third\terminal64.exe',timeout=10000,portable=True)
+        self.assertEqual(self.mt.terminal_info.call_count,2)  # existing init and submit identity checks
+        self.assertEqual(self.mt.account_info.call_count,2)
+        self.mt.order_send.assert_called_once()
 
     def test_actual_worker_json_recovers_malformed_success_without_losing_ticket(self):
         r=self.run_worker(self.o)

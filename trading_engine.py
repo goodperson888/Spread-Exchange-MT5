@@ -72,6 +72,11 @@ class Engine:
         observer = getattr(self, 'exit_observations', None)
         if observer is not None: observer.observe(g, direction_quote(q,g), code, **evidence)
 
+    def observe_entry(self, c, q, code, **evidence):
+        observer = getattr(self, 'entry_observations', None)
+        if observer is not None:
+            observer.observe(c, q, code, enabled=self.state.get('enabled', False), **evidence)
+
     def observe_exit_wait(self, c, q, code):
         if getattr(self, 'exit_observations', None) is None: return
         for g in self.active():
@@ -670,6 +675,7 @@ class Engine:
         guard=getattr(self, 'entry_preflight', None)
         if guard and not guard(q, threshold):
             detail=getattr(self, 'entry_preflight_detail', {})
+            self.observe_entry(c,q,detail.get('reason_code') or 'PREFLIGHT_BLOCKED',direction=direction,stage='preflight',threshold=-threshold if direction=='reverse' else threshold)
             data={'threshold':threshold, 'reason':detail.get('reason') or self.state.get('alarm') or '等待开仓预检通过',
                   'state':detail.get('state','waiting')}
             previous=getattr(self, '_preflight_log', None)
@@ -679,6 +685,7 @@ class Engine:
                 self._preflight_log=(data,checked)
             return
         self._preflight_log=None
+        self.observe_entry(c,q,'ENTRY_SUBMIT',direction=direction,stage='preflight',threshold=-threshold if direction=='reverse' else threshold)
         first_leg='binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5'
         second_leg='mt5' if first_leg=='binance' else 'binance'
         g=dict(id=uuid.uuid4().hex[:12],status='opening',opened_ms=now,qty=p['qty'],lots=p['lots'],contract=p['contract'],
@@ -977,10 +984,12 @@ class Engine:
         self.reconcile_pending(c)
         if self.state['recovery']:
             self.observe_exit_wait(c,q,'RECOVERY_PENDING')
+            self.observe_entry(c,q,'RECOVERY_PENDING')
             return
         if not valid_quote(q,c):
             if self.active(): self.state['alarm']='报价过期、时钟偏差或品种不符，等待有效行情；已有仓位仍未平仓'
             self.observe_exit_wait(c,q,'QUOTE_UNAVAILABLE')
+            self.observe_entry(c,q,'QUOTE_INVALID')
             return
         market_quote=q
         # A pool shares the journal and global capacity, but every group's
@@ -1091,6 +1100,18 @@ class Engine:
         if measure: self._latency('decision_ms', (decision_elapsed+time.monotonic()-started)*1000)
         if should_open:
             self.open(c,p,q,grid_index=grid_index,min_entry_spread=open_threshold,direction=direction)
+        elif getattr(self, 'entry_observations', None) is not None:
+            code = ('ENTRY_PAUSED' if not self.state['enabled'] else
+                    'OTHER_CANDIDATE' if getattr(self,'entry_candidate_key',q['key'])!=q['key'] else
+                    'EXIT_PROCESSING' if exit_event else 'ORDER_PENDING' if any(g['status']!='open' for g in all_active) else
+                    'GRID_LIMIT' if not grid_allowed else 'GROUP_LIMIT' if len(active)>=s['max_groups'] else
+                    'LOTS_LIMIT' if sum(g['lots'] for g in all_active)+p['lots']>s['max_total_lots']+1e-9 else
+                    'DIRECTION_OR_THRESHOLD' if direction is None else
+                    'COOLDOWN' if stamp()-self.state['last_open_ms']<s['cooldown_seconds']*1000 else
+                    'WAIT_THRESHOLD' if entry_q['entry']<open_threshold else
+                    'ROLLOVER_GUARD' if rollover.get('blocked') else 'DIRECTION_OR_THRESHOLD')
+            self.observe_entry(c,q,code,direction=direction,
+                               threshold=(-open_threshold if direction=='reverse' else open_threshold) if direction else None)
 
     @staticmethod
     def target(g, entry, exit_spread):

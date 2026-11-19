@@ -62,7 +62,8 @@ def validate(c):
         if mode not in ('forward','reverse','auto'): raise ValueError('MT5 组合方向模式无效')
         if isinstance(lower,bool) or not isinstance(lower,(int,float)) or not math.isfinite(lower) or not -100000<=lower<=100000:
             raise ValueError('反向开仓下限必须在 -100000～100000 之间')
-        if mode=='auto' and lower>=s['entry_spread_usd']: raise ValueError('自动双向的下限必须小于上限')
+        if mode=='auto' and lower>=s['entry_spread_usd']:
+            raise ValueError(f"自动双向的下限必须小于上限：买 A 卖 B 的下限 {lower:g}，须小于卖 A 买 B 的上限 {s['entry_spread_usd']:g}。允许负数；方向表示买卖顺序，与价差正负无关。保存失败，当前生效参数未改变。")
         a,b=short_symbol(c),c['mt5']['symbol']
         if not all(isinstance(x,str) and re.fullmatch(r'[\w.#+/-]{1,40}',x) for x in (a,b)) or (a==b and not c.get('pair',{}).get('endpoints')):
             raise ValueError('请填写两个不同的 MT5 完整品种名')

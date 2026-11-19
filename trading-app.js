@@ -901,14 +901,14 @@
     const active=(last?.state?.groups||[]).filter(g=>g.status!=='closed'&&(!last?.pool||g.key===last?.quote?.key));
     const directions=new Set(active.map(g=>g.direction||'forward'));
     const held=directions.size===1?[...directions][0]:null;
-    const choice=el('chart-focus').value||'auto';
+    const choice=el('chart-focus').value||'midpoint';
     // One physical quote side for the entire window, never a per-tick splice
     // of the nearest direction. Existing positions take priority in auto view.
     const field=choice==='reverse'?'exit':choice==='forward'?'entry':
       held?(held==='reverse'?'entry':'exit'):(mode==='reverse'?'exit':'entry');
     const names={entry:held==='reverse'?'反向退出（卖 A／买 B）':'正向入场（卖 A／买 B）',
       exit:held==='forward'?'正向退出（买 A／卖 B）':'反向入场（买 A／卖 B）'};
-    return {mode,held,field,names,both:choice==='both',active};
+    return {mode,held,field,names,both:choice==='both',midpoint:choice==='midpoint',active};
   }
   function nativeEntryDistance(direction,quote) {
     const settings=last?.strategy_runtime||{},mode=settings.direction_mode||'forward';
@@ -920,9 +920,10 @@
     const oldest=Math.min(quote.mt5?.observed_ms||quote.mt5?.time_ms||quote.time_ms,quote.binance?.observed_ms||quote.binance?.time_ms||quote.time_ms);
     if(quote.valid===false||Number.isFinite(oldest)&&Date.now()-oldest>(settings.max_quote_age_ms||3000))return {detail:'报价无效或已过期，仅供参考',reached:false};
     const remaining=Math.max(0,upper?threshold-value:value-threshold);
-    const held=new Set((last?.state?.groups||[]).filter(g=>g.status!=='closed').map(g=>g.direction||'forward'));
+    const held=new Set((last?.state?.groups||[]).filter(g=>g.status!=='closed'&&(!last?.pool||g.key===quote.key)).map(g=>g.direction||'forward'));
     const allowed=(mode==='auto'||mode===direction)&&(!held.size||(held.size===1&&held.has(direction)));
-    const state=!allowed?'此方向当前未启用或被持仓锁定':!last.state?.enabled?'新开仓未启用':'仍须通过冷却、额度和风控检查';
+    const candidate=last?.pool?.candidates?.find(row=>row.edge===last.pool.chart_pair&&row.direction===direction);
+    const state=!allowed?'此方向当前未启用或被持仓锁定':!last.state?.enabled?'新开仓未启用':candidate&&!candidate.ready?'当前候选阻拦：'+candidate.reason:'仍须通过冷却、额度和下单前复查';
     return {reached:remaining===0&&allowed&&!!last.state?.enabled,
       detail:`${upper?'≥ 上限':'≤ 下限'} ${n(threshold)} · ${remaining===0?'已到价':'还差 '+n(remaining)}；${state}`};
   }
@@ -943,7 +944,8 @@
       });
     }
     const native=isNative(last),view=native?nativeChartView():null;
-    const showEntry=!native||view.both||view.field==='entry',showExit=!native||view.both||view.field==='exit';
+    const midpoint=native&&view.midpoint;
+    const showEntry=!native||!midpoint&&(view.both||view.field==='entry'),showExit=!native||!midpoint&&(view.both||view.field==='exit');
     el('chart-focus-controls').hidden=!native;
     const dynamicEnabled=native&&Boolean(last?.strategy_runtime?.dynamic_reference_enabled);
     const dynamicLinesControl=el('chart-dynamic-lines-control');
@@ -967,17 +969,17 @@
     const threshold=Number.isFinite(effective)?effective:null;
     if(native) {
       const forward=nativeEntryDistance('forward',latest),backward=nativeEntryDistance('reverse',latest);
-      const focused=view.field==='entry'?entries:exits;
+      const focused=midpoint?samples.filter(x=>Number.isFinite(x.entry)&&Number.isFinite(x.exit)).map(x=>(x.entry+x.exit)/2):view.field==='entry'?entries:exits;
       const width=Number.isFinite(latest?.entry)&&Number.isFinite(latest?.exit)?latest.exit-latest.entry:null;
       el('spread-stats').innerHTML=[
         ['正向入场 · 卖 A／买 B',latest?.entry,forward.detail,forward.reached],
         ['反向入场 · 买 A／卖 B',latest?.exit,backward.detail,backward.reached],
         ['两侧报价差',width,'两腿买卖点差之和，未含佣金'],
-        ['窗口'+(view.field==='entry'?'卖 A／买 B':'买 A／卖 B')+'均值',average(focused),'仅本机采样；历史参考另列']
+        ['窗口'+(midpoint?'中间价差':view.field==='entry'?'卖 A／买 B':'买 A／卖 B')+'均值',average(focused),'仅本机采样；历史参考另列']
       ].map(([label,value,detail,reached])=>`<div class="stat" data-reached="${!!reached}"><span>${escape(label)}</span><strong>${Number.isFinite(value)?value.toFixed(3):'—'}</strong><small>${escape(detail)}</small></div>`).join('');
       const otherTargets=targetMarks.some(x=>x.field!==view.field);
-      text('chart-focus-description',`${view.both?'双线对照：上限只比较正向入场，下限只比较反向入场。':'当前显示'+view.names[view.field]+'，'+(view.field==='entry'?'A Bid−B Ask':'A Ask−B Bid')+'。'} 切换视角仅改变图表，不改变交易方向。${view.held?'已有'+(view.held==='reverse'?'反向':'正向')+'持仓，自动关注优先显示退出报价；平仓目标仅表示价差条件，仍须满足本组收益规则。':''}${!view.both&&otherTargets?' 本视角不含另一侧平仓目标，可切回自动关注查看。':''}`);
-      el('spread-chart').setAttribute?.('aria-label',view.both?'正反向可成交价差对照图':view.names[view.field]+'可成交价差历史图');
+      text('chart-focus-description',`${midpoint?'中间价差 = 两侧可成交价差的均值；淡色带下沿 = 卖 A／买 B，上沿 = 买 A／卖 B。正向须下沿 ≥ 上限，反向须上沿 ≤ 下限；主线碰线不代表可以开仓，带宽为两腿点差之和，未含佣金。':view.both?'双线对照：上限只比较正向入场（卖 A 买 B），下限只比较反向入场（买 A 卖 B）。':'当前显示'+view.names[view.field]+'，'+(view.field==='entry'?'A Bid−B Ask':'A Ask−B Bid')+'。'} 方向表示买卖顺序，与价差正负无关。切换视角仅改变图表，不改变交易方向。${view.held?'已有'+(view.held==='reverse'?'反向':'正向')+'持仓，'+(midpoint?'平仓目标标注了应比较的带边；':'自动关注优先显示退出报价；')+'平仓目标仅表示价差条件，仍须满足本组收益规则。':''}${!midpoint&&!view.both&&otherTargets?' 本视角不含另一侧平仓目标，可切回自动关注查看。':''}`);
+      el('spread-chart').setAttribute?.('aria-label',midpoint?'中间价差与可成交价差带历史图':view.both?'正反向可成交价差对照图':view.names[view.field]+'可成交价差历史图');
     } else {
       el('spread-stats').innerHTML=[['当前入场',latest?.entry],['当前退出',latest?.exit],['开仓阈值',threshold],['窗口入场均值',average(entries)],['价差范围',all.length?`${Math.min(...all).toFixed(3)} ～ ${Math.max(...all).toFixed(3)}`:null]].map(([label,value])=>`<div class="stat"><span>${label}</span><strong>${typeof value==='number'?value.toFixed(3):value||'—'}</strong></div>`).join('');
     }
@@ -1011,16 +1013,21 @@
       const raw=Number(row[field]);
       return [row.time_ms,ready&&Number.isFinite(raw)?transform(raw):null];
     }):[];
-    const dynamicEntryReference=dynamicData('reference_entry',x=>x,showDynamicLines&&showEntry);
-    const dynamicEntryThreshold=dynamicData('reference_entry',x=>x+Number(runtime.entry_deviation_usd||0),showDynamicLines&&showEntry);
-    const dynamicExitReference=dynamicData('reference_exit',x=>x,showDynamicLines&&showExit);
-    const dynamicExitThreshold=dynamicData('reference_exit',x=>x-Number(runtime.entry_deviation_usd||0),showDynamicLines&&showExit);
+    const dynamicEntryReference=dynamicData('reference_entry',x=>x,showDynamicLines&&(showEntry||midpoint));
+    const dynamicEntryThreshold=dynamicData('reference_entry',x=>x+Number(runtime.entry_deviation_usd||0),showDynamicLines&&(showEntry||midpoint));
+    const dynamicExitReference=dynamicData('reference_exit',x=>x,showDynamicLines&&(showExit||midpoint));
+    const dynamicExitThreshold=dynamicData('reference_exit',x=>x-Number(runtime.entry_deviation_usd||0),showDynamicLines&&(showExit||midpoint));
     const hasDynamicEntry=dynamicEntryReference.some(x=>Number.isFinite(x[1])),hasDynamicExit=dynamicExitReference.some(x=>Number.isFinite(x[1]));
     const entryName=native?view.names.entry:'入场（卖币安Bid / 买MT5Ask）';
     const exitName=native?view.names.exit:'退出（买回币安Ask / 卖MT5Bid）';
     const entryMarks=native?(showEntry?[...thresholdLine,...targetMarks.filter(x=>x.field==='entry').map(x=>x.mark)]:[]):[...thresholdLine,...marks];
     const exitMarks=native&&showExit?[...lowerLine,...targetMarks.filter(x=>x.field==='exit').map(x=>x.mark)]:[];
-    const visibleBounds=[...entryMarks,...exitMarks].map(x=>x.yAxis).filter(Number.isFinite);
+    const midpointMarks=midpoint?[...thresholdLine.map(m=>({...m,label:{...m.label,formatter:`下沿 ≥ ${latestUpper.toFixed(2)}`}})),...lowerLine.map(m=>({...m,label:{...m.label,formatter:`上沿 ≤ ${latestLower.toFixed(2)}`}})),...targetMarks.map(x=>({...x.mark,name:x.mark.name+(x.field==='entry'?' · 下沿':' · 上沿')}))]:[];
+    const bandRows=midpoint?lines.map(x=>{
+      const valid=Number.isFinite(x.entry)&&Number.isFinite(x.exit)&&x.exit>=x.entry;
+      return {time:x.time_ms,low:valid?x.entry:null,width:valid?x.exit-x.entry:null,middle:valid?(x.entry+x.exit)/2:null};
+    }):[];
+    const visibleBounds=[...entryMarks,...exitMarks,...midpointMarks].map(x=>x.yAxis).filter(Number.isFinite);
     const axisBound=(extent,minimum)=>{
       const values=[extent.min,extent.max,...visibleBounds].filter(Number.isFinite);
       if(!values.length)return undefined;
@@ -1030,25 +1037,30 @@
     const lookup=native?new Map(lines.map(x=>[x.time_ms,x])):null;
     const tooltip={trigger:'axis',confine:true,valueFormatter:v=>Number.isFinite(v)?v.toFixed(3):'—'};
     if(native)tooltip.formatter=params=>{
-      const items=Array.isArray(params)?params:[params],point=items.find(p=>p.seriesId==='entry'||p.seriesId==='exit')||items[0];
+      const items=Array.isArray(params)?params:[params],point=items.find(p=>p.seriesId==='midpoint'||p.seriesId==='entry'||p.seriesId==='exit')||items[0];
       if(!point)return '';
       const at=point.value?.[0],sample=lookup.get(at),value=x=>Number.isFinite(x)?x.toFixed(3):'—';
       if(!sample)return escape(dateTime(at))+'<br>'+items.map(p=>escape(p.seriesName)+'：'+escape(value(p.value?.[1]))).join('<br>');
       const upper=dynamicEnabled&&sample.reference_ready!==false&&Number.isFinite(Number(sample.entry_threshold))?Number(sample.entry_threshold):last?.connected?last.strategy_runtime?.entry_spread_usd:null;
       const lower=dynamicEnabled&&sample.reference_ready!==false&&Number.isFinite(Number(sample.entry_lower_threshold))?Number(sample.entry_lower_threshold):last?.connected?last.strategy_runtime?.entry_lower_usd:null;
       const condition=(number,bound,sign)=>Number.isFinite(number)&&Number.isFinite(bound)?` · ${sign} ${value(bound)}：${(sign==='≥'?number>=bound:number<=bound)?'已到价':'未达到'}`:'';
-      return escape(dateTime(at))+'<br>'+escape(view.names.entry)+'：'+value(sample.entry)+(upperAllowed?condition(sample.entry,upper,'≥'):'')+
+      return escape(dateTime(at))+(midpoint?'<br>中间价差（参考）：'+value(Number.isFinite(sample.entry)&&Number.isFinite(sample.exit)?(sample.entry+sample.exit)/2:null):'')+'<br>'+escape(view.names.entry)+'：'+value(sample.entry)+(upperAllowed?condition(sample.entry,upper,'≥'):'')+
         '<br>'+escape(view.names.exit)+'：'+value(sample.exit)+(lowerAllowed?condition(sample.exit,lower,'≤'):'')+
         '<br>两侧报价差：'+value(Number.isFinite(sample.entry)&&Number.isFinite(sample.exit)?sample.exit-sample.entry:null)+
         '<br>仅表示当时报价条件；是否开仓还需模式、持仓及风控校验。';
     };
     const dynamicLegendNames=[...(hasDynamicEntry?['动态参考基线（正向）','动态入场上限']:[]),...(hasDynamicExit?['动态参考基线（反向）','动态入场下限']:[])];
-    const legendNames=[...(showEntry?[entryName]:[]),...(showExit?[exitName]:[]),...dynamicLegendNames,...(referenceLines.length?['历史参考（收盘价，点线）']:[]),...(opened.length?['策略开仓']:[]),...(closed.length?['策略平仓']:[])];
-    const legend={top:5,type:'scroll',...(native?{data:legendNames}:{})};
+    const legendNames=[...(midpoint?['中间价差（参考）','可成交价差带']:[]),...(showEntry?[entryName]:[]),...(showExit?[exitName]:[]),...dynamicLegendNames,...(referenceLines.length?['历史参考（收盘价，点线）']:[]),...(opened.length?['策略开仓']:[]),...(closed.length?['策略平仓']:[])];
+    const legend={top:5,type:'scroll',...(native?{data:legendNames.map(name=>name==='可成交价差带'?{name,icon:'roundRect',itemStyle:{color:'#cbdfe9',opacity:1},lineStyle:{opacity:0}}:name)}:{})};
     if(previousLegendSelection&&typeof previousLegendSelection==='object')legend.selected={...previousLegendSelection};
     chart.setOption({animation:false,legend,tooltip,grid:{left:75,right:native?25:120,top:70,bottom:80},xAxis:{type:'time',min:rangeStart,max:rangeEnd,minInterval:1000,axisPointer:{label:{formatter:params=>dateTime(params.value)}}},yAxis:{type:'value',scale:true,name:native?'价差 USD/报价单位':'价差 USD/盎司',...(native?{min:v=>axisBound(v,true),max:v=>axisBound(v,false),axisLabel:{formatter:v=>n(v)}}:{})},dataZoom:[{type:'inside',filterMode:'none',minValueSpan:1000,start,end},{type:'slider',filterMode:'none',minValueSpan:1000,bottom:15,start,end}],series:[
       {id:'entry',name:entryName,type:'line',showSymbol:false,connectNulls:false,data:showEntry?lines.map(x=>[x.time_ms,x.entry]):[],itemStyle:{color:'#246b92'},lineStyle:{width:2,type:'solid'},markArea:{silent:true,itemStyle:{color:'rgba(36,107,146,.07)'},data:[...(!native&&threshold!==null?[[{name:'正向开仓触发区',yAxis:threshold},{yAxis:'max'}]]:[]),...(showEntry?missing:[])]},markLine:{symbol:'none',silent:true,data:entryMarks,label:{formatter:'{b}: {c}',...(native?{position:'insideEndTop'}:{})}}},
-      {id:'exit',name:exitName,type:'line',showSymbol:false,connectNulls:false,data:showExit?lines.map(x=>[x.time_ms,x.exit]):[],itemStyle:{color:'#247b68'},lineStyle:{width:2,type:native&&!view.both?'solid':'dashed'},markArea:{silent:true,data:!showEntry?missing:[]},markLine:{symbol:'none',silent:true,data:exitMarks,label:{formatter:'{b}: {c}',...(native?{position:'insideEndTop'}:{})}}},
+      {id:'exit',name:exitName,type:'line',showSymbol:false,connectNulls:false,data:showExit?lines.map(x=>[x.time_ms,x.exit]):[],itemStyle:{color:'#247b68'},lineStyle:{width:2,type:native&&!view.both?'solid':'dashed'},markArea:{silent:true,data:!showEntry&&!midpoint?missing:[]},markLine:{symbol:'none',silent:true,data:exitMarks,label:{formatter:'{b}: {c}',...(native?{position:'insideEndTop'}:{})}}},
+      ...(native?[
+      {id:'band-base',name:'可成交价差带',type:'line',stack:'executable-band',stackStrategy:'all',showSymbol:false,connectNulls:false,silent:true,data:bandRows.map(x=>[x.time,x.low]),lineStyle:{opacity:0},itemStyle:{color:'#246b92',opacity:0},tooltip:{show:false},z:1},
+      {id:'band-width',name:'可成交价差带',type:'line',stack:'executable-band',stackStrategy:'all',showSymbol:false,connectNulls:false,silent:true,data:bandRows.map(x=>[x.time,x.width]),lineStyle:{opacity:0},itemStyle:{color:'#246b92'},areaStyle:{color:'rgba(36,107,146,.16)',origin:'auto'},tooltip:{show:false},z:1},
+      {id:'midpoint',name:'中间价差（参考）',type:'line',showSymbol:false,connectNulls:false,data:bandRows.map(x=>[x.time,x.middle]),itemStyle:{color:'#246b92'},lineStyle:{width:2},markArea:{silent:true,data:midpoint?missing:[]},markLine:{symbol:'none',silent:true,data:midpointMarks,label:{formatter:'{b}: {c}',position:'insideEndTop'}},z:3}
+      ]:[]),
       {id:'dynamic-entry-reference',name:'动态参考基线（正向）',type:'line',showSymbol:false,connectNulls:false,data:dynamicEntryReference,itemStyle:{color:'#c48b2b'},lineStyle:{width:1.5,type:'solid'},z:2},
       {id:'dynamic-entry-threshold',name:'动态入场上限',type:'line',showSymbol:false,connectNulls:false,data:dynamicEntryThreshold,itemStyle:{color:'#b75e24'},lineStyle:{width:1.5,type:'dashed'},z:2},
       {id:'dynamic-exit-reference',name:'动态参考基线（反向）',type:'line',showSymbol:false,connectNulls:false,data:dynamicExitReference,itemStyle:{color:'#8063a8'},lineStyle:{width:1.5,type:'solid'},z:2},

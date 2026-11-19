@@ -6,6 +6,7 @@ import math
 import ntpath
 import re
 from itertools import combinations
+from mt5_session import normalize_path
 
 RULE_FIELDS = ('entry_spread_usd', 'entry_lower_usd', 'direction_mode', 'take_contraction_usd',
                'target_mode', 'exit_spread_usd', 'require_net_profit', 'min_net_profit_usd',
@@ -16,6 +17,7 @@ RULE_FIELDS = ('entry_spread_usd', 'entry_lower_usd', 'direction_mode', 'take_co
 def fingerprint(e):
     fields=[ntpath.normcase(ntpath.normpath(str(e.get('terminal_path','')).strip())),
             str(e.get('account','')).strip(),str(e.get('server','')).strip(),str(e.get('symbol','')).strip()]
+    if e.get('portable') is True: fields.append('portable')
     return hashlib.sha256(json.dumps(fields,ensure_ascii=False).encode()).hexdigest()[:24]
 
 
@@ -42,7 +44,7 @@ def clean_pool(value, complete=False):
         if complete and (not e['terminal_path'] or not e['account'] or not e['server']):
             raise ValueError(e['name']+'：请填写终端路径、目标账号及服务器；可先检查读取身份')
         if e['account'] and not re.fullmatch(r'[0-9]{1,20}',e['account']): raise ValueError('MT5 账号应为数字')
-        path=ntpath.normcase(ntpath.normpath(e['terminal_path'])) if e['terminal_path'] else ''
+        path=normalize_path(e['terminal_path']) if e['terminal_path'] else ''
         account=(e['account'],e['server'])
         if path and path in paths: raise ValueError('不同 MT5 必须使用独立安装路径，不能重复连接同一终端')
         if all(account) and account in accounts: raise ValueError('不同终端不能使用同一账号及服务器')
@@ -54,6 +56,8 @@ def clean_pool(value, complete=False):
             if isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or not lo<=v<=hi:
                 raise ValueError(e['name']+'：手数额度、佣金或返佣无效')
             e[key]=float(v)
+        if type(row.get('portable',False)) is not bool: raise ValueError('便携模式设置无效')
+        e['portable']=row.get('portable',False)
         if type(row.get('fee_auto',True)) is not bool: raise ValueError('自动佣金设置无效')
         e['fee_auto']=row.get('fee_auto',True);endpoints.append(e)
     endpoints.sort(key=lambda e:e['id'])
@@ -70,7 +74,8 @@ def clean_pool(value, complete=False):
 
 def endpoint_settings(config, e):
     return {**config['mt5'],**{k:e[k] for k in ('terminal_path','account','server','symbol')},
-            'adapter':'native','pair_symbols':[e['symbol']]}
+            'adapter':'native','pair_symbols':[e['symbol']],
+            'require_terminal_path':True,'portable':e.get('portable',False)}
 
 
 def endpoint_probe_settings(config, e):
