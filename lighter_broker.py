@@ -259,22 +259,34 @@ class Lighter:
         self.opener=build_opener(ProxyHandler({'http':self.proxy_url,'https':self.proxy_url})) if self.proxy_url else build_opener()
 
     def public(self,path,params=None,base=BASE):
-        self.budget.take()
+        is_lighter=base==BASE
+        if is_lighter:self.budget.take()
+        if is_lighter:
+            stage={'/api/v1/orderBooks':'合约规格','/api/v1/orderBookOrders':'盘口',
+                   '/api/v1/candles':'历史行情','/api/v1/account':'账户'}.get(path,'公开')
+            source='Lighter '+stage;error_code='LIGHTER_PUBLIC'
+        elif base=='https://api.kraken.com':
+            source='Kraken USDC/USD 汇率';error_code='FX_PUBLIC'
+        else:
+            source='公开辅助';error_code='PUBLIC_AUXILIARY'
+        data=None
         try:
             with self.opener.open(Request(base+path+('?' +urlencode(params,doseq=True) if params else ''),
-                                          headers={'Accept':'application/json'}),timeout=5) as response:
+                                          headers={'Accept':'application/json','User-Agent':'GoldPairLocal/1.0'}),timeout=5) as response:
                 data=json.load(response)
-            if isinstance(data,dict) and data.get('code',200)!=200:raise ValueError('Lighter 返回错误状态')
+            if not isinstance(data,dict) or data.get('code',200)!=200:raise ValueError('接口返回错误格式或状态')
             return data
         except Exception as exc:
             status=getattr(exc,'code',None)
-            if status==429:self.budget.backoff()
+            if is_lighter and status==429:self.budget.backoff()
             try:
-                body=json.loads(exc.read(4096)) if hasattr(exc,'read') else {}
+                body=json.loads(exc.read(4096)) if hasattr(exc,'read') else data
             except Exception:body={}
-            if body.get('code')==20558:
+            if is_lighter and isinstance(body,dict) and body.get('code')==20558:
                 raise ApiError('LIGHTER_REGION','Lighter 返回地区限制（20558），请核对平台服务范围与账户资格',http_status=status) from None
-            raise ApiError('LIGHTER_PUBLIC',f'Lighter 公开接口读取失败'+(f'（HTTP {status}）' if isinstance(status,int) else ''),http_status=status) from None
+            reason=(f'HTTP {status}' if isinstance(status,int) else
+                    '响应格式无效' if isinstance(exc,(ValueError,TypeError)) else '网络连接失败')
+            raise ApiError(error_code,f'{source}接口读取失败（{reason}）',http_status=status) from None
 
     def sync(self):
         # The SDK signs account nonces rather than Binance recvWindow timestamps.
@@ -337,10 +349,21 @@ class Lighter:
 
     def usdt_usd(self):
         # Legacy engine field name; value explicitly means USDC/USD for Lighter.
-        r=self.public('/products/USDC-USD/ticker',base='https://api.exchange.coinbase.com')
-        value=float(decimal(r['price']))
-        if not .9<value<1.1:raise ValueError('USDC/USD 汇率异常')
-        return dict(value=value,time_ms=int(time.time()*1000),source='Coinbase USDC/USD',currency='USDC')
+        # Coinbase Exchange no longer has the USDC-USD product. Use a real
+        # USD order book rather than a nominal 1:1 conversion or USDC/USDT.
+        r=self.public('/0/public/Ticker',dict(pair='USDCUSD'),base='https://api.kraken.com')
+        try:
+            if r.get('error')!=[]:raise ValueError('汇率接口返回错误')
+            row=r['result']['USDCUSD']
+            if not isinstance(row,dict) or any(not isinstance(row.get(k),list) or not row[k] for k in ('a','b')):
+                raise ValueError('汇率盘口字段异常')
+            bid=decimal(row['b'][0]);ask=decimal(row['a'][0])
+            if not Decimal('.9')<bid<=ask<Decimal('1.1'):raise ValueError('汇率盘口异常')
+            value=float((bid+ask)/2)
+        except (KeyError,IndexError,TypeError,ValueError,ArithmeticError):
+            raise ValueError('Kraken USDC/USD 汇率盘口缺失或异常，请核对汇率设置') from None
+        return dict(value=value,time_ms=int(time.time()*1000),source='Kraken USDC/USD bid/ask midpoint',
+                    currency='USDC',time_basis='receipt_only')
 
     def sdk(self):
         with self.session_lock:
