@@ -1,19 +1,20 @@
 const $ = id => document.getElementById(id);
 const bindings = {
   mt5: {adapter:'mt5-adapter', symbol:'mt5-symbol', terminal_path:'terminal-path', mcp_url:'mcp-url', account:'account', server:'mt5-server'},
-  strategy: {entry_forward_confirmation_ticks:'entry-forward-confirm-ticks',entry_reverse_confirmation_ticks:'entry-reverse-confirm-ticks',entry_confirmation_decimals:'entry-confirm-decimals',mt5_lots:'lots', entry_spread_usd:'entry', take_contraction_usd:'take', max_groups:'max-groups', max_quote_age_ms:'max-age', max_clock_skew_ms:'max-clock-skew', max_unhedged_ms:'max-unhedged', max_slippage_usd:'slippage', unwind_slippage_usd:'unwind-slippage', entry_spread_slippage_usd:'entry-spread-slippage', grid_spacing_usd:'grid-spacing', grid_max_adds:'grid-adds'},
+  strategy: {exit_confirmation_ticks:'exit-confirm-ticks',entry_forward_confirmation_ticks:'entry-confirm-ticks',entry_reverse_confirmation_ticks:'entry-confirm-ticks',entry_confirmation_decimals:'entry-confirm-decimals',mt5_lots:'lots', entry_spread_usd:'entry', take_contraction_usd:'take', max_groups:'max-groups', max_quote_age_ms:'max-age', max_clock_skew_ms:'max-clock-skew', max_unhedged_ms:'max-unhedged', max_slippage_usd:'slippage', unwind_slippage_usd:'unwind-slippage', entry_spread_slippage_usd:'entry-spread-slippage', grid_spacing_usd:'grid-spacing', grid_max_adds:'grid-adds'},
   risk_alerts: {binance_warning_distance_percent:'risk-binance-warning',binance_danger_distance_percent:'risk-binance-danger',mt5_warning_margin_level_percent:'risk-mt5-warning',mt5_danger_margin_level_percent:'risk-mt5-danger'},
 };
 const DRAFT_KEY = 'GoldPairLocal.configDraft.v2';
 const LEGACY_DRAFT_KEY = 'GoldPairLocal.configDraft.v1';
-const SECRET_IDS = new Set(['trading-api-key','trading-api-secret','mt5-mcp-token']);
+const SECRET_IDS = new Set(['trading-api-key','trading-api-secret','mt5-mcp-token','lighter-private-key']);
 const dirtyFields = new Set();
 const dirtySecrets = new Set();
 const sectionFields = {
   mt5: new Set([...Object.values(bindings.mt5), 'mt5-mcp-token']),
+  lighter:new Set(['lighter-account-index','lighter-api-key-index','lighter-private-key','lighter-proxy']),
   binance: new Set(['symbol','recv-window','binance-proxy','trading-api-key','trading-api-secret']),
   execution: new Set(['exec-mode','entry-leg','entry-dispatch','mt5-quote-poll-ms','poll-ms','magic','close-retries']),
-  strategy: new Set([...Object.values(bindings.strategy),'entry-forward-confirm-mode','entry-reverse-confirm-mode','entry-spread-guard-on','grid-enabled','cooldown','max-total','exit-mode','target-mode','native-dynamic-reference','native-reference-window','native-entry-deviation',
+  strategy: new Set([...Object.values(bindings.strategy),'entry-confirm-mode','entry-spread-guard-on','grid-enabled','cooldown','max-total','exit-mode','target-mode','native-dynamic-reference','native-reference-window','native-entry-deviation',
     'absolute-exit','direction-mode','entry-lower','require-net','min-net','group-loss-on','group-loss','total-loss-on','total-loss','max-hold','rollover-guard-on','rollover-utc-hour','rollover-utc-minute','rollover-guard-minutes']),
   risk_alerts: new Set(Object.values(bindings.risk_alerts)),
 };
@@ -73,8 +74,9 @@ function formConfig() {
   return {
     mode:'paper', symbol:window.GoldPairPairs?.native({pair:window.GoldPairPairs.info()})?window.GoldPairPairs.info().short_symbol:value('symbol').toUpperCase(), mt5,
     risk_alerts:Object.fromEntries(Object.entries(bindings.risk_alerts).map(([key,id])=>[key,Number(value(id))])),
+    lighter:{account_index:value('lighter-account-index')===''?null:Number(value('lighter-account-index')),api_key_index:Number(value('lighter-api-key-index')||3),api_private_key:value('lighter-private-key'),proxy_url:value('lighter-proxy')},
     binance:{recv_window_ms:Number(value('recv-window')),proxy_url:value('binance-proxy'),api_key:value('trading-api-key'),api_secret:value('trading-api-secret')},
-    strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),entry_forward_confirmation_mode:value('entry-forward-confirm-mode')||'at_or_better',entry_reverse_confirmation_mode:value('entry-reverse-confirm-mode')||'at_or_better',entry_spread_guard_enabled:$('entry-spread-guard-on').checked,direction_mode:value('direction-mode')||'forward',entry_lower_usd:Number(value('entry-lower')||-5),dynamic_reference_enabled:$('native-dynamic-reference').checked,reference_window_minutes:Number(value('native-reference-window')||240),entry_deviation_usd:Number(value('native-entry-deviation')||0),grid_enabled:$('grid-enabled').checked,
+    strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),entry_forward_confirmation_mode:value('entry-confirm-mode')||'at_or_better',entry_reverse_confirmation_mode:value('entry-confirm-mode')||'at_or_better',entry_spread_guard_enabled:$('entry-spread-guard-on').checked,direction_mode:value('direction-mode')||'forward',entry_lower_usd:Number(value('entry-lower')||-5),dynamic_reference_enabled:$('native-dynamic-reference').checked,reference_window_minutes:Number(value('native-reference-window')||240),entry_deviation_usd:Number(value('native-entry-deviation')||0),grid_enabled:$('grid-enabled').checked,
       cooldown_seconds:Number(value('cooldown')),max_total_lots:Number(value('max-total')),exit_mode:value('exit-mode'),target_mode:value('target-mode'),exit_spread_usd:Number(value('absolute-exit')),
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
       total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold')),
@@ -137,6 +139,13 @@ function populate(c) {
   for (const [section, fields] of Object.entries(bindings)) {
     for (const [key, id] of Object.entries(fields)) $(id).value = c[section]?.[key] ?? '';
   }
+  if($('lighter-account-index')) {
+    $('lighter-account-index').value=c.lighter?.account_index??'';
+    $('lighter-api-key-index').value=c.lighter?.api_key_index??3;
+    $('lighter-proxy').value=c.lighter?.proxy_url??'';
+    $('lighter-private-key').value='';
+    $('lighter-key-status').textContent=c.lighter?.api_private_key_configured?'API 私钥已保存在本机；留空保存会保留原密钥。':'尚未保存 API 私钥；纸面行情无需私钥。';
+  }
   $('recv-window').value = c.binance.recv_window_ms;
   $('binance-proxy').value = c.binance.proxy_url ?? '';
   $('trading-api-key').value = c.binance.api_key ?? '';
@@ -152,8 +161,14 @@ function populate(c) {
   $('magic').value = c.execution?.magic ?? 9121701;
   $('close-retries').value = c.execution?.close_retry_limit ?? 3;
   const s=c.strategy || {}, costs=c.costs || {};
-  for(const d of ['forward','reverse']){$('entry-'+d+'-confirm-mode').value=s['entry_'+d+'_confirmation_mode']??'at_or_better';$('entry-'+d+'-confirm-ticks').value=s['entry_'+d+'_confirmation_ticks']??1;}
+  const confirmationDirection=s.direction_mode==='reverse'?'reverse':'forward';
+  $('entry-confirm-mode').value=s[`entry_${confirmationDirection}_confirmation_mode`]??'at_or_better';
+  $('entry-confirm-ticks').value=s[`entry_${confirmationDirection}_confirmation_ticks`]??1;
+  const confirmationMismatch=(s.entry_forward_confirmation_mode??'at_or_better')!==(s.entry_reverse_confirmation_mode??'at_or_better')||(s.entry_forward_confirmation_ticks??1)!==(s.entry_reverse_confirmation_ticks??1);
+  $('entry-confirm-legacy').hidden=!confirmationMismatch;
+  $('entry-confirm-legacy').textContent=confirmationMismatch?'旧配置的两种买卖组合确认设置不同；当前显示所选买卖组合的设置，自动模式显示卖首个平台／买另一个的设置。保存后统一两边，重新连接生效。':'';
   $('entry-confirm-decimals').value=s.entry_confirmation_decimals??2;
+  $('exit-confirm-ticks').value=s.exit_confirmation_ticks??1;
   $('direction-mode').value=s.direction_mode||'forward';$('entry-lower').value=s.entry_lower_usd??-5;$('native-dynamic-reference').checked=Boolean(s.dynamic_reference_enabled);$('native-reference-window').value=s.reference_window_minutes??240;$('native-entry-deviation').value=s.entry_deviation_usd??1;$('entry-spread-guard-on').checked=s.entry_spread_guard_enabled===true;
   $('pair-parameter-scope').textContent=`参数属于「${configPairName}」；策略、执行、费用及风险提醒按组合保存，账户连接共用。已有组保留原规则。`;
   const extra={cooldown_seconds:'cooldown',max_total_lots:'max-total',exit_mode:'exit-mode',target_mode:'target-mode',exit_spread_usd:'absolute-exit',min_net_profit_usd:'min-net',group_max_loss_usd:'group-loss',total_max_loss_usd:'total-loss',max_hold_minutes:'max-hold',rollover_utc_hour:'rollover-utc-hour',rollover_utc_minute:'rollover-utc-minute',rollover_guard_minutes:'rollover-guard-minutes'};
@@ -180,8 +195,7 @@ function syncConditionalFields(source='') {
   const same=window.GoldPairPairs?.info()?.type==='mt5_mt5';
   const pool=window.GoldPairPool?.enabled();
   $('native-direction-settings').hidden=!same||pool;$('entry-lower-field').hidden=!same||pool;$('native-reference-settings').hidden=!same||pool;
-  $('entry-confirmation-settings').hidden=Boolean(pool);
-  $('entry-reverse-confirm-field').hidden=!same;$('entry-reverse-confirm-count-field').hidden=!same;
+  $('entry-confirmation-settings').hidden=Boolean(pool);$('exit-confirmation-settings').hidden=Boolean(pool);
   $('entry').min=same?'-100000':'0';
   const mcpAdapter=value('mt5-adapter')==='mcp';
   const incompatible=live && mcpAdapter;
@@ -197,14 +211,15 @@ function syncConditionalFields(source='') {
       compatibility.textContent='当前组合不能实盘：MT5 MCP 只提供只读行情。页面保留你的选择；需要实盘时请改用 Windows MT5 原生终端。';
       compatibility.classList.add('error');
     } else if (live) {
-      compatibility.textContent='实盘组合：Windows MT5 原生终端 + 币安 API。';
+      compatibility.textContent='实盘组合：Windows MT5 原生终端 + '+(window.GoldPairVenueUI?.id()==='lighter'?'Lighter 官方签名 API':'币安 API')+'。';
       compatibility.classList.remove('error');
     } else {
       compatibility.textContent='纸面模式可使用 MT5 MCP 真实行情，也可使用原生终端；不会发送真实订单。';
       compatibility.classList.remove('error');
     }
   }
-  $('api-keys-section').style.display=live?'grid':'none';
+  $('api-keys-section').style.display=live&&window.GoldPairVenueUI?.id()!=='lighter'?'grid':'none';
+  window.GoldPairVenueUI?.visibility(live);
   visible('legacy-paper-actions',!live);visible('legacy-paper-panel',!live);
   visible('legacy-tools',!live);
   visible('paper-funding-field',!live);visible('mt5-swap-field',!live);
@@ -287,7 +302,7 @@ function saveConfig() { return saveConfigPayload(formConfig()); }
 function saveConfigSections(sections) {
   const full=formConfig(), payload={};
   for (const section of sections) if (full[section]!==undefined) payload[section]=full[section];
-  if (sections.includes('binance')) payload.symbol=full.symbol;
+  if (sections.includes('binance')||sections.includes('lighter')) payload.symbol=full.symbol;
   return saveConfigPayload(payload,sections);
 }
 function queueAutoSave() {
@@ -305,7 +320,7 @@ async function autoSaveConfig() {
 $('save-config').onclick=()=>action('save-config',saveConfig);
 $('clear-credentials').onclick=()=>action('clear-credentials',async()=>{
   await api('/api/config',{clear_credentials:true});
-  $('trading-api-key').value='';$('trading-api-secret').value='';$('mt5-mcp-token').value='';
+  $('trading-api-key').value='';$('trading-api-secret').value='';$('mt5-mcp-token').value='';$('lighter-private-key').value='';$('lighter-key-status').textContent='API 私钥已清除。';
   credentialsDirty=false; dirtySecrets.clear();
   message('config-status','已清除本机保存的 API Key、Secret 和 MCP Token。');
 });
@@ -430,7 +445,7 @@ function previewPlan() {
   }
   const qty=Number((lots*contract).toPrecision(12)), bid=Number(value('bid'));
   badge.textContent='当前输入预览';badge.classList.remove('warning');
-  message('plan-result',`MT5 ${value('mt5-symbol')}：${lots} 手 ↔ ${value('symbol').toUpperCase()}：${qty} XAU\n黄金数量 ${qty} 盎司${bid>0?' · 名义金额约 '+(qty*bid).toFixed(2)+' USDT':''}\n按已保存的 MT5 规格预览；交易所规则以重新连接后的校验为准。`);
+  message('plan-result',`MT5 ${value('mt5-symbol')}：${lots} 手 ↔ ${value('symbol').toUpperCase()}：${qty} XAU\n黄金数量 ${qty} 盎司${bid>0?' · 名义金额约 '+(qty*bid).toFixed(2)+(window.GoldPairVenueUI?.id()==='lighter'?' USDC':' USDT'):''}\n按已保存的 MT5 规格预览；交易所规则以重新连接后的校验为准。`);
 }
 async function calculatePlan(save=true) {
   if(window.GoldPairPairs?.info()?.type==='mt5_mt5') { previewPlan();return; }
@@ -448,20 +463,21 @@ async function calculatePlan(save=true) {
   }
 }
 $('check-binance').onclick = () => action('check-binance', async () => {
-  await saveConfigSections(['binance','execution']);
+  await saveConfigSections(['binance','lighter','execution']);
   const {result:r}=await api('/api/binance/check',{
     api_key:$('trading-api-key').value.trim(),api_secret:$('trading-api-secret').value.trim()
   });
   const lines=[r.message,`${r.symbol} ${r.status||''} · ${r.base_asset}/${r.quote_asset} · ${r.transport}`,
-    `Bid/Ask ${r.quote.bid} / ${r.quote.ask} · USDT/USD ${Number(r.usdt_usd.value).toFixed(6)}`];
+    `Bid/Ask ${r.quote.bid} / ${r.quote.ask} · ${r.exchange?.currency||'USDT'}/USD ${Number(r.usdt_usd.value).toFixed(6)}`];
   if(r.account) {
-    lines.push(`账户状态：canTrade=${r.account.can_trade?'true':'false'} · ${r.account.asset_mode_label} · USDT 可用 ${Number(r.account.available).toFixed(2)} · USDT 钱包 ${Number(r.account.wallet).toFixed(2)}`);
+    lines.push(`账户状态：canTrade=${r.account.can_trade?'true':'false'} · ${r.account.asset_mode_label} · ${r.exchange?.currency||'USDT'} 可用 ${Number(r.account.available).toFixed(2)} · ${r.exchange?.currency||'USDT'} 钱包 ${Number(r.account.wallet).toFixed(2)}`);
     if(r.account.position_mode_label) lines.push(`持仓模式：${r.account.position_mode_label}（程序会按对应 positionSide 下单）`);
     if(r.account.asset_mode==='multi') lines.push('其他保证金资产余额与未实现盈亏已核验为 0；程序不会切换模式或划转资产。');
   }
-  if(r.permissions) lines.push(`API 权限：合约权限=${r.permissions.enable_futures?'已开启':'未开启'} · 读取权限=${r.permissions.enable_reading?'已开启':'未开启'} · IP 白名单限制=${r.permissions.ip_restricted?'已开启':'未开启'}`);
+  if(r.permissions?.enable_futures!==undefined) lines.push(`API 权限：合约权限=${r.permissions.enable_futures?'已开启':'未开启'} · 读取权限=${r.permissions.enable_reading?'已开启':'未开启'} · IP 白名单限制=${r.permissions.ip_restricted?'已开启':'未开启'}`);
   if(r.permission_warning) lines.push(`API 权限明细未能读取：${r.permission_warning}`);
-  if(r.fees) lines.push(`账户费率：Maker ${Number(r.fees.maker).toFixed(4)}% / Taker ${Number(r.fees.taker).toFixed(4)}%`);
+  if(r.fees) lines.push(`账户费率：Maker ${r.fees.maker==null?'未核验':Number(r.fees.maker).toFixed(4)+'%'} / Taker ${Number(r.fees.taker).toFixed(4)}%`);
+  if(r.fee_warning) lines.push('费率提示：'+r.fee_warning);
   if(r.transport_warning) lines.push('提示：'+r.transport_warning);
   lines.push('本次仅做连接检查，未发送任何订单。');
   $('bid').value=r.quote.bid;$('binance-ask').value=r.quote.ask;

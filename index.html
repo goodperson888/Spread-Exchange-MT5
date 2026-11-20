@@ -79,13 +79,11 @@
 <label id="entry-lower-field" hidden>开仓下限（USD/报价单位）<input id="entry-lower" type="number" value="-5" step="0.01"><span id="entry-lower-effective" class="muted"></span></label>
 <div id="native-reference-settings" hidden><label class="check dynamic-reference-toggle"><input id="native-dynamic-reference" type="checkbox"><span>启用动态参考价差 <span class="field-help" tabindex="0" role="img" aria-label="动态参考价差说明" title="根据最近可成交价差计算平滑参考值。参考窗口越大越稳定，入场偏离越大越谨慎。重新连接后累计 20 个报价才生效，预热期间使用固定阈值；只影响新开仓。">ⓘ</span></span></label><label>参考窗口（分钟）<span class="field-help" tabindex="0" role="img" aria-label="参考窗口说明" title="EMA 的时间平滑窗口。240 分钟表示参考值大约按 4 小时的节奏平滑更新，不是只取 4 小时最高或最低价差。">ⓘ</span><input id="native-reference-window" type="number" min="1" max="43200" step="1" value="240"></label><label>入场偏离参考（USD/报价单位）<span class="field-help" tabindex="0" role="img" aria-label="入场偏离说明" title="卖出首个品种、买入另一个品种，需对应价差高于动态参考加此数值；相反的买卖组合，需对应价差低于动态参考减此数值。数值越大，触发越谨慎。">ⓘ</span><input id="native-entry-deviation" type="number" min="0" max="100000" step="0.1" value="1"></label><p id="native-reference-effective" class="note" role="status">启用后使用最近报价的 EMA 参考，累计至少 20 个报价后生效。</p></div>
 <div class="threshold-field"><label>自动开仓阈值（USD/盎司）<input id="entry" type="number" step="0.01" value="5" min="0"><span id="entry-effective" class="muted">当前生效：未连接</span></label><button id="apply-entry" type="button">应用开仓阈值</button></div>
-<div id="entry-confirmation-settings"><details><summary>连续新报价确认</summary><div class="grid">
-<label><span id="entry-forward-confirm-label">卖币安／买 MT5 · 确认方式</span><select id="entry-forward-confirm-mode"><option value="at_or_better" selected>达到或优于设定值</option><option value="equal">等于设定值（按比较精度）</option></select></label>
-<label>连续次数<input id="entry-forward-confirm-ticks" type="number" min="1" max="1000" step="1" value="1"></label>
-<label id="entry-reverse-confirm-field"><span id="entry-reverse-confirm-label">买品种 A／卖品种 B · 确认方式</span><select id="entry-reverse-confirm-mode"><option value="at_or_better" selected>达到或优于设定值</option><option value="equal">等于设定值（按比较精度）</option></select></label>
-<label id="entry-reverse-confirm-count-field">连续次数<input id="entry-reverse-confirm-ticks" type="number" min="1" max="1000" step="1" value="1"></label>
+<div id="entry-confirmation-settings"><details><summary>开仓连续报价确认</summary><div class="grid">
+<label><span id="entry-confirm-label">开仓确认方式</span><select id="entry-confirm-mode"><option value="at_or_better" selected>达到或优于设定值</option><option value="equal">等于设定值（按比较精度）</option></select></label>
+<label>连续新报价次数<input id="entry-confirm-ticks" type="number" min="1" max="1000" step="1" value="1"></label>
 <label title="仅等于模式使用；价差和阈值都按此小数位四舍五入后比较。达到或优于模式直接比较原始值。">等于模式比较小数位<input id="entry-confirm-decimals" type="number" min="0" max="8" step="1" value="2"></label>
-</div><p class="note">新报价才计数；不达标、过期、暂停或下单后清零。次数越多，确认等待越长。默认达到或优于、1 次。保存并重新连接后生效；动态参考启用时比较当时有效阈值。</p></details></div>
+</div><p class="note">两种买卖组合共用这套设置，分别计数；卖首个平台／买另一个比较价差 ≥ 上限，反过来比较价差 ≤ 下限。相同价格但平台 tick 时间更新也算新报价，同一 tick 的重复读取不计数。不达标、过期、暂停或下单后清零。保存并重新连接后生效；仅用于开仓。</p><p id="entry-confirm-legacy" class="note" role="status" hidden></p></details></div>
 <label>重复开仓间隔（秒）<input id="cooldown" type="number" value="60" min="1"></label>
 <label>策略总手数上限<input id="max-total" type="number" value="0.1" min="0.01" step="0.01"></label>
 <label class="check"><input id="grid-enabled" type="checkbox"> 启用网格补仓</label>
@@ -96,6 +94,7 @@
 <label id="contraction-field">收窄幅度（USD/盎司）<input id="take" type="number" step="0.1" value="2"></label>
 <label id="absolute-field">目标退出价差（USD/盎司）<input id="absolute-exit" type="number" value="0" step="0.1"></label>
 <label class="check"><input id="require-net" type="checkbox" checked> 平仓要求达到最低净收益</label>
+<label id="exit-confirmation-settings">止盈连续新报价次数<input id="exit-confirm-ticks" type="number" min="1" max="1000" step="1" value="1"><span class="muted">仅正常止盈：价差及所设净收益条件须连续满足。默认 1 次；止损、强平保护、手动平仓不等待。保存并重新连接后用于新组。</span></label>
 <label id="min-net-field"><span id="min-net-label">最低净收益（USD）</span><input id="min-net" type="number" value="0" min="0" step="0.01"></label>
 </div>
 <p id="native-direction-status" class="note" role="status" hidden></p><p id="entry-preflight" class="note">接近阈值时自动预检；开仓阈值可单独应用，手数等交易参数重新连接生效。</p><details><summary>高级连接与执行参数</summary><div class="grid">
@@ -164,17 +163,24 @@
 <label title="自动模式仅对已核验、独立安装的两个 MT5 终端并发开仓。双边意图一次事务保存后同时派发，各腿独立核验；并发不保证同时成交。单终端双品种、交易所 × MT5 继续串行，入场优先腿仅用于串行。保存后重新连接生效。">开仓派发方式<select id="entry-dispatch"><option value="auto">不同 MT5 终端自动并发</option><option value="serial">串行：按优先腿开仓</option></select></label>
 </div>
 <p id="mode-compatibility" class="note" role="status" aria-live="polite"></p>
-<div id="exchange-network"><div class="proxy-tools">
+<div id="exchange-network"><div class="proxy-tools" id="binance-proxy-tools">
 <label>币安网络代理（可选）<input id="binance-proxy" placeholder="例如 http://127.0.0.1:7890" maxlength="300" spellcheck="false"></label>
 <button id="check-public-ip" type="button" disabled>获取币安出口 IP</button>
 <button id="copy-public-ip" type="button" disabled>复制 IP</button>
 </div>
 <p id="public-ip-result" class="note inline-status" role="status" aria-live="polite">尚未检测。币安白名单需要公网出口 IP，不是局域网 IP。</p>
+<div class="grid" id="lighter-keys-section" hidden>
+<label>账户索引 Account Index<input id="lighter-account-index" type="number" min="0" step="1" placeholder="平台账户索引，非钱包地址"></label>
+<label>API Key 索引<input id="lighter-api-key-index" type="number" min="2" max="254" step="1" value="3"></label>
+<label>API 私钥（仅保存在本机）<input id="lighter-private-key" type="password" autocomplete="new-password" placeholder="80 位十六进制 API 私钥"></label>
+<label>Lighter 网络代理（可选）<input id="lighter-proxy" maxlength="300" spellcheck="false" placeholder="例如 http://127.0.0.1:7891"></label>
+<p id="lighter-key-status" class="note" role="status"></p>
+</div>
 <div class="grid" id="api-keys-section" style="display:none;">
 <label>API Key（本机保存）<span class="secret-input"><input id="trading-api-key" type="password" autocomplete="off" placeholder="输入后自动保存"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-key" aria-controls="trading-api-key" aria-label="显示 API Key" aria-pressed="false" title="显示 API Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 <label>Secret Key（本机保存）<span class="secret-input"><input id="trading-api-secret" type="password" autocomplete="new-password" placeholder="输入后自动保存"><button class="secret-toggle" type="button" data-toggle-secret="trading-api-secret" aria-controls="trading-api-secret" aria-label="显示 Secret Key" aria-pressed="false" title="显示 Secret Key"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/><path class="eye-slash" d="m4 4 16 16"/></svg></button></span></label>
 </div>
-<details class="help-details"><summary>行情、代理与 API 权限说明</summary><p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。网络受限时可填写 HTTP/Mixed 代理，REST、WebSocket 与实盘请求会统一使用；地址会自动保存，请勿在其中填写账号密码。出口 IP 只代表检测当时结果；代理节点、家庭公网 IP 或代理分流规则变化后需重新检测，并以“检查币安连接”的白名单结果为准。实盘会自动识别单向或双向持仓；本策略永续侧始终使用 SHORT 持仓方向，并检查账户交易权限和费率。检查不会下单。API Key 和 Secret 会保存到本机配置，刷新页面后自动恢复。</p></details>
+<p id="lighter-help" class="note" hidden>Lighter 只接主网黄金永续；填写 XAU 或 PAXG。账户索引及 API Key 索引来自 Lighter 的 API 管理，私钥是创建 API Key 时保存的 80 位密钥。纸面模式无需私钥。保证金币种为 USDC，汇率与费率按组合保存；未知费用保留估算，不当作已核验。已有持仓时不能切换交易所。</p><details class="help-details" id="binance-help"><summary>行情、代理与 API 权限说明</summary><p class="note">纸面模式检查公开行情、WebSocket/REST 传输和合约规格，无需密钥。网络受限时可填写 HTTP/Mixed 代理，REST、WebSocket 与实盘请求会统一使用；地址会自动保存，请勿在其中填写账号密码。出口 IP 只代表检测当时结果；代理节点、家庭公网 IP 或代理分流规则变化后需重新检测，并以“检查币安连接”的白名单结果为准。实盘会自动识别单向或双向持仓；本策略永续侧始终使用 SHORT 持仓方向，并检查账户交易权限和费率。检查不会下单。API Key 和 Secret 会保存到本机配置，刷新页面后自动恢复。</p></details>
 <div id="binance-result" class="result" role="status" aria-live="polite">尚未检查币安连接。</div>
 </div><div class="actions"><button id="save-config" type="button" disabled>保存连接与策略配置</button><button id="clear-credentials" type="button" disabled>清除已保存凭据</button></div>
 
@@ -193,6 +199,7 @@
 <label>最低净收益（USD）<input id="exit-rule-profit" type="number" min="0" max="1000000000" step="0.01"></label>
 <label>单组亏损限制<select id="exit-rule-loss-enabled"><option value="true">启用</option><option value="false">关闭</option></select></label>
 <label>单组最大亏损（USD）<input id="exit-rule-loss" type="number" min="0.01" max="1000000000" step="0.01"></label>
+<label>止盈连续新报价次数<input id="exit-rule-confirm" type="number" min="1" max="1000" step="1" value="1"><span class="muted">仅正常止盈；保护性平仓不等待。修改后重新累计。</span></label>
 <label>最长持仓分钟（0 为不限）<input id="exit-rule-hold" type="number" min="0" max="525600" step="1"></label>
 <label>本组币安手续费返佣（%）<input id="exit-rule-binance-rebate" type="number" min="0" max="100" step="0.1"></label>
 <label>本组 MT5 佣金返佣（%）<input id="exit-rule-mt5-rebate" type="number" min="0" max="100" step="0.1"></label>
@@ -227,5 +234,5 @@
 </div>
 </details>
 </div></div>
-</main><dialog id="pair-manager" aria-labelledby="pair-manager-title"><div class="heading"><div><p class="eyebrow">交易组合</p><h2 id="pair-manager-title">管理与切换</h2></div><button id="pair-manager-close" type="button" aria-label="关闭组合管理">关闭</button></div><p class="note">选择列表只预览。点击「设为当前组合」才切换连接配置；已有仓位或待确认订单时禁止切换，原组合继续管理。</p><label>已保存组合<select id="pair-list"></select></label><div class="grid"><label>名称<input id="pair-name" maxlength="60"></label><label>组合模板<select id="pair-template"><option value="exchange">交易所 × MT5</option><option value="native">MT5 配对</option></select></label><label id="pair-native-mode-field" hidden>MT5 配对方式<select id="pair-native-mode"><option value="same">同一终端 · 双品种</option><option value="pool">多个终端 · 同品种择优</option></select></label><label>品种 A（交易所为卖出腿）<input id="pair-short" list="pair-short-options" maxlength="40" spellcheck="false"><datalist id="pair-short-options"><option value="XAUUSDT"></option><option value="PAXGUSDT"></option></datalist></label><label>MT5 品种 B<input id="pair-long" maxlength="40" spellcheck="false" placeholder="终端中的完整名称"></label></div><p id="pair-preview" class="result"></p><p id="pair-parameters-preview" class="note"></p><p class="note">每个组合独立保存策略、执行、费用和风险提醒；切换后在主页面维护当前组合参数。新组合初次复制当前参数，此后互不覆盖，并分配独立识别码；账户连接共用。启用前请检查品种、方向、数量和费用。原有交易组保留开仓时的绑定与规则。</p><div class="actions"><button id="pair-new" type="button">新建组合</button><button id="pair-save" type="button">保存此组合</button><button id="pair-activate" class="primary" type="button">设为当前组合</button><button id="pair-delete" type="button">删除</button></div><p id="pair-manager-result" class="result" role="status" aria-live="polite">组合切换不会启动自动交易。</p></dialog><div id="record-tooltip" class="record-tooltip" role="tooltip" hidden></div><script src="echarts.min.js"></script><script src="app.js"></script><script src="workspace.js"></script><script src="pair-app.js"></script><script src="pool-app.js"></script><script src="quote-stream.js"></script><script src="trading-app.js"></script>
+</main><dialog id="pair-manager" aria-labelledby="pair-manager-title"><div class="heading"><div><p class="eyebrow">交易组合</p><h2 id="pair-manager-title">管理与切换</h2></div><button id="pair-manager-close" type="button" aria-label="关闭组合管理">关闭</button></div><p class="note">选择列表只预览。点击「设为当前组合」才切换连接配置；已有仓位或待确认订单时禁止切换，原组合继续管理。</p><label>已保存组合<select id="pair-list"></select></label><div class="grid"><label>名称<input id="pair-name" maxlength="60"></label><label>组合模板<select id="pair-template"><option value="exchange">交易所 × MT5</option><option value="native">MT5 配对</option></select></label><label id="pair-exchange-field">交易所<select id="pair-exchange"><option value="binance">币安 USDT 永续</option><option value="lighter">Lighter 主网 USDC 永续</option></select></label><label id="pair-native-mode-field" hidden>MT5 配对方式<select id="pair-native-mode"><option value="same">同一终端 · 双品种</option><option value="pool">多个终端 · 同品种择优</option></select></label><label>品种 A（交易所为卖出腿）<input id="pair-short" list="pair-short-options" maxlength="40" spellcheck="false"><datalist id="pair-short-options"><option value="XAUUSDT"></option><option value="PAXGUSDT"></option></datalist></label><label>MT5 品种 B<input id="pair-long" maxlength="40" spellcheck="false" placeholder="终端中的完整名称"></label></div><p id="pair-preview" class="result"></p><p id="pair-parameters-preview" class="note"></p><p class="note">每个组合独立保存策略、执行、费用和风险提醒；切换后在主页面维护当前组合参数。新组合初次复制当前参数，此后互不覆盖，并分配独立识别码；账户连接共用。启用前请检查品种、方向、数量和费用。原有交易组保留开仓时的绑定与规则。</p><div class="actions"><button id="pair-new" type="button">新建组合</button><button id="pair-save" type="button">保存此组合</button><button id="pair-activate" class="primary" type="button">设为当前组合</button><button id="pair-delete" type="button">删除</button></div><p id="pair-manager-result" class="result" role="status" aria-live="polite">组合切换不会启动自动交易。</p></dialog><div id="record-tooltip" class="record-tooltip" role="tooltip" hidden></div><script src="echarts.min.js"></script><script src="app.js"></script><script src="workspace.js"></script><script src="exchange-ui.js"></script><script src="pair-app.js"></script><script src="pool-app.js"></script><script src="quote-stream.js"></script><script src="trading-app.js"></script>
 </body></html>

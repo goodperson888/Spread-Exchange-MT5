@@ -9,6 +9,19 @@ from trading_store import Store
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_profit_confirmation_export_keeps_only_count_evidence(self):
+        state={'groups':[{'id':'private','parameters':{'exit_confirmation_ticks':5,
+            'entry_forward_confirmation_ticks':3,'entry_reverse_confirmation_mode':'equal'},
+            'exit_decision':{'confirmation':{'count':5,'required':5,'ready':True,'account':'SECRET'}}},
+            {'id':'old','parameters':{},'exit_decision':{}}],'orders':[]}
+        rows=build_report(state,[])['groups']
+        self.assertEqual(rows[0]['exit_decision']['confirmation'],{'count':5,'required':5,'ready':True})
+        self.assertEqual(rows[0]['parameters']['entry_forward_confirmation_ticks'],3)
+        self.assertEqual(rows[0]['parameters']['entry_reverse_confirmation_mode'],'equal')
+        self.assertNotIn('confirmation',rows[1]['exit_decision'])
+        self.assertNotIn('exit_confirmation_ticks',rows[1]['parameters'])
+        self.assertNotIn('SECRET',json.dumps(rows))
+
     def test_local_mt5_slippage_rejection_keeps_unsent_evidence_and_redacts_fields(self):
         result=dict(status='done',qty=0,price=0,submitted=False,
             error_code='MT5_SLIPPAGE_PRECHECK',error_kind='local_validation',error='SECRET',

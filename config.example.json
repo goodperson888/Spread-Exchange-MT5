@@ -58,6 +58,7 @@
     "rollover_utc_minute": 0,
     "rollover_guard_minutes": 30,
     "entry_confirmation_decimals": 2,
+    "exit_confirmation_ticks": 1,
     "entry_forward_confirmation_mode": "at_or_better",
     "entry_forward_confirmation_ticks": 1,
     "entry_reverse_confirmation_mode": "at_or_better",
@@ -91,5 +92,11 @@
     "mt5_rebate_percent": 0,
     "mt5_swap_per_lot_day": 0,
     "paper_funding_percent_day": 0
+  },
+  "lighter": {
+    "account_index": null,
+    "api_key_index": 3,
+    "api_private_key": "",
+    "proxy_url": ""
   }
 }

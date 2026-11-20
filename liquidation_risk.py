@@ -149,6 +149,17 @@ class BinanceRiskMonitor:
     def close(self): self.stopped.set()
 
     def _step(self):
+        if callable(getattr(self.client,'risk_sample',None)):
+            started=self.clock()
+            try:
+                data=self.client.risk_sample(self.symbol)
+                updates={k:dict(data=data[k],started=started,updated_ms=int(time.time()*1000),error='') for k in ('account','positions')}
+            except Exception:
+                updates={k:dict(error='交易所风险接口不可用') for k in ('account','positions')}
+            with self.lock:
+                if not self.stopped.is_set():
+                    for k,v in updates.items():self.samples[k]={**self.samples.get(k,{}),**v}
+            return
         for key, path, params in (('account', '/fapi/v3/account', None),
                                   ('positions', '/fapi/v3/positionRisk', {'symbol': self.symbol})):
             if self.stopped.is_set(): return

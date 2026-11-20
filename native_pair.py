@@ -485,6 +485,7 @@ class NativePairRuntime:
                 self.market_meta=dict(pair=pair_info(c),strategy_trigger='双品种报价驱动；同一 MT5 请求由持久会话有序发送')
                 self.latency.reset(mode);PROCESS_ENTRY_OBSERVATIONS.reset(mode);self._restore_push_bridge()
                 self.engine.entry_confirmations.clear()
+                self.engine.exit_confirmations.clear()
                 self.pump=pump;pump_installed=True;self.pump.bridge=self.push_bridge
                 self.pump.publish(quote);self.pump.start()
                 if mode=='live':
@@ -513,8 +514,10 @@ class NativePairRuntime:
             raise ValueError(message) from exc
 
     def _disconnect_pair_resources(self):
+        from execution_diagnostics import register_transport
+        register_transport(None)
         self.connected=False;self.reconciled=False
-        for name in ('maintenance','external_monitor','pump','terminal','market_stream','entry_preflight','risk_monitor'):
+        for name in ('maintenance','external_monitor','pump','terminal','market_stream','entry_preflight','risk_monitor','binance'):
             resource=getattr(self,name,None)
             setattr(self,name,None)
             if resource:

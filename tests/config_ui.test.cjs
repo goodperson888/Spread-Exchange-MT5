@@ -407,19 +407,49 @@ test('configuration saves carry the pair identity and independent directional fi
  assert.match(f.el('config-status').textContent,/组合乙/);
 });
 
-test('entry confirmation modes and counts restore and save independently for each buy/sell combination',async()=>{
+test('shared entry confirmation saves both combinations and independent profit confirmation',async()=>{
+ const f=await fixture();
+ assert.equal(f.el('entry-confirm-mode').value,'at_or_better');
+ assert.equal(f.el('entry-confirm-ticks').value,'1');
+ f.edit('entry-confirm-mode','equal');f.edit('entry-confirm-ticks','5');
+ f.edit('exit-confirm-ticks','3');f.edit('entry-confirm-decimals','2');
+ const s=f.run('formConfig().strategy');
+ for(const d of ['forward','reverse']){
+  assert.equal(s[`entry_${d}_confirmation_mode`],'equal');
+  assert.equal(s[`entry_${d}_confirmation_ticks`],5);
+ }
+ assert.equal(s.exit_confirmation_ticks,3);assert.equal(s.entry_confirmation_decimals,2);
+ assert.equal(f.run("dirtyFields.has('entry-confirm-mode')"),true);
+ assert.equal(f.run("dirtyFields.has('exit-confirm-ticks')"),true);
+ await f.run('saveConfig()');
+ const body=f.calls.filter(c=>c.url==='/api/config'&&c.body).at(-1).body;
+ assert.equal(body.strategy.entry_reverse_confirmation_ticks,5);
+ assert.equal(body.strategy.exit_confirmation_ticks,3);
+});
+
+test('legacy differing confirmations display selected combination and unify only on explicit save',async()=>{
+ const f=await fixture();
+ f.run('populate({...formConfig(),strategy:{...formConfig().strategy,direction_mode:"reverse",entry_forward_confirmation_ticks:2,entry_reverse_confirmation_ticks:7,entry_reverse_confirmation_mode:"equal"}})');
+ assert.equal(f.el('entry-confirm-ticks').value,'7');assert.equal(f.el('entry-confirm-mode').value,'equal');
+ assert.equal(f.el('entry-confirm-legacy').hidden,false);
+ assert.match(f.el('entry-confirm-legacy').textContent,/保存后统一/);
+ assert.equal(f.calls.filter(c=>c.url==='/api/config'&&c.body).length,0);
+ const s=f.run('formConfig().strategy');assert.equal(s.entry_forward_confirmation_ticks,7);
+ f.run('populate({...formConfig(),strategy:{...formConfig().strategy,direction_mode:"auto",entry_forward_confirmation_ticks:4,entry_reverse_confirmation_ticks:9}})');
+ assert.equal(f.el('entry-confirm-ticks').value,'4');
+});
+
+test('Lighter API private key stays out of drafts and blank fields preserve server-owned secret',async()=>{
   const f=await fixture();
-  assert.equal(f.el('entry-forward-confirm-mode').value,'at_or_better');
-  assert.equal(f.el('entry-forward-confirm-ticks').value,'1');
-  f.edit('entry-forward-confirm-mode','equal');f.edit('entry-forward-confirm-ticks','5');
-  f.edit('entry-reverse-confirm-mode','at_or_better');f.edit('entry-reverse-confirm-ticks','3');
-  f.edit('entry-confirm-decimals','2');
-  const s=f.run('formConfig().strategy');
-  assert.equal(s.entry_forward_confirmation_mode,'equal');assert.equal(s.entry_forward_confirmation_ticks,5);
-  assert.equal(s.entry_reverse_confirmation_mode,'at_or_better');assert.equal(s.entry_reverse_confirmation_ticks,3);
-  assert.equal(s.entry_confirmation_decimals,2);
-  assert.equal(f.run("dirtyFields.has('entry-forward-confirm-mode')"),true);
-  assert.equal(f.run("dirtyFields.has('entry-forward-confirm-ticks')"),true);
-  f.run("populate({...formConfig(),strategy:{...formConfig().strategy,entry_forward_confirmation_ticks:9}})");
-  assert.equal(f.el('entry-forward-confirm-ticks').value,'9');
+  f.edit('lighter-account-index','123');f.edit('lighter-api-key-index','4');
+  f.edit('lighter-private-key','a'.repeat(80));
+  const payload=f.run('formConfig()');
+  assert.equal(payload.lighter.account_index,123);assert.equal(payload.lighter.api_key_index,4);
+  assert.equal(payload.lighter.api_private_key,'a'.repeat(80));
+  f.run('saveDraft()');
+  for(const raw of f.storage.values())assert.ok(!raw.includes('a'.repeat(80)));
+  assert.equal(f.run("dirtySecrets.has('lighter-private-key')"),true);
+  f.run("populate({...formConfig(),lighter:{account_index:123,api_key_index:4,api_private_key_configured:true}})");
+  assert.equal(f.el('lighter-private-key').value,'');assert.match(f.el('lighter-key-status').textContent,/已保存在本机/);
+  assert.equal(f.run('formConfig().lighter.api_private_key'),'');
 });

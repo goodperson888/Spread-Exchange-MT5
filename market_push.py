@@ -220,7 +220,7 @@ class QuotePump:
     def collect(self,background=False):
         c = self.config
         age = c['strategy']['max_quote_age_ms']
-        poll = c['execution']['poll_ms'] / 1000
+        poll = c['execution'].get('mt5_quote_poll_ms', 50) / 1000 if c['mt5']['adapter']=='native' else c['execution']['poll_ms'] / 1000
         now = time.monotonic()
         pushed = self.bridge.quote(c['mt5'], age) if self.bridge and c['mt5']['adapter'] != 'paper' else None
         if pushed:
@@ -244,31 +244,34 @@ class QuotePump:
         # Read exchange AFTER any blocking terminal read, never pair a fresh MT5 tick with an old cached exchange tick.
         market = self.stream.quote(max_age_ms=age)
         if market is None:
+            rest_interval=getattr(self.exchange,'quote_rest_interval',1.)
             if background:
-                market,error=self.rest_fallback.read(1)
+                market,error=self.rest_fallback.read(rest_interval)
                 if error:raise error
                 if market is None:return
             else:
-                if self.rest_cache is None or not self.rest_read_at or time.monotonic() - self.rest_read_at >= 1:
+                if self.rest_cache is None or not self.rest_read_at or time.monotonic() - self.rest_read_at >= rest_interval:
                     self.rest_cache = observed_quote(self.exchange.quote(c['symbol']))
                     self.rest_read_at = time.monotonic()
                 market = self.rest_cache
             self.binance_transport = 'REST 回退'
-        else: self.binance_transport = 'WebSocket bookTicker'
+        else: self.binance_transport = 'WebSocket 盘口' if getattr(self.exchange,'name','')=='Lighter' else 'WebSocket bookTicker'
         fx = c['costs']['usdt_usd']
         observed_at = milliseconds()
         market = observed_quote(market, observed_at)
         # Transport changes are observable state too.  A pushed tick can have
         # the same broker timestamp and prices as the compatibility poll; keep
         # one fresh event so the UI changes from polling to EA push immediately.
-        signature = tuple((q['source_time_ms'], q['bid'], q['ask']) for q in (mt5, market)) + (
+        signature = tuple((q['source_time_ms'], q.get('source_sequence'), q['bid'], q['ask']) for q in (mt5, market)) + (
             fx, self.mt5_transport, self.binance_transport)
         if signature == self.last_signature: return
         from trading_config import pair_key
+        from pair_instruments import pair_info
         from trading_engine import valid_quote
-        q = dict(key=pair_key(c), time_ms=milliseconds(), mt5=dict(mt5), binance=dict(market), usdt_usd=fx,
+        q = dict(key=pair_key(c), pair=pair_info(c), time_ms=milliseconds(), mt5=dict(mt5), binance=dict(market), usdt_usd=fx,
                  entry=market['bid']*fx-mt5['ask'], exit=market['ask']*fx-mt5['bid'],
-                 mt5_transport=self.mt5_transport, binance_transport=self.binance_transport)
+                 mt5_transport=self.mt5_transport, binance_transport=self.binance_transport,
+                 exchange_stream_status=self.stream.status() if hasattr(self.stream,'status') else {})
         q['valid'] = valid_quote(q, c)
         # Keep raw sample IDs unique without rounding the display/strategy to seconds.
         q['time_ms'] = max(q['time_ms'], self.last_stamp + 1)
@@ -302,7 +305,8 @@ class QuotePump:
             except Exception as exc:
                 with self.lock: self.error = str(exc)
                 self.wake_strategy.set()
-            self.changed.wait(self.config['execution']['poll_ms'] / 1000)
+            self.changed.wait(min(self.config['execution']['poll_ms'],self.config['execution'].get('mt5_quote_poll_ms',50)
+                                  if self.config['mt5']['adapter']=='native' else self.config['execution']['poll_ms']) / 1000)
 
     def close(self):
         self.stopped.set(); self.changed.set();self.sample_wake.set()

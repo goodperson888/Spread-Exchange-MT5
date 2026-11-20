@@ -21,10 +21,14 @@ def main():
     if '--self-test' in sys.argv:
         from server import ROOT
         import MetaTrader5
-        for name in ('index.html', 'app.js', 'workspace.js', 'pair-app.js', 'pool-app.js', 'trading-app.js', 'quote-stream.js', 'mt5/GoldPairQuotes.mq5', 'mt5/GoldPairQuotes.ex5', 'echarts.min.js', 'style.css', 'config.example.json'):
+        import lighter
+        from lighter.signer_client import get_signer
+        get_signer()  # Load packaged native library only; no account or network calls.
+        import websockets.asyncio.client
+        for name in ('index.html', 'app.js', 'workspace.js', 'pair-app.js', 'exchange-ui.js', 'pool-app.js', 'trading-app.js', 'quote-stream.js', 'mt5/GoldPairQuotes.mq5', 'mt5/GoldPairQuotes.ex5', 'echarts.min.js', 'style.css', 'config.example.json'):
             if not (ROOT / name).is_file():
                 raise RuntimeError('Missing bundled asset: ' + name)
-        print('Bundled assets and MetaTrader5 import: OK')
+        print('Bundled assets, MetaTrader5 and Lighter signer imports: OK')
         import time
         from execution_dispatch import dispatch_pair
         from trading_brokers import PaperBroker

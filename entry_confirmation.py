@@ -5,7 +5,7 @@ import math
 import threading
 import time
 
-DEFAULTS = {'entry_confirmation_decimals': 2}
+DEFAULTS = {'entry_confirmation_decimals': 2, 'exit_confirmation_ticks': 1}
 for _direction in ('forward', 'reverse'):
     DEFAULTS.update({f'entry_{_direction}_confirmation_mode': 'at_or_better',
                      f'entry_{_direction}_confirmation_ticks': 1})
@@ -35,7 +35,8 @@ def reached(strategy, direction, value, threshold):
 def source_token(quote):
     # Receipt time, heartbeat, transport and local publication sequence must
     # never turn a repeated platform tick into an extra confirmation.
-    return tuple((book.get('source_time_ms', book.get('time_ms', 0)),
+    return tuple((('sequence',book['source_sequence']) if book.get('source_sequence') is not None else
+                  None if book.get('time_basis')=='receipt_only' else book.get('source_time_ms', book.get('time_ms', 0)),
                   book.get('bid'), book.get('ask'))
                  for book in (quote.get('binance', {}), quote.get('mt5', {})))
 
@@ -61,7 +62,7 @@ class EntryConfirmations:
             self.rows.clear()
 
     def observe(self, key, strategy, quote, direction, threshold, *, enabled=True,
-                valid=True, level=0, now=None):
+                valid=True, level=0, now=None, reuse_single=False):
         now = time.monotonic() if now is None else now
         mode, required, decimals = settings(strategy, direction)
         signature = (mode, required, decimals, level, tuple(sorted(strategy.items())))
@@ -84,7 +85,10 @@ class EntryConfirmations:
                 row.update(count=0, ready=False)
             if not hit:
                 row.update(count=0, ready=False)
-            if token is not None and token != row['token']:
+            # A one-sample profit exit preserves the original immediate
+            # reevaluation after fee updates or a deferred preflight. Entry
+            # confirmations and multi-sample exits always require new ticks.
+            if token is not None and (token != row['token'] or reuse_single and required == 1):
                 previous = row['token']
                 # A late fallback result must not replay a superseded quote.
                 if previous and any(a[0] and b[0] and a[0] < b[0] for a,b in zip(token,previous)):

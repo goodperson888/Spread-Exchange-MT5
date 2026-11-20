@@ -56,6 +56,16 @@ class DirectionEngineTests(unittest.TestCase):
             self.assertEqual(o['native_position_side'],openings[leg]['native_position_side'])
         self.assertAlmostEqual(g['exit'],5);self.assertAlmostEqual(g['valuation']['gross'],3.09)
 
+    def test_reverse_profit_confirmation_uses_original_books_and_requires_new_ticks(self):
+        self.c['strategy']['exit_confirmation_ticks']=2
+        g=self.opened();q=self.market(93,98)
+        self.e.tick(self.c,self.p,q);self.assertEqual(g['status'],'open')
+        self.e.tick(self.c,self.p,q);self.assertEqual(g['status'],'open')
+        next_quote=copy.deepcopy(q)
+        for key in ('binance','mt5'):next_quote[key]['source_time_ms']=q[key]['time_ms']+1
+        self.e.tick(self.c,self.p,next_quote);self.assertEqual(g['status'],'closed')
+        self.assertEqual(g['exit_decision']['confirmation']['count'],2)
+
     def test_upper_selects_forward_and_neutral_selects_neither(self):
         self.assertIsNone(entry_direction(self.c,self.market(100,100)))
         self.e.tick(self.c,self.p,self.market(110,100));g=self.e.active()[0]
@@ -197,7 +207,13 @@ class DirectionEngineTests(unittest.TestCase):
 
     def test_reverse_basket_closes_all_members_with_their_locked_sides(self):
         self.c['strategy'].update(exit_mode='basket',max_groups=2)
-        self.opened();self.e.state['last_open_ms']=0;self.opened()
+        self.opened();self.e.state['last_open_ms']=0
+        q=self.market()
+        # The second entry needs a new source tick even when this test runs
+        # twice within one millisecond at unchanged prices.
+        first=self.e.state['orders'][0]['quote_context']
+        for leg in ('binance','mt5'):q[leg]['source_time_ms']=first[leg]['time_ms']+1
+        self.e.tick(self.c,self.p,q)
         self.assertEqual(len(self.e.active()),2)
         self.e.tick(self.c,self.p,self.market(93,98))
         self.assertFalse(self.e.active());self.assertTrue(all(g['reason']=='整篮子止盈' for g in self.e.state['groups']))

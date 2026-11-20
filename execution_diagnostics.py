@@ -27,7 +27,7 @@ def symbol(value):
 
 
 def exit_parameters(row):
-    result=numbers(row,'take_contraction_usd exit_spread_usd min_net_profit_usd group_max_loss_usd max_hold_minutes')
+    result=numbers(row,'take_contraction_usd exit_spread_usd min_net_profit_usd group_max_loss_usd max_hold_minutes exit_confirmation_ticks')
     for key in ('require_net_profit','group_loss_enabled'):
         if type(row.get(key)) is bool:result[key]=row[key]
     if row.get('target_mode') in ('contraction','absolute'):result['target_mode']=row['target_mode']
@@ -89,11 +89,12 @@ def build_report(state, events):
         if margin.get('phase') in ('connect','start'): clean['phase']=margin['phase']
         report['runtime']['entry_margin']=clean
     report['notes'].extend([
+        'pair.exchange=lighter 表示 Lighter 主网 USDC 永续；兼容字段 leg=binance 代表交易所腿，usdt_usd/commissions_usdt 在该组按 USDC/USD 和 USDC 费用解释。未核验的非零 fee tick 保留估算，不当作实付手续费。',
         'pair.type=mt5_mt5 表示同一 MT5 的相同手数组合；兼容字段 leg=binance 在此类组中代表 MT5 品种 A，leg=mt5 代表 MT5 品种 B；direction=forward 为卖 A 买 B，reverse 为买 A 卖 B，旧组缺失时为 forward。执行价差按实际卖出腿−买入腿归一化，反向组为 B−A，图表统一显示 A−B；parameters.exit_spread_usd 和 exit_decision.target_spread 仍为配置的 A−B 绝对阈值。quantity_unit=lot 时 requested/qty/remaining 均为手数，leg_contracts 为各自每手合约大小；platform=mt5，native_position_side=1 为空头、0 为多头。价差使用原始同报价单位价格相减，盈亏各乘各自合约大小。并发适配器调用不代表同一 MT5 终端能并发撮合。',
         'result.close_cause为已确认外部成交的固定原因证据：MT5保留原reason数字码，6表示Stop Out；币安仅将已签名LIQUIDATION强平订单与原成交编号、方向、数量、均价精确匹配后标记强平。liquidation_protection_armed仅表示已安排保护性平仓，不证明已经双平；liquidation_recovery记录本机发现/安排时间和当时剩余数量。缺失原因不等于手动平仓，平台原始时间不用于推算本机耗时。',
         'quote_source=cache表示下单前使用后台缓存报价，refresh表示走原同步报价读取路径；不是纯网络耗时。开仓第二腿缓存需两边本机接收时间均在250毫秒内，同时满足用户配置的更严格行情时效和时差限制；缓存不足仍走原查询，不放宽开仓敞口时限。',
         'pnl_schema_version=2将币安线性合约价差盈亏先以USDT计算后换汇；已平仓的换算汇率固定，不对开平两笔名义本金分别换汇。旧记录的价差变化不能直接当作净收益。',
-        'exit_decision记录下单前止盈判断的预估收益、预计返佣及阈值，不是成交保证；exit_deferred表示第一腿前报价已不满足逐组止盈条件。adverse_slippage按各订单原报价和成交价计算，正值为不利，slippage_exceeded提示超出预算但不否定真实成交。',
+        'exit_decision记录下单前止盈判断的预估收益、预计返佣及阈值，不是成交保证；confirmation记录正常止盈触发时连续达标次数count及要求次数required，旧记录缺失不补值。exit_confirmation_ticks默认1，多次时同一源报价重复读取不计数；手动、止损、超时及保护退出不等待次数。exit_deferred表示第一腿前报价已不满足逐组止盈条件。adverse_slippage按各订单原报价和成交价计算，正值为不利，slippage_exceeded提示超出预算但不否定真实成交。',
         'execution_request复用MT5下单前已读取的报价与请求：price为请求价格，bid/ask为发单前终端报价，point为最小报价单位，deviation_points为请求允许偏差点数，trade_execution_mode为MT5执行模式数字码，filling为成交方式。只保留数值白名单，不含请求账号、终端路径、编号或注释，不额外查询。MT5市价执行的偏差参数不等于保证成交价格上限。MT5_SLIPPAGE_PRECHECK表示本地滑点检查拦截，submitted=false，未调用order_check/order_send；execution_precheck记录已有终端报价、可执行价price、允许边界limit及滑点预算，tick_time_ms仅为平台原始时间。',
         '币安平仓直接回报为完整FILLED数量但缺少均价时，会做一次有请求超时预算的原订单补查；补查失败保持暂停，已暂停状态不自动恢复。',
         'runtime为本机最后已提交状态，不代表导出时实时持仓；启动/暂停历史受最近2000条事件上限约束。',
@@ -126,6 +127,7 @@ def build_report(state, events):
             row['commission_estimates']=numbers(g['commission_estimates'],'binance_open binance_close mt5_open mt5_close')
         if g.get('pair',{}).get('type') in ('mt5_mt5','exchange_mt5'):
             row['pair']={'type':g['pair']['type']}
+            if g['pair']['type']=='exchange_mt5': row['pair']['exchange']=g['pair'].get('exchange','binance') if g['pair'].get('exchange','binance') in ('binance','lighter') else 'unknown'
             if g['pair']['type']=='mt5_mt5': row['direction']=g.get('direction','forward') if g.get('direction','forward') in ('forward','reverse') else 'unknown'
             if g['pair'].get('endpoints'):
                 row['pair'].update(mode='terminals',endpoints={leg:terminal_alias(ref) for leg,ref in g['pair']['endpoints'].items() if leg in ('binance','mt5')})
@@ -133,6 +135,11 @@ def build_report(state, events):
             row['quantity_unit']='lot';row['leg_contracts']=numbers(g.get('leg_contracts',{}),'binance mt5')
         row['parameters']=numbers(g.get('parameters',{}),'entry_spread_usd entry_lower_usd exit_spread_usd take_contraction_usd max_slippage_usd unwind_slippage_usd max_unhedged_ms max_quote_age_ms max_clock_skew_ms')
         row['parameters'].update(exit_parameters(g.get('parameters',{})))
+        row['parameters'].update(numbers(g.get('parameters',{}),'entry_confirmation_decimals entry_forward_confirmation_ticks entry_reverse_confirmation_ticks'))
+        for direction in ('forward','reverse'):
+            field=f'entry_{direction}_confirmation_mode'
+            if g.get('parameters',{}).get(field) in ('equal','at_or_better'):
+                row['parameters'][field]=g['parameters'][field]
         if type(g.get('parameters',{}).get('entry_spread_guard_enabled')) is bool:
             row['parameters']['entry_spread_guard_enabled']=g['parameters']['entry_spread_guard_enabled']
         row['parameters'].update(numbers(g.get('parameters',{}),'entry_spread_slippage_usd'))
@@ -164,6 +171,10 @@ def build_report(state, events):
             row['exit_decision']=numbers(decision,'signal_spread entry_spread contraction target_contraction target_spread min_net_profit estimated_net estimated_net_before_rebate estimated_gross estimated_exit_fee estimated_rebate valuation_fx basket_estimated_net')
             if type(decision.get('require_net_profit')) is bool: row['exit_decision']['require_net_profit']=decision['require_net_profit']
             if decision.get('target_mode') in ('contraction','absolute'): row['exit_decision']['target_mode']=decision['target_mode']
+            if isinstance(decision.get('confirmation'),dict):
+                row['exit_decision']['confirmation']=numbers(decision['confirmation'],'count required')
+                if type(decision['confirmation'].get('ready')) is bool:
+                    row['exit_decision']['confirmation']['ready']=decision['confirmation']['ready']
         for action in ('open','close'):
             if 'execution_'+action in g:
                 row['execution_'+action]=numbers(g['execution_'+action],'started_ms signal_time_ms signal_spread confirmed_ms elapsed_ms parallel_batches last_dispatch_gap_ms dispatch_gap_ms quote_to_execution_ms')
@@ -270,6 +281,31 @@ def build_report(state, events):
     return report
 
 
+_CURRENT_TRANSPORT=None
+
+
+def register_transport(stream):
+    global _CURRENT_TRANSPORT
+    _CURRENT_TRANSPORT=stream
+
+
+def transport_snapshot(stream):
+    """Only fixed transport labels; never export exception text or URLs."""
+    if stream is None or not callable(getattr(stream,'status',None)):return {}
+    sample=stream.status();result={}
+    for key,allowed in [('state',('idle','connecting','subscribed','streaming','reconnecting','unavailable','closed')),
+                        ('route',('proxy','direct'))]:
+        if sample.get(key) in allowed:result[key]=sample[key]
+    for key in ('reconnects','last_received_ms'):
+        value=sample.get(key)
+        if type(value) is int and value>=0:result[key]=value
+    error=str(sample.get('error') or '')
+    result['error_code']=('REGION_RESTRICTED' if '20558' in error else 'CLIENT_MISSING' if '未安装' in error else
+        'TIMEOUT' if 'Timeout' in error or '超时' in error else 'CONNECTION_ERROR' if error else 'NONE')
+    result['exchange']='lighter' if hasattr(stream,'market_id') else 'binance'
+    return result
+
+
 def export_report(path):
     from trading_store import storage_snapshot
     # Separate read connection: never enter Store.lock or TradingRuntime.lock.
@@ -284,6 +320,8 @@ def export_report(path):
     finally:
         db.close()
     report=build_report(state,events)
+    report['market_transport']=transport_snapshot(_CURRENT_TRANSPORT)
+    report['notes'].append('market_transport为导出时当前连接的内存行情通道状态、重连次数及固定错误分类；不新增平台请求，不含原始错误、代理地址或凭据，不能还原过去每次断线。')
     report['storage']=storage_snapshot(path)
     report['notes'].append('storage为导出时数据所在磁盘的可用空间及数据库/WAL/SHM大小，单位字节；按需读取，不增加下单路径的磁盘检查，不含数据目录路径。')
     aliases={g['id']:'G'+str(i+1) for i,g in enumerate(state.get('groups',[])[-200:])}

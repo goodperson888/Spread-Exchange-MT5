@@ -485,6 +485,7 @@ class PoolRuntime:
                 self.latency.reset(c['execution']['mode'])
                 PROCESS_ENTRY_OBSERVATIONS.reset(c['execution']['mode'])
                 self.engine.entry_confirmations.clear()
+                self.engine.exit_confirmations.clear()
                 for e in owner.endpoints:owner.pump.ingest(e,initial[e['id']])
                 self.quote=owner.pump.read()[0]
                 owner.start();self.connection_attempt.update(state='connected',stage='终端池已连接',elapsed_ms=round((time.monotonic()-self._connection_started)*1000))

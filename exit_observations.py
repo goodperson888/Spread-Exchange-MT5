@@ -7,6 +7,8 @@ from pair_instruments import reverse_pair
 
 
 LABELS = {
+    'WAIT_CONFIRMATION': '止盈条件达标，等待连续新报价确认',
+    'WAIT_BASKET_CONFIRMATION': '本组确认完成，等待整篮子其他成员连续报价确认',
     'WAIT_TARGET': '退出价差尚未达标',
     'WAIT_NET_PROFIT': '退出价差达标，预计净收益不足',
     'WAIT_BASKET_TARGET': '整篮子退出价差尚未达标',
@@ -23,7 +25,7 @@ LABELS = {
     'CLOSE_PENDING': '正在平仓或保护性撤回',
     'ATTENTION_REQUIRED': '交易组异常，等待核对处理',
 }
-RULE_NUMBERS = ('take_contraction_usd', 'exit_spread_usd', 'min_net_profit_usd',
+RULE_NUMBERS = ('take_contraction_usd', 'exit_spread_usd', 'min_net_profit_usd', 'exit_confirmation_ticks',
                 'max_quote_age_ms', 'max_clock_skew_ms', 'group_max_loss_usd', 'max_hold_minutes')
 VALUE_NUMBERS = ('gross', 'fees', 'estimated_exit_fee', 'net_before_rebate',
                  'estimated_rebate', 'net', 'valuation_fx', 'carry')
@@ -54,7 +56,7 @@ class ExitObservations:
             self.mode = mode if mode in ('live', 'paper') else 'unknown'
 
     def observe(self, group, quote, code=None, *, valuation=None, basket=None, limits=None,
-                expected_key=None, trigger=None, now=None):
+                expected_key=None, trigger=None, confirmation=None, now=None):
         """Record evaluated quotes only. Missing valuation stays missing on early returns.
 
         First evidence is immutable. Repeats update latest evidence and extrema;
@@ -73,6 +75,10 @@ class ExitObservations:
         sample = {('quote_time_ms' if k == 'time_ms' else 'entry_spread' if k == 'entry' else 'exit_spread'): x
                   for k, x in sample.items()}
         sample['evaluated_ms'] = now
+        if isinstance(confirmation,dict):
+            sample['confirmation']=numeric(confirmation,('count','required'))
+            for key in ('ready','matched'):
+                if type(confirmation.get(key)) is bool: sample['confirmation'][key]=confirmation[key]
         sample['valuation_evaluated'] = valuation is not None
         sample.update(numeric(v, VALUE_NUMBERS))
         for key in ('estimated', 'fees_verified', 'costs_verified'):

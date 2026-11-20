@@ -7,7 +7,7 @@
   const clone=x=>JSON.parse(JSON.stringify(x));
   const pairs=rows=>{const sorted=[...rows].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);return sorted.flatMap((a,i)=>sorted.slice(i+1).map(b=>({id:[a.id,b.id].join('~'),a,b})));};
   const defaults=()=>({entry_spread_usd:current.strategy.entry_spread_usd,entry_lower_usd:current.strategy.entry_lower_usd??-5,
-    entry_confirmation_decimals:current.strategy.entry_confirmation_decimals??2,
+    entry_confirmation_decimals:current.strategy.entry_confirmation_decimals??2,exit_confirmation_ticks:current.strategy.exit_confirmation_ticks??1,
     ...Object.fromEntries(['forward','reverse'].flatMap(d=>[[`entry_${d}_confirmation_mode`,current.strategy[`entry_${d}_confirmation_mode`]??'at_or_better'],[`entry_${d}_confirmation_ticks`,current.strategy[`entry_${d}_confirmation_ticks`]??1]])),
     direction_mode:'auto',target_mode:current.strategy.target_mode,take_contraction_usd:current.strategy.take_contraction_usd,
     exit_spread_usd:current.strategy.exit_spread_usd,require_net_profit:current.strategy.require_net_profit,
@@ -22,6 +22,14 @@
   }
   function select(label,key,value,options){return `<label>${escape(label)}<select data-pool-rule="${key}">${Object.entries(options).map(([v,t])=>`<option value="${v}"${String(value)===v?' selected':''}>${escape(t)}</option>`).join('')}</select></label>`;}
   const ruleSummary=(a,b,r,unsaved=false)=>`卖 ${a.name}／买 ${b.name} ≥ ${r.entry_spread_usd??'待填写'}；买 ${a.name}／卖 ${b.name} ≤ ${r.entry_lower_usd??'待填写'}${unsaved?' · 未保存':''}`;
+  function sharedConfirmation(r){
+    const d=r.direction_mode==='reverse'?'reverse':'forward';
+    return {mode:r[`entry_${d}_confirmation_mode`]??'at_or_better',ticks:r[`entry_${d}_confirmation_ticks`]??1};
+  }
+  function unifyConfirmation(r,shared=sharedConfirmation(r)){
+    for(const d of ['forward','reverse']){r[`entry_${d}_confirmation_mode`]=shared.mode;r[`entry_${d}_confirmation_ticks`]=shared.ticks;}
+  }
+  function confirmationMismatch(r){return r.entry_forward_confirmation_mode!==r.entry_reverse_confirmation_mode||r.entry_forward_confirmation_ticks!==r.entry_reverse_confirmation_ticks;}
   function ruleError(r){
     if(r.direction_mode==='auto'&&Number.isFinite(r.entry_lower_usd)&&Number.isFinite(r.entry_spread_usd)&&r.entry_lower_usd>r.entry_spread_usd)
       return `自动选择两种买卖组合要求下限 ≤ 上限；当前下限 ${r.entry_lower_usd} > 上限 ${r.entry_spread_usd}，无法保存。允许相等、零和负数。`;
@@ -40,7 +48,7 @@
       const applied=active?`当前连接生效：卖 ${a}／买 ${b} ≥ ${active.entry_spread_usd}；买 ${a}／卖 ${b} ≤ ${active.entry_lower_usd}。`:'当前尚无此终端对的运行参数。';
       const error=ruleError(r);
       const equality=r.direction_mode==='auto'&&r.entry_lower_usd===r.entry_spread_usd?' 上下限相等可保存；两种买卖组合同时到价且空仓时等待报价区分。':'';
-      output.textContent=`${pending}。${applied}${error?' '+error:equality}`;
+      output.textContent=`${pending}。${applied}${error?' '+error:equality}${confirmationMismatch(r)?' 旧配置两边确认设置不同；界面显示所选买卖组合的设置，自动模式显示卖首个平台／买另一个。保存后统一两边，重新连接生效。':''}`;
       output.classList.toggle('error',!!error);
     }
   }
@@ -67,14 +75,14 @@
     for(const key of Object.keys(draft.rules))if(!ids.has(key))delete draft.rules[key];
     el('pool-rule-editors').innerHTML=list.map(({id,a,b})=>{
       const r=draft.rules[id]={...defaults(),...draft.rules[id]};
-      const number=(label,key)=>field(label,key,r[key]).replace('data-pool-field','data-pool-rule');
+      const shared=sharedConfirmation(r);
+      const number=(label,key,value=r[key])=>field(label,key,value).replace('data-pool-field','data-pool-rule');
       return `<details class="pool-rule" data-pool-edge="${escape(id)}"${expanded.has(id)?' open':''}><summary>${escape(ruleSummary(a,b,r,dirty))}</summary><p class="note">价差固定按 ${escape(a.name)} − ${escape(b.name)} 显示。卖 ${escape(a.name)}／买 ${escape(b.name)} 比较 Bid − Ask；买 ${escape(a.name)}／卖 ${escape(b.name)} 比较 Ask − Bid。两项均可填负数。连续确认仅统计新报价；不达标、过期、暂停或下单后清零。等于模式按小数位四舍五入，优于模式比较原始值。次数增加会延长确认等待。</p><p class="note" data-pool-rule-state role="status"></p><div class="grid">`+
         select('允许的买卖组合','direction_mode',r.direction_mode,{auto:'两种买卖组合自动选择',forward:`只卖 ${a.name}／买 ${b.name}`,reverse:`只买 ${a.name}／卖 ${b.name}`})+
         number(`卖 ${a.name}／买 ${b.name} · 价差 ≥ 上限`,'entry_spread_usd')+number(`买 ${a.name}／卖 ${b.name} · 价差 ≤ 下限`,'entry_lower_usd')+
-        select(`卖 ${a.name}／买 ${b.name} · 确认方式`,'entry_forward_confirmation_mode',r.entry_forward_confirmation_mode,{at_or_better:'达到或优于设定值',equal:'按精度等于设定值'})+
-        number('连续新报价次数','entry_forward_confirmation_ticks')+
-        select(`买 ${a.name}／卖 ${b.name} · 确认方式`,'entry_reverse_confirmation_mode',r.entry_reverse_confirmation_mode,{at_or_better:'达到或优于设定值',equal:'按精度等于设定值'})+
-        number('连续新报价次数','entry_reverse_confirmation_ticks')+number('等于模式比较小数位（0～8）','entry_confirmation_decimals')+
+        select('两种买卖组合共用开仓确认方式','entry_confirmation_mode',shared.mode,{at_or_better:'达到或优于设定值',equal:'按精度等于设定值'})+
+        number('开仓连续新报价次数（两种买卖组合共用）','entry_confirmation_ticks',shared.ticks)+number('等于模式比较小数位（0～8）','entry_confirmation_decimals')+
+        number('止盈连续新报价次数（仅正常止盈）','exit_confirmation_ticks',r.exit_confirmation_ticks??1)+
         select('止盈方式','target_mode',r.target_mode,{contraction:'相对实际开仓价差收窄',absolute:`绝对 ${a.name} − ${b.name} 退出阈值`})+
         number('收窄目标 USD/报价单位','take_contraction_usd')+number(`绝对退出价差 ${a.name} − ${b.name}`,'exit_spread_usd')+
         select('平仓净收益门槛','require_net_profit',r.require_net_profit,{true:'要求达到最低净收益',false:'不要求净收益'})+
@@ -132,6 +140,7 @@
       if(error)throw Error(`${a.name} × ${b.name}：${error} 当前生效参数未改变。`);
     }
     const submitted=JSON.stringify(draft),pool=clone(draft);
+    for(const rule of Object.values(pool.rules))unifyConfirmation(rule);
     const result=await api('/api/mt5/pool/save',{expected_pair_id:current.pair.id,pool});
     if(JSON.stringify(draft)!==submitted)throw Error('保存期间终端或规则又有修改，请核对后重新保存。');
     current=result.config;draft=clone(current.mt5_pool);dirty=false;
@@ -154,7 +163,12 @@
     if(!key)return;
     const endpoint=input.closest('[data-pool-endpoint]'),edge=input.closest('[data-pool-edge]');
     const target=endpoint?draft.endpoints.find(e=>e.id===endpoint.dataset.poolEndpoint):draft.rules[edge.dataset.poolEdge];
-    target[key]=input.type==='checkbox'?input.checked:input.tagName==='SELECT'?(['true','false'].includes(input.value)?input.value==='true':input.value):input.type==='number'?(input.value.trim()===''?null:Number(input.value)):input.value;
+    const value=input.type==='checkbox'?input.checked:input.tagName==='SELECT'?(['true','false'].includes(input.value)?input.value==='true':input.value):input.type==='number'?(input.value.trim()===''?null:Number(input.value)):input.value;
+    const shared=edge?sharedConfirmation(target):null;
+    if(key==='entry_confirmation_mode')shared.mode=value;
+    else if(key==='entry_confirmation_ticks')shared.ticks=value;
+    else target[key]=value;
+    if(edge)unifyConfirmation(target,shared);
     if(edge){
       const pair=pairs(draft.endpoints).find(p=>p.id===edge.dataset.poolEdge);
       edge.querySelector('summary').textContent=ruleSummary(pair.a,pair.b,target,true);

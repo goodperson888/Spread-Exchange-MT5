@@ -573,7 +573,7 @@ test('existing group exits require a preview and explicit apply without saving m
  assert.equal(f.el('exit-rules-panel').open,true);
  assert.equal(f.el('exit-rule-group').value,'group:g1');
  assert.equal(f.el('exit-rule-take').value,'2');
- f.el('exit-rule-take').value='1.5';f.el('exit-rule-fields').oninput();
+ f.el('exit-rule-take').value='1.5';f.el('exit-rule-confirm').value='4';f.el('exit-rule-fields').oninput();
  assert.equal(f.el('exit-rule-apply').disabled,true);
  f.el('exit-rule-preview').onclick();
  assert.match(f.el('exit-rule-result').textContent,/#g1 原规则.*收窄 ≥ 2[\s\S]*修改为.*收窄 ≥ 1.5[\s\S]*可能立即触发平仓/);
@@ -581,7 +581,7 @@ test('existing group exits require a preview and explicit apply without saving m
  assert.equal(f.el('exit-rule-apply').disabled,false);
  await f.el('exit-rule-apply').onclick();
  assert.deepEqual(applied.groups,['g1']);assert.deepEqual(applied.expected_revisions,{g1:0});
- assert.equal(applied.rules.take_contraction_usd,1.5);
+ assert.equal(applied.rules.take_contraction_usd,1.5);assert.equal(applied.rules.exit_confirmation_ticks,4);
  assert.equal(f.el('exit-rule-apply').disabled,true);
  assert.equal(f.el('exit-rule-result').textContent,'已更新所选已有组');
  assert.ok(!f.calls.some(c=>c.url==='/api/config'||c.url.includes('/close')));
@@ -1302,4 +1302,17 @@ test('exact-value entry displays confirmation progress by terminal and rejects a
  assert.doesNotMatch(f.el('live-opportunity').textContent,/达到阈值/);
  assert.match(f.el('native-direction-status').textContent,/0.02 = 0.01，等待/);
  assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+
+test('group records show profit confirmation progress without issuing trade requests',async()=>{
+ for(const native of [false,true]){
+  const snapshot=editableSnapshot();const g=snapshot.state.groups[0];
+  g.parameters.exit_confirmation_ticks=5;g.exit_confirmation={count:2,required:5,matched:true,ready:false};
+  if(native){g.pair={type:'mt5_mt5',name:'平台甲 × 平台乙'};g.leg_contracts={binance:100,mt5:100};g.costs={};}
+  const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+  assert.match(f.el('groups').innerHTML,/止盈确认 2\/5/);
+  assert.match(f.el('groups').innerHTML,/止盈连续新报价：5 次/);
+  assert.ok(f.calls.every(c=>c.method==='GET'));
+ }
 });

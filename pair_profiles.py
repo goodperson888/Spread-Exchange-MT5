@@ -32,6 +32,8 @@ def clean_profile(body, config):
     p['name']=str(body.get('name','')).strip()
     if not 1<=len(p['name'])<=60: raise ValueError('组合名称需为 1～60 个字符')
     p['type']=body.get('type','exchange_mt5')
+    p['exchange']=body.get('exchange','binance')
+    if p['exchange'] not in ('binance','lighter'): raise ValueError('请选择已支持的交易所')
     if p['type'] not in ('exchange_mt5','mt5_mt5'): raise ValueError('组合类型无效')
     for key in ('short_symbol','long_symbol'):
         value=str(body.get(key,'')).strip()
@@ -49,9 +51,9 @@ def clean_profile(body, config):
         p['strategy'].update(direction_mode='auto',entry_lower_usd=min(-max(1,abs(upper)),upper-1),grid_enabled=False,exit_mode='group')
         from mt5_pool_config import seed_rules
         p['mt5_pool']=seed_rules(p['mt5_pool'],p['strategy'])
-    if p['short_symbol']==p['long_symbol'] and not is_pool: raise ValueError('两条腿不能是同一品种')
-    if p['type']=='exchange_mt5' and not re.fullmatch(r'[A-Z0-9]{5,24}',p['short_symbol']):
-        raise ValueError('请填写完整的 USDT 黄金合约名，连接时核验实际标的与数量规则')
+    if p['type']=='mt5_mt5' and p['short_symbol']==p['long_symbol'] and not is_pool: raise ValueError('两条腿不能是同一品种')
+    if p['type']=='exchange_mt5' and not re.fullmatch(r'[A-Z0-9]{2,24}' if p['exchange']=='lighter' else r'[A-Z0-9]{5,24}',p['short_symbol']):
+        raise ValueError('请填写交易所完整黄金永续合约名，连接时核验实际标的与数量规则')
     p['symbol']=p['short_symbol'];p['quantity_unit']='lot' if p['type']=='mt5_mt5' else 'oz'
     # New profiles copy reviewed parameters; they never inherit a running/armed state.
     if p['id']!=pair_info(config)['id']:
@@ -59,12 +61,15 @@ def clean_profile(body, config):
         if p['type']=='mt5_mt5' and not config.get('pair',{}).get('type')=='mt5_mt5':
             p['strategy']['direction_mode']='auto'
             p['strategy']['entry_lower_usd']=-max(1,abs(p['strategy']['entry_spread_usd']))
+    if p['exchange']=='lighter' and config.get('pair',{}).get('exchange','binance')!='lighter':
+        p['costs'].update(usdt_usd=1.,usdt_usd_auto=True,binance_fee_auto=True,binance_rebate_percent=0.)
     return p
 
 
 def activate(config, profile):
     c=copy.deepcopy(config)
     c['pair']={k:profile[k] for k in ('id','name','type','short_symbol')}
+    if profile['type']=='exchange_mt5': c['pair']['exchange']=profile.get('exchange','binance')
     c.pop('mt5_pool',None)
     if profile.get('mode')=='pool':
         c['pair']['mode']='pool';c['mt5_pool']=copy.deepcopy(profile['mt5_pool'])

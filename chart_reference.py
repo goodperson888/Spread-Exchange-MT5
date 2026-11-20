@@ -148,8 +148,15 @@ def fetch_bars(config,period,start,end,cancel):
         if native_pair(config): short=read(short_symbol(config),'binance')
         else:
             diagnostics['stage']='exchange'
-            client=Binance(production=True,proxy_url=config.get('binance',{}).get('proxy_url',''))
-            short=[];cursor=start
+            from exchange_venues import venue
+            if venue(config)=='lighter':
+                from lighter_broker import Lighter
+                client=Lighter(config.get('lighter',{}))
+                short=client.chart_bars(config['symbol'],period,start,end,check)
+                cursor=end;page=[]
+            else:
+                client=Binance(production=True,proxy_url=config.get('binance',{}).get('proxy_url',''))
+                short=[];cursor=start
             for _ in range(9):
                 if cursor>=end: break
                 page=client.request('/fapi/v1/klines',dict(symbol=config['symbol'],
@@ -275,6 +282,7 @@ class ReferenceHistory:
                     clean={k:copy.deepcopy(config[k]) for k in ('mt5','execution','pair','symbol') if k in config}
                     clean['mt5'].pop('mcp_token',None)
                     clean['binance']={'proxy_url':config.get('binance',{}).get('proxy_url','')}
+                    clean['lighter']={k:copy.deepcopy(config.get('lighter',{}).get(k)) for k in ('account_index','api_key_index','proxy_url')}
                     end=now-now%interval
                     self.pending=(key,clean,period_for(minutes),start-start%interval,end,connected)
                     if self.active_key and self.active_key!=key: self.cancel.set()
@@ -306,7 +314,7 @@ class ReferenceHistory:
         if state=='ready' and not values: message='平台未返回可按同一时间配对的完整 K 线，保留空缺。'
         return dict(state=state,message=message,samples=[row for row in values if row['time_ms']//interval not in covered],
                     stats=stats,interval_ms=interval,period=period_for(minutes),fx=fx,reference_only=True,
-                    source='MT5 双品种收盘价' if native_pair(config) else '币安合约成交收盘价 × 当前参考汇率 − MT5 收盘价',
+                    source='MT5 双品种收盘价' if native_pair(config) else ('Lighter' if config.get('pair',{}).get('exchange')=='lighter' else '币安')+'合约成交收盘价 × 当前参考汇率 − MT5 收盘价',
                     coverage_start=values[0]['time_ms'] if values else None,
                     coverage_end=values[-1]['time_ms']+interval if values else None,cache_warning=warning,diagnostics=diagnostics)
 

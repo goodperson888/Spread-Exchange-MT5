@@ -39,6 +39,8 @@ def validate_proxy_url(value):
 def validate(c):
     for k,v in CONFIRMATION_DEFAULTS.items(): c['strategy'].setdefault(k,v)
     s=c['strategy']
+    if type(s['exit_confirmation_ticks']) is not int or not 1<=s['exit_confirmation_ticks']<=1000:
+        raise ValueError('止盈连续新报价次数必须为 1～1000 的整数')
     for direction in ('forward','reverse'):
         if s[f'entry_{direction}_confirmation_mode'] not in ('equal','at_or_better'):
             raise ValueError('连续报价确认方式必须为等于或达到／优于设定值')
@@ -68,7 +70,18 @@ def validate(c):
     s.setdefault('entry_spread_slippage_usd', s.get('max_slippage_usd', 0.5))
     validate_alerts(c.get('risk_alerts', {}))
     validate_proxy_url(c.get('binance', {}).get('proxy_url', ''))
-    if not native_pair(c) and not re.fullmatch(r'[A-Z0-9]{5,24}', c['symbol']):
+    from exchange_venues import venue
+    provider=venue(c)
+    if provider=='lighter':
+        lighter=c.get('lighter',{})
+        validate_proxy_url(lighter.get('proxy_url',''))
+        account=lighter.get('account_index')
+        if account is not None and (type(account) is not int or not 0<=account<2**48): raise ValueError('Lighter 账户索引必须为非负整数')
+        key_index=lighter.get('api_key_index',3)
+        if type(key_index) is not int or not 2<=key_index<=254: raise ValueError('Lighter API Key 索引必须为 2～254')
+        key=lighter.get('api_private_key','')
+        if key and (not isinstance(key,str) or not re.fullmatch(r'(?:0x)?[0-9a-fA-F]{80}',key)): raise ValueError('Lighter API 私钥需为 80 位十六进制，不是公钥或钱包私钥')
+    if not native_pair(c) and not re.fullmatch(r'[A-Z0-9]{2,24}' if provider=='lighter' else r'[A-Z0-9]{5,24}', c['symbol']):
         raise ValueError('币安合约名称无效，请填写平台实际名称，例如 XAUUSDT')
     if native_pair(c):
         mode=s.get('direction_mode','forward');lower=s.get('entry_lower_usd',-5)
@@ -181,7 +194,12 @@ def pair_key(c):
         return 'mt5_mt5|'+ '|'.join(str(x) for x in (c['execution']['mode'],c['mt5']['adapter'],
             c['mt5'].get('terminal_path'),c['mt5'].get('account'),c['mt5'].get('server'),
             short_symbol(c),c['mt5']['symbol'],c['execution']['magic'],c.get('pair',{}).get('id','legacy')))
-    return '|'.join(str(x) for x in (c['execution']['mode'], c['execution']['quote_source'], c['symbol'],
+    from exchange_venues import venue
+    prefix=''
+    if venue(c)=='lighter':
+        settings=c.get('lighter',{})
+        prefix=f"lighter|{settings.get('account_index')}|{settings.get('api_key_index',3)}|"
+    return prefix+'|'.join(str(x) for x in (c['execution']['mode'], c['execution']['quote_source'], c['symbol'],
         c['mt5']['adapter'], c['mt5'].get('terminal_path'), c['mt5'].get('account'), c['mt5'].get('server'),
         c['mt5']['symbol'], c['execution']['magic']))
 
@@ -194,13 +212,15 @@ def plan(c, mt5, exchange, price):
     if not fits(lots, mt5['volume_min'], mt5['volume_max'], mt5['volume_step']):
         raise ValueError('MT5 手数不符合实际合约规格')
     qty = lots * Decimal(str(mt5['contract_size_oz']))
-    if exchange['status'] != 'TRADING' or exchange.get('baseAsset') not in ('XAU', 'PAXG') or exchange.get('quoteAsset') != 'USDT':
-        raise ValueError('请选择可交易的 USDT 黄金合约；不自动替换其他品种')
+    from exchange_venues import metadata
+    info=metadata(c)
+    if exchange['status'] != 'TRADING' or exchange.get('baseAsset') not in ('XAU', 'PAXG') or exchange.get('quoteAsset') != info['currency']:
+        raise ValueError('请选择对应交易所可交易的黄金永续合约；不自动替换其他品种')
     for key in ('LOT_SIZE', 'MARKET_LOT_SIZE'):
         f=exchange['filters'].get(key)
         if not f or not fits(qty, f['minQty'], f['maxQty'], f['stepSize']):
-            raise ValueError('等黄金数量不符合币安数量规则，请调整 MT5 手数')
+            raise ValueError('等黄金数量不符合交易所数量规则，请调整 MT5 手数')
     f=exchange['filters'].get('MIN_NOTIONAL', {})
     if qty*Decimal(str(price)) < Decimal(str(f.get('notional', f.get('minNotional', 0)))):
-        raise ValueError('币安名义金额低于最小下单金额')
+        raise ValueError('交易所名义金额低于最小下单金额')
     return {'lots':float(lots), 'qty':float(qty), 'contract':mt5['contract_size_oz']}

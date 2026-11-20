@@ -53,6 +53,7 @@ class Engine:
         self._execution_timers={}
         self._reconcile_notices={}
         self.entry_confirmations=EntryConfirmations()
+        self.exit_confirmations=EntryConfirmations()
         self.state=store.load() or dict(groups=[],orders=[],last_open_ms=0,enabled=False,mode='paper',key=None,alarm='',recovery=False)
         self.state['enabled']=False
         self.state['boot_ms']=stamp()
@@ -73,7 +74,18 @@ class Engine:
 
     def _observe_exit(self, g, q, code=None, **evidence):
         observer = getattr(self, 'exit_observations', None)
-        if observer is not None: observer.observe(g, direction_quote(q,g), code, **evidence)
+        if observer is not None:
+            confirmation=self.exit_confirmations.snapshot(g['id'],max_age_ms=g['parameters']['max_quote_age_ms']).get('forward')
+            observer.observe(g, direction_quote(q,g), code, confirmation=confirmation, **evidence)
+
+    def _confirm_profit_exit(self, g, q, hit, members=()):
+        # Reuse source-tick deduplication; exits have an independent memory-only
+        # gate. A miss includes either target or required net-profit failure.
+        rules=dict(entry_forward_confirmation_ticks=g['parameters'].get('exit_confirmation_ticks',1),
+            max_quote_age_ms=g['parameters']['max_quote_age_ms'],
+            exit_revision=g.get('exit_rules_revision',0),members=members,
+            exit_rules=tuple(sorted(g['parameters'].items())),costs=tuple(sorted(g['costs'].items())))
+        return self.exit_confirmations.observe(g['id'],rules,{**q,'entry':1 if hit else 0},'forward',1,reuse_single=True)
 
     def observe_entry(self, c, q, code, **evidence):
         observer = getattr(self, 'entry_observations', None)
@@ -82,9 +94,10 @@ class Engine:
                 confirmation=self.entry_confirmations.snapshot(pair_key(c),max_age_ms=c['strategy']['max_quote_age_ms']), **evidence)
 
     def observe_exit_wait(self, c, q, code):
-        if getattr(self, 'exit_observations', None) is None: return
         for g in self.active():
             if getattr(self,'multi_pair',False) and g['key']!=pair_key(c): continue
+            if code in ('QUOTE_UNAVAILABLE','RECOVERY_PENDING'):
+                self.exit_confirmations.reset(g['id'])
             self._observe_exit(g, q, code, limits=c['strategy'], expected_key=pair_key(c))
 
     def active(self): return [g for g in self.state['groups'] if g['status']!='closed']
@@ -179,7 +192,10 @@ class Engine:
         ready=time.monotonic()
         o['intent_journal_ms']=round((ready-journal_started)*1000,3)
         self._latency('intent_journal_ms',o['intent_journal_ms'])
-        receipt=dispatch_order(self.broker,copy.deepcopy(o),started=ready,clock_ms=stamp)
+        wire=copy.deepcopy(o)
+        if g.get('pair',{}).get('exchange')=='lighter' and action=='open':
+            wire['_submit_deadline_monotonic']=self._entry_deadlines.get(g['id'],ready)
+        receipt=dispatch_order(self.broker,wire,started=ready,clock_ms=stamp)
         self._accept_order_result(g,o,receipt)
         if action=='close' and self._price_only_full_fill(o):
             o['reconcile']['next_ms']=stamp()
@@ -1018,6 +1034,7 @@ class Engine:
                 self._observe_exit(g,q,'RECHECK_TARGET' if not self.target(g,g['entry'],q['exit'])
                                    else 'RECHECK_NET_PROFIT',valuation=v)
                 g.update(status='open',reason='止盈报价已变化，继续持仓等待条件')
+                self.exit_confirmations.reset(g['id'])
                 g.pop('exit_signal',None);g.pop('exit_decision',None);g.pop('execution_close',None)
                 self._execution_timers.pop((g['id'],'close'),None)
                 self.save('exit_deferred',dict(group=g['id'],reason=g['reason'],
@@ -1116,6 +1133,7 @@ class Engine:
             started = time.monotonic() if measure else 0
             g['valuation']=self.valuation(g,q)
             if g['status']!='open' or (g.get('imported') and not g.get('management_enabled')):
+                self.exit_confirmations.reset(g['id'])
                 self._observe_exit(g,q,{'opening':'OPENING_PENDING','closing':'CLOSE_PENDING',
                     'unwinding':'CLOSE_PENDING','attention':'ATTENTION_REQUIRED'}.get(g['status'],'MANAGEMENT_DISABLED'),
                     valuation=g['valuation'],limits=c['strategy'])
@@ -1139,6 +1157,17 @@ class Engine:
                 basket_evidence=dict(entry=entry,net=net,members=len(basket),
                     target_blocked_members=sum(not self.target(g,entry,q['exit']) for g in basket),
                     net_blocked_members=sum(g['parameters']['require_net_profit'] and net<g['parameters']['min_net_profit_usd'] for g in basket))
+        profit_confirmation={}
+        members=tuple(sorted(g['id'] for g in basket));basket_ids=set(members)
+        for g in opened:
+            q=direction_quote(market_quote,g);s=g['parameters'];v=g['valuation']
+            hit=(g['id'] in basket_exit if g['id'] in basket_ids else
+                 self.target(g,g['entry'],q['exit']) and
+                 (not s['require_net_profit'] or v['net']>=s['min_net_profit_usd']))
+            if g.get('imported'): hit=self.target(g,g['entry'],q['exit']) and v['net']>=s['min_net_profit_usd']
+            profit_confirmation[g['id']]=self._confirm_profit_exit(g,q,hit,members if g['id'] in basket_ids else ())
+        if basket_exit and not all(profit_confirmation[gid]['ready'] for gid in basket_exit):
+            basket_exit=set()
         for g in opened:
             q=direction_quote(market_quote,g)
             s=g['parameters'];v=g['valuation'];reason=''
@@ -1149,7 +1178,13 @@ class Engine:
             elif s['max_hold_minutes'] and stamp()-g['opened_ms']>=s['max_hold_minutes']*60000: reason='持仓超时'
             elif g['id'] in basket_exit: reason='整篮子止盈'
             elif s['exit_mode']=='group' and self.target(g,g['entry'],q['exit']) and (not s['require_net_profit'] or v['net']>=s['min_net_profit_usd']): reason='逐组止盈'
-            self._observe_exit(g,q,valuation=v,basket=basket_evidence,trigger=reason,limits=c['strategy'])
+            normal_profit=reason in ('逐组止盈','整篮子止盈','接管篮子收窄并盈利')
+            confirmation=profit_confirmation[g['id']]
+            if normal_profit and not confirmation['ready']: reason=''
+            waiting=not reason and confirmation['matched'] and not confirmation['ready']
+            basket_wait=not reason and g['id'] in basket_ids and confirmation['matched'] and confirmation['ready'] and not basket_exit
+            self._observe_exit(g,q,'WAIT_CONFIRMATION' if waiting else 'WAIT_BASKET_CONFIRMATION' if basket_wait else None,
+                valuation=v,basket=basket_evidence,trigger=reason,limits=c['strategy'])
             if reason:
                 self._begin_execution(g,'close',q)
                 decision=dict(signal_spread=q['exit'],entry_spread=g['entry'],
@@ -1160,6 +1195,8 @@ class Engine:
                     estimated_rebate=v['estimated_rebate'],valuation_fx=v['valuation_fx'],
                     require_net_profit=s['require_net_profit'],target_mode=s['target_mode'])
                 if g['id'] in basket_exit: decision['basket_estimated_net']=sum(x['valuation']['net'] for x in basket)
+                if normal_profit: decision['confirmation']={k:confirmation[k] for k in ('count','required','ready')}
+                self.exit_confirmations.reset(g['id'])
                 g.update(status='closing',reason=reason,exit_signal=q['exit'],exit_decision=decision)
                 if measure: decision_elapsed += time.monotonic()-started
                 exit_event=True;self.save('exit_signal',{'group':g['id'],'reason':reason,**decision})

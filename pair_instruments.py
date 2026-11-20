@@ -87,6 +87,9 @@ def pair_info(config):
                 type='mt5_mt5' if native else 'exchange_mt5',
                 short_symbol=short_symbol(config) if native else config['symbol'],
                 long_symbol=config['mt5']['symbol'], quantity_unit='lot' if native else 'oz')
+    if not native:
+        from exchange_venues import venue
+        result['exchange']=venue(config)
     if p.get('mode'): result['mode']=p['mode']
     if p.get('endpoints'):
         from mt5_pool_config import endpoint_ref

@@ -410,6 +410,17 @@ class Binance:
         return total
 
 
+def public_stream_error(exc):
+    """Public stream errors must never include proxy URLs or HTTP headers."""
+    name=type(exc).__name__
+    if 'timeout' in name.lower(): return 'WebSocket 连接或接收超时，请检查代理对 fstream.binance.com 的规则'
+    if 'proxy' in name.lower(): return 'WebSocket 代理连接失败，请检查 HTTP/Mixed 端口'
+    if 'ssl' in name.lower(): return 'WebSocket TLS 握手失败，请检查代理和系统时间'
+    if 'address' in name.lower() or 'gaierror' in name.lower(): return 'WebSocket 域名解析失败'
+    status=getattr(exc,'status_code',None)
+    return f'WebSocket 连接失败（{name}'+(f'，HTTP {status}' if isinstance(status,int) else '')+'）'
+
+
 class BinanceBookTicker:
     """Reconnectable best-bid/ask stream with a REST-compatible quote shape."""
     def __init__(self, symbol, production=True, proxy_url=''):
@@ -417,6 +428,7 @@ class BinanceBookTicker:
         self.proxy_url=str(proxy_url or '').strip()
         self.lock=threading.RLock();self.stop_event=threading.Event();self.ready=threading.Event()
         self.value=None;self.error='';self.socket=None;self.thread=None;self.on_quote=None
+        self.connection_state='waiting';self.reconnects=0;self.last_received_ms=None
 
     def start(self):
         if websocket is None:
@@ -427,7 +439,8 @@ class BinanceBookTicker:
 
     def _run(self):
         host='wss://fstream.binance.com' if self.production else 'wss://fstream.binancefuture.com'
-        url=f'{host}/ws/{self.symbol.lower()}@bookTicker';backoff=1
+        url=f'{host}/public/ws/{self.symbol.lower()}@bookTicker' if self.production else f'{host}/ws/{self.symbol.lower()}@bookTicker'
+        backoff=1
         while not self.stop_event.is_set():
             ws=None
             try:
@@ -435,9 +448,10 @@ class BinanceBookTicker:
                 if self.proxy_url:
                     proxy=urlsplit(self.proxy_url)
                     options.update(http_proxy_host=proxy.hostname,http_proxy_port=proxy.port,proxy_type='http')
+                self.connection_state='connecting'
                 ws=websocket.create_connection(url,**options)
                 ws.settimeout(30)
-                with self.lock: self.socket=ws;self.error=''
+                with self.lock: self.socket=ws;self.error='';self.connection_state='subscribed'
                 backoff=1
                 while not self.stop_event.is_set():
                     payload=json.loads(ws.recv())
@@ -447,19 +461,26 @@ class BinanceBookTicker:
                            time_ms=int(payload.get('E') or payload.get('T') or time.time()*1000),
                            received_ms=int(time.time()*1000))
                     if 0<q['bid']<=q['ask']:
-                        with self.lock: self.value=q
+                        with self.lock: self.value=q;self.last_received_ms=q['received_ms'];self.connection_state='streaming'
                         self.ready.set()
                         if self.on_quote: self.on_quote()
             except Exception as exc:
-                with self.lock: self.error=str(exc);self.socket=None
+                with self.lock:
+                    self.error=public_stream_error(exc);self.connection_state='reconnecting';self.reconnects+=1
+                    self.value=None;self.ready.clear()
             finally:
                 with self.lock:
-                    ws=self.socket;self.socket=None
+                    self.socket=None
                 try:
                     if ws: ws.close()
                 except Exception: pass
             if self.stop_event.wait(backoff): break
             backoff=min(30,backoff*2)
+
+    def status(self):
+        with self.lock:
+            return dict(state=self.connection_state,error=self.error,reconnects=self.reconnects,
+                        last_received_ms=self.last_received_ms,route='proxy' if self.proxy_url else 'direct')
 
     def quote(self, max_age_ms=5000, wait_ms=0):
         if wait_ms: self.ready.wait(wait_ms/1000)
@@ -1106,6 +1127,10 @@ class LiveBroker:
                 # or insufficient, Binance.submit performs the deeper REST
                 # check before sending the IOC order.
                 wire_order['depth_guard']=not math.isfinite(top_qty) or top_qty+1e-12 < float(wire_order['requested'])
+            if order['leg']=='binance' and getattr(self.b,'name','')=='Lighter':
+                age=max(0,int(time.time()*1000)-order.get('created_ms',int(time.time()*1000)))
+                lifetime=self.config['strategy']['max_quote_age_ms']/1000-age/1000
+                wire_order.setdefault('_submit_deadline_monotonic',time.monotonic()+max(0,lifetime))
             result=self.b.submit(wire_order,self.spec) if order['leg']=='binance' else self.m.call('submit',order=wire_order)
             # Return fills immediately so the other leg can hedge them. Fee
             # history is verified after closing, outside paired execution.

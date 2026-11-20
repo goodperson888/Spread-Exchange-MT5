@@ -49,6 +49,18 @@ class ExitRulesTests(unittest.TestCase):
         self.assertTrue(self.r.market_wake.is_set())
         self.broker.submit.assert_not_called();self.r.binance.assert_not_called();self.r.terminal.assert_not_called()
 
+    def test_profit_confirmation_edit_resets_progress_and_is_durable(self):
+        self.g['parameters']['exit_confirmation_ticks']=5
+        q=quote(self.c,bid=4302,ask=4302.1)
+        self.e.tick(self.c,self.plan,q)
+        self.assertEqual(self.e.exit_confirmations.snapshot(self.g['id'])['forward']['count'],1)
+        self.r.apply_exit_rules(self.body(exit_confirmation_ticks=3))
+        self.assertEqual(self.e.exit_confirmations.snapshot(self.g['id'])['forward']['count'],0)
+        self.assertEqual(self.store.load()['groups'][0]['parameters']['exit_confirmation_ticks'],3)
+        self.e.tick(self.c,self.plan,q)
+        self.assertEqual(self.e.exit_confirmations.snapshot(self.g['id'])['forward']['count'],0)
+        self.assertEqual(self.g['status'],'open')
+
     def test_new_conditions_take_effect_on_next_valid_tick_while_entry_is_paused(self):
         self.e.pause();self.r.apply_exit_rules(self.body(take_contraction_usd=1))
         self.assertEqual(self.g['status'],'open');self.broker.submit.assert_not_called()

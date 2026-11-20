@@ -103,6 +103,20 @@ RECEIPT_ENUMS = {
 }
 RECEIPT_BOOLS = ('reduceOnly','closePosition','priceProtect')
 RECEIPT_IDS = {'binance': ('orderId','clientOrderId'), 'mt5': ('order','deal','request_id')}
+RECEIPT_NUMBERS['lighter']=('initial_base_amount','remaining_base_amount','filled_base_amount','filled_quote_amount','price','timestamp','created_at','updated_at','transaction_time')
+RECEIPT_IDS['lighter']=('order_index','order_id','client_order_index')
+LIGHTER_STATUSES=('filled','canceled','open','pending','accepted','unconfirmed')
+PLATFORM_STATUSES=tuple(PLATFORM_STATUSES)+LIGHTER_STATUSES
+
+def receipt_enums(platform):
+    return {'status':LIGHTER_STATUSES} if platform=='lighter' else RECEIPT_ENUMS if platform=='binance' else {}
+
+def receipt_bools(platform):
+    return ('is_ask','reduce_only') if platform=='lighter' else RECEIPT_BOOLS if platform=='binance' else ()
+
+def receipt_keys(platform):
+    return RECEIPT_NUMBERS[platform]+tuple(receipt_enums(platform))+receipt_bools(platform)
+
 FIELD_TYPES = {'missing','null','boolean','number','string','object','array','other'}
 
 
@@ -127,10 +141,10 @@ def finite_number(value):
 
 def receipt_evidence(value):
     """Re-apply the allowlist at export, including to persisted nested data."""
-    if not isinstance(value,dict) or value.get('platform') not in ('binance','mt5'): return {}
+    if not isinstance(value,dict) or value.get('platform') not in RECEIPT_NUMBERS: return {}
     platform=value['platform']; data={'platform':platform}
     if isinstance(value.get('payload_type'),str) and value['payload_type'] in FIELD_TYPES: data['payload_type']=value['payload_type']
-    keys=RECEIPT_NUMBERS[platform]+(tuple(RECEIPT_ENUMS)+RECEIPT_BOOLS if platform=='binance' else ())
+    keys=receipt_keys(platform)
     shapes=value.get('field_types'); values=value.get('values')
     if isinstance(shapes,dict):
         data['field_types']={k:shapes[k] for k in keys if isinstance(shapes.get(k),str) and shapes[k] in FIELD_TYPES}
@@ -139,10 +153,10 @@ def receipt_evidence(value):
         for k in RECEIPT_NUMBERS[platform]:
             n=values.get(k)
             if isinstance(n,(int,float)) and not isinstance(n,bool) and math.isfinite(n): clean[k]=n
-        if platform=='binance':
-            for k,allowed in RECEIPT_ENUMS.items():
+        if platform in ('binance','lighter'):
+            for k,allowed in receipt_enums(platform).items():
                 if isinstance(values.get(k),str) and values[k] in allowed: clean[k]=values[k]
-            for k in RECEIPT_BOOLS:
+            for k in receipt_bools(platform):
                 if type(values.get(k)) is bool: clean[k]=values[k]
         data['values']=clean
     for k in RECEIPT_IDS[platform]:
@@ -159,15 +173,16 @@ def capture_receipt(platform, payload):
         payload={k:getattr(payload,k) for k in keys if hasattr(payload,k)}
     data={'platform':platform,'payload_type':field_type(payload),'field_types':{},'values':{}}
     if not isinstance(payload,dict): return data
-    keys=RECEIPT_NUMBERS[platform]+(tuple(RECEIPT_ENUMS)+RECEIPT_BOOLS if platform=='binance' else ())
+    keys=receipt_keys(platform)
     for k in keys:
         data['field_types'][k]=field_type(payload[k]) if k in payload else 'missing'
         if k in RECEIPT_NUMBERS[platform]:
             n=finite_number(payload.get(k))
             if n is not None: data['values'][k]=n
-        elif k in RECEIPT_ENUMS:
+        elif k in receipt_enums(platform):
             v=payload.get(k)
-            if isinstance(v,str) and v in RECEIPT_ENUMS[k]: data['values'][k]=v
+            if platform=='lighter' and k=='status' and isinstance(v,str) and v.startswith('canceled'):v='canceled'
+            if isinstance(v,str) and v in receipt_enums(platform)[k]: data['values'][k]=v
         elif type(payload.get(k)) is bool: data['values'][k]=payload[k]
     for k in RECEIPT_IDS[platform]:
         if k in payload: data['has_'+k]=payload[k] not in (None,'',0,'0')

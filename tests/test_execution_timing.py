@@ -2,7 +2,8 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch,Mock
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -99,7 +100,10 @@ class ExecutionTimingTests(unittest.TestCase):
 
     def test_order_durations_use_monotonic_clock(self):
         e=Engine(self.store,PaperBroker());e.start(self.c);e.tick(self.c,self.plan,quote(self.c))
-        with patch('trading_engine.time.monotonic',side_effect=[10,10.007,10.009,10.047]):
+        # Patch only the measured modules. A global time.monotonic patch also
+        # gets consumed by unrelated background threads during the full suite.
+        clock=SimpleNamespace(time=time.time,monotonic=Mock(side_effect=[10,10.007,10.009,10.047]))
+        with patch('trading_engine.time',clock),patch('execution_dispatch.time',clock):
             o=e.order(e.active()[0],'binance','close',2,quote(self.c))
         self.assertAlmostEqual(o['intent_journal_ms'],7)
         self.assertEqual(o['result']['request_ms'],40)

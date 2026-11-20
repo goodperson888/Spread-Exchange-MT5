@@ -16,6 +16,8 @@ class EntryPreflight:
 
     def __init__(self, client, trading_client, spec, clock=time.monotonic, start=True):
         self.client, self.trading_client, self.spec = client, trading_client, spec
+        if getattr(client,'name','')=='Lighter':
+            self.REFRESH=client.entry_refresh;self.TTL=client.entry_ttl
         self.clock = clock
         self.lock = threading.Lock()
         self.wake = threading.Event()
@@ -92,12 +94,15 @@ class EntryPreflight:
                 self._sync()
                 self.sync_error = ''
             if check:
-                report = self.client.preflight(sync_clock=False)
+                order=dict(action='open', symbol=context['symbol'],requested=context['qty'],
+                           limit=context['price'],position_side='SHORT')
+                combined=getattr(self.client,'entry_check',None)
+                report = combined(order,self.spec) if callable(combined) else self.client.preflight(sync_clock=False)
                 if report['position_mode'] != context['position_mode']:
                     raise ValueError('币安持仓模式变化，请重新连接并对账')
-                self.client.test_order(dict(action='open', symbol=context['symbol'],
-                    requested=context['qty'], limit=context['price'], position_side='SHORT'), self.spec)
-                message = '币安校时、账户及测试订单通过；预检不保证实际成交'
+                if not callable(combined):self.client.test_order(order,self.spec)
+                message = ('Lighter 账户与本地规格检查通过；无测试订单接口，预检不保证实际下单资格与成交'
+                           if getattr(self.client,'name','')=='Lighter' else '币安校时、账户及测试订单通过；预检不保证实际成交')
             else:
                 message = '币安时钟已同步'
             ok = True

@@ -6,15 +6,20 @@ from trading_config import pair_key, rebate_rates, REBATE_FIELDS
 
 
 FIELDS=('target_mode','take_contraction_usd','exit_spread_usd','require_net_profit',
-        'min_net_profit_usd','group_loss_enabled','group_max_loss_usd','max_hold_minutes')
+        'min_net_profit_usd','group_loss_enabled','group_max_loss_usd','max_hold_minutes','exit_confirmation_ticks')
 BOUNDS={'take_contraction_usd':(.000001,100000),'exit_spread_usd':(-100000,100000),
         'min_net_profit_usd':(0,1e9),'group_max_loss_usd':(.01,1e9),'max_hold_minutes':(0,525600)}
 
 
 def normalize(raw):
+    if isinstance(raw,dict): raw={'exit_confirmation_ticks':1,**raw}
     if not isinstance(raw,dict) or set(raw)!=set(FIELDS):
         raise ValueError('请完整填写退出规则；不允许修改手数、退出分组方式或执行保护参数')
     rules={}
+    count=raw['exit_confirmation_ticks']
+    if type(count) is not int or not 1<=count<=1000:
+        raise ValueError('止盈连续新报价次数必须为 1～1000 的整数')
+    rules['exit_confirmation_ticks']=count
     if raw['target_mode'] not in ('contraction','absolute'):raise ValueError('止盈方式无效')
     rules['target_mode']=raw['target_mode']
     for key in ('require_net_profit','group_loss_enabled'):
@@ -83,4 +88,5 @@ def apply(engine, config, body):
             if revision is None:g.pop('exit_rules_revision',None)
             else:g['exit_rules_revision']=revision
         raise
+    for gid in ids: engine.exit_confirmations.reset(gid)
     return ids

@@ -146,7 +146,7 @@ class PairParameterIsolationTests(unittest.TestCase):
         server.write_config(original)
         _,result=self.save();selected=next(p['id'] for p in result['profiles'] if p['id']!='legacy')
         self.assertEqual(self.request('/api/pairs/activate',{'id':selected})[0],200)
-        patch_body={'expected_pair_id':selected,'strategy':{'mt5_lots':.03,'direction_mode':'auto','entry_spread_usd':12,'entry_lower_usd':3,'max_groups':3},
+        patch_body={'expected_pair_id':selected,'strategy':{'mt5_lots':.03,'direction_mode':'auto','entry_spread_usd':12,'entry_lower_usd':3,'max_groups':3,'exit_confirmation_ticks':5},
                     'execution':{'poll_ms':500},'costs':{'mt5_short_commission_per_lot_side':7,'mt5_rebate_percent':30},
                     'risk_alerts':{'mt5_warning_margin_level_percent':300}}
         self.assertEqual(self.request('/api/config',patch_body)[0],200)

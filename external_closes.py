@@ -318,6 +318,7 @@ class ExternalCloseMonitor:
 
     def __init__(self, runtime, client, terminal_factory, start=True):
         self.runtime,self.client,self.terminal_factory = runtime,client,terminal_factory
+        self.INTERVAL=getattr(client,'external_poll_interval',self.INTERVAL)
         self.terminal = None; self.stopped = threading.Event()
         self.wake_event=threading.Event();self.retry_requested=threading.Event()
         self.history_token = None; self.history_retry_at = 0.; self.history_attempts = 0

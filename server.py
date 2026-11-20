@@ -4,6 +4,7 @@ The default is paper mode; live execution is deliberately armed only by the
 user after connection and reconciliation checks pass.
 """
 from __future__ import annotations
+import exchange_venues
 
 import copy
 import json
@@ -35,7 +36,7 @@ from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
 from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS
-from execution_diagnostics import export_report
+from execution_diagnostics import export_report,register_transport
 from chart_reference import ReferenceHistory
 import position_adoption
 import exit_rules
@@ -159,6 +160,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             self.entry_preflight.close()
         if self.risk_monitor:
             self.risk_monitor.close()
+        if self.binance and hasattr(self.binance,'close'): self.binance.close()
         self.store.close()
 
     def connect(self, config, api_key='', api_secret='', mt5_mcp_token=''):
@@ -173,7 +175,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             raise ValueError('只支持纸上交易(paper)和实盘交易(live)两种模式')
         
         # 实盘模式需要API密钥，纸面模式使用正式环境行情但不需要密钥
-        if mode == 'live' and (not api_key or not api_secret):
+        if mode == 'live' and exchange_venues.venue(config)=='binance' and (not api_key or not api_secret):
             raise ValueError('实盘连接需要币安 API Key 和 Secret Key；请先保存本机连接配置')
         
         with self.lock:
@@ -190,16 +192,14 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
 
             # Build and validate a replacement connection before touching the
             # current one. A failed reconnect must not leave a half-live runtime.
-            new_binance = Binance(production=True, key=api_key, secret=api_secret,
-                                   recv_window_ms=config['binance']['recv_window_ms'],
-                                   proxy_url=config['binance'].get('proxy_url', ''))
+            new_binance = exchange_venues.client(config,api_key,api_secret,Binance)
             new_terminal = None
             new_stream = None
             new_preflight = None
             new_risk_monitor = None
             new_pump = new_external = new_maintenance = None
             mt5_snapshot_started = None
-            meta = {'mt5_transport':'工作进程持久会话 + tick 轮询'}
+            meta = {'mt5_transport':'工作进程持久会话 + tick 轮询','exchange':exchange_venues.metadata(config)}
             try:
                 new_spec = new_binance.spec(config['symbol'])
                 if config['costs']['usdt_usd_auto']:
@@ -242,30 +242,31 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                             meta['binance_permission_warning'] = str(exc)
                         new_binance.preflight(permissions)
                         if config['costs']['binance_fee_auto']:
-                            fees = new_binance.commission_rate(config['symbol'])
-                            config['costs']['binance_taker_percent'] = fees['taker']
-                            meta['binance_fee'] = {**fees, 'source':'Binance account commission rate'}
+                            try:
+                                fees = new_binance.commission_rate(config['symbol'])
+                                config['costs']['binance_taker_percent'] = fees['taker']
+                                meta['binance_fee'] = {**fees, 'source':fees.get('source','Binance account commission rate')}
+                            except Exception:
+                                if exchange_venues.venue(config)!='lighter': raise
+                                meta['binance_fee_warning']='Lighter 账户费率未核验，暂用本组合备用费率；请按账户实际费率填写，成交费用继续后台核验'
                         # Opening capacity must not prevent connecting to recover,
                         # reconcile, adopt, or close positions already on-platform.
                         # Recheck with fresh funds when the user starts new entries.
                         meta['mt5_margin_check'] = self._mt5_entry_margin_check(config,new_terminal)
 
-                new_stream = BinanceBookTicker(config['symbol'], production=True,
-                                               proxy_url=config['binance'].get('proxy_url', '')).start()
+                new_stream = exchange_venues.stream(config,new_binance,BinanceBookTicker).start()
                 market = new_stream.quote(max_age_ms=config['strategy']['max_quote_age_ms'],wait_ms=2500)
                 if market is None:
                     market = new_binance.quote(config['symbol'])
                     meta['binance_transport'] = 'REST 回退（WebSocket 正在重连）'
                 else:
-                    meta['binance_transport'] = 'WebSocket bookTicker'
+                    meta['binance_transport'] = 'WebSocket 盘口' if exchange_venues.venue(config)=='lighter' else 'WebSocket bookTicker'
                 new_plan = executable_plan(config, snapshot['spec'], new_spec, market['bid'])
                 new_quote = self._quote(snapshot['quote'], market, config)
                 broker = PaperBroker() if mode == 'paper' else LiveBroker(config, new_binance, new_terminal, new_spec)
                 if mode == 'live':
                     new_preflight = EntryPreflight(new_binance, new_binance, new_spec)
-                    risk_client = Binance(production=True, key=api_key, secret=api_secret,
-                                          recv_window_ms=config['binance']['recv_window_ms'],
-                                          proxy_url=config['binance'].get('proxy_url', ''))
+                    risk_client = new_binance if exchange_venues.venue(config)=='lighter' else exchange_venues.client(config,api_key,api_secret,Binance)
                     new_risk_monitor = BinanceRiskMonitor(risk_client, config['symbol'])
                 # Verify durable storage before replacing a working connection.
                 # A failed connection must not advertise readiness without intake.
@@ -282,27 +283,23 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                                      inspect_paper_terminal,publish,self.market_wake,self.mt5_freshness,self.quote_events)
                 new_pump.last_stamp=new_quote['time_ms']
                 if mode=='live':
-                    observer=Binance(production=True,key=api_key,secret=api_secret,
-                                     recv_window_ms=config['binance']['recv_window_ms'],
-                                     proxy_url=config['binance'].get('proxy_url',''))
+                    observer=new_binance if exchange_venues.venue(config)=='lighter' else exchange_venues.client(config,api_key,api_secret,Binance)
                     new_external=external_closes.ExternalCloseMonitor(
                         self,observer,lambda:Terminal(config['mt5'],config['execution']['magic'],read_only=True),start=False)
                 maintenance_config=copy.deepcopy(config)
                 new_maintenance=MaintenanceMonitor(self,
-                    Binance(production=True,key=api_key,secret=api_secret,
-                            recv_window_ms=config['binance']['recv_window_ms'],
-                            proxy_url=config['binance'].get('proxy_url','')),
+                    new_binance if exchange_venues.venue(config)=='lighter' else exchange_venues.client(config,api_key,api_secret,Binance),
                     lambda:Terminal(maintenance_config['mt5'],maintenance_config['execution']['magic'],read_only=True))
             except Exception as exc:
                 self.last_error=storage_error_message(exc)
                 if 'database or disk is full' in str(exc).lower():
                     self.engine.state.update(enabled=False,alarm=self.last_error)
                 self._close_resources((new_pump,new_external,new_maintenance,new_preflight,
-                                       new_risk_monitor,new_stream,new_terminal))
+                                       new_risk_monitor,new_stream,new_terminal,new_binance))
                 raise
 
             old_resources=tuple(getattr(self,name,None) for name in
-                ('pump','external_monitor','maintenance','entry_preflight','risk_monitor','market_stream','terminal'))
+                ('pump','external_monitor','maintenance','entry_preflight','risk_monitor','market_stream','terminal','binance'))
             self.pool=None;self.engine.multi_pair=False
             self.engine.__dict__.pop('entry_candidate_key',None)
             self.binance, self.market_stream, self.terminal, self.spec = new_binance, new_stream, new_terminal, new_spec
@@ -316,6 +313,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             PROCESS_EXIT_OBSERVATIONS.reset(mode)
             PROCESS_ENTRY_OBSERVATIONS.reset(mode)
             self.engine.entry_confirmations.clear()
+            self.engine.exit_confirmations.clear()
             self.engine.quote_provider = self._execution_quote
             self.engine.close_quote_provider = self._cached_close_quote
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
@@ -340,6 +338,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 self.maintenance.start()
                 self.quote_events.publish(new_quote)
                 self.connected=True
+                register_transport(new_stream)
                 self.reconciled=mode=='paper'
             except Exception as exc:
                 self.last_error=storage_error_message(exc)
@@ -348,7 +347,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 self._disconnect_pair_resources()
                 raise
             finally:
-                current=(new_pump,new_external,new_maintenance,new_preflight,new_risk_monitor,new_stream,new_terminal)
+                current=(new_pump,new_external,new_maintenance,new_preflight,new_risk_monitor,new_stream,new_terminal,new_binance)
                 self._close_resources(resource for resource in old_resources
                                       if not any(resource is item for item in current))
             return self.snapshot()
@@ -726,6 +725,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
         self.quote = q
         self.market_meta['mt5_transport'] = self.pump.mt5_transport
         self.market_meta['binance_transport'] = self.pump.binance_transport
+        if hasattr(getattr(self,'market_stream',None),'status'): self.market_meta['exchange_stream_status']=self.market_stream.status()
         self.market_meta['strategy_trigger'] = '报价事件驱动；正常双边平仓并发，开仓与异常减仓逐笔执行'
         if self.entry_preflight:
             self.market_meta['entry_preflight'] = self.entry_preflight.status()
@@ -1265,6 +1265,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             quote = (self.pump.read()[0] if getattr(self,'pump',None) else None) or self.quote
             for group in st['groups']:
                 if group['status'] != 'closed':
+                    group['exit_confirmation']=self.engine.exit_confirmations.snapshot(
+                        group['id'],max_age_ms=group['parameters']['max_quote_age_ms']).get('forward',{})
                     group_quote=self._pool_group_quote(group) if getattr(self,'pool',None) else quote
                     unverified=(not group_quote or group.get('key')!=group_quote.get('key') or not self.connected
                                 or group['status']!='open' or self.engine.uncertain(group)
@@ -1279,7 +1281,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 'quote': quote, 'plan': self.plan,
                 'pool':self._pool_status() if getattr(self,'pool',None) else None,
                 'state': st, 'events': self.store.events(),
-                'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport} if getattr(self,'pump',None) else {})},
+                'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport,
+                    'exchange_stream_status':self.market_stream.status() if hasattr(getattr(self,'market_stream',None),'status') else {}} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,
                 'external_close_status': copy.deepcopy(getattr(self,'external_close_status',None)),
                 'strategy_runtime': {'entry_spread_usd': display_config['strategy']['entry_spread_usd'],
@@ -1455,8 +1458,8 @@ def validate_config(config):
     if config.get('mode') != 'paper':
         errors.append('旧纸面接口固定为 paper；自动执行模式请选择 paper 或 live')
     symbol = str(config.get("symbol") or '').upper()
-    if not native_pair(config) and (not 5 <= len(symbol) <= 24 or not symbol.isalnum()):
-        errors.append('币安合约名称无效')
+    if not native_pair(config) and (not (2 if exchange_venues.venue(config)=='lighter' else 5) <= len(symbol) <= 24 or not symbol.isalnum()):
+        errors.append('交易所合约名称无效')
     mt5 = config.get("mt5", {})
     strategy = config.get("strategy", {})
     lots = float(strategy.get("mt5_lots", 0) or 0)
@@ -1524,46 +1527,53 @@ def order_plan(config, binance_bid=0.0):
 def inspect_binance(config, api_key='', api_secret=''):
     """Read-only connectivity and permission check; never submits an order."""
     mode = config['execution']['mode']
-    if mode == 'live' and (not api_key or not api_secret):
+    if mode == 'live' and exchange_venues.venue(config)=='binance' and (not api_key or not api_secret):
         raise ValueError('实盘检查需要输入本次会话的币安 API Key 和 Secret Key')
-    client = Binance(production=True, key=api_key, secret=api_secret,
-                     recv_window_ms=config['binance']['recv_window_ms'],
-                     proxy_url=config['binance'].get('proxy_url', ''))
-    client.sync()
-    spec = client.spec(config['symbol'])
-    stream = BinanceBookTicker(config['symbol'], production=True,
-                               proxy_url=config['binance'].get('proxy_url', '')).start()
+    client = exchange_venues.client(config,api_key,api_secret,Binance)
     try:
-        quote = stream.quote(max_age_ms=config['strategy']['max_quote_age_ms'], wait_ms=2500)
-        transport = 'WebSocket bookTicker'
-        warning = ''
-        if quote is None:
-            quote = client.quote(config['symbol'])
-            transport = 'REST 回退'
-            warning = 'WebSocket 未在等待时间内收到数据；正式连接会继续自动重连并使用 REST 回退'
-    finally:
-        stream.close()
-    fx = client.usdt_usd()
-    account = fees = permissions = None
-    permission_warning = ''
-    if mode == 'live':
+        client.sync()
+        spec = client.spec(config['symbol'])
+        stream = exchange_venues.stream(config,client,BinanceBookTicker).start()
         try:
-            permissions = client.api_permissions()
-        except Exception as exc:
-            permission_warning = str(exc)
-        account = client.preflight(permissions)
-        fees = client.commission_rate(config['symbol'])
-    return {
-        'mode': mode, 'symbol': spec['symbol'], 'status': spec.get('status'),
-        'base_asset': spec.get('baseAsset'), 'quote_asset': spec.get('quoteAsset'),
-        'quote': quote, 'transport': transport, 'transport_warning': warning,
-        'usdt_usd': fx, 'account': account, 'permissions': permissions,
-        'permission_warning': permission_warning, 'fees': fees,
-        'message': '币安公开行情及合约规格正常' if mode == 'paper'
-                   else ('币安连接检查通过：行情、账户及基础权限正常。\n'
-                         '本次未进行开仓预检；该品种下单资格以交易台的开仓预检结果为准。'),
-        'orders_sent': False,
-    }
+            quote = stream.quote(max_age_ms=config['strategy']['max_quote_age_ms'], wait_ms=2500)
+            transport = 'WebSocket 盘口' if exchange_venues.venue(config)=='lighter' else 'WebSocket bookTicker'
+            warning = ''
+            if quote is None:
+                quote = client.quote(config['symbol'])
+                transport = 'REST 回退'
+                detail=stream.status() if hasattr(stream,'status') else {}
+                warning = (detail.get('error') or 'WebSocket 尚未收到首笔报价（可能仍在连接）')+'；正式连接会继续自动重连，当前使用 REST 回退'
+            stream_status=stream.status() if hasattr(stream,'status') else {}
+        finally:
+            stream.close()
+        fx = client.usdt_usd() if config['costs']['usdt_usd_auto'] else dict(value=config['costs']['usdt_usd'],source='手动参考汇率')
+        account = fees = permissions = None
+        permission_warning = fee_warning = ''
+        if mode == 'live':
+            try:
+                permissions = client.api_permissions()
+            except Exception as exc:
+                permission_warning = str(exc)
+            account = client.preflight(permissions)
+            try:fees = client.commission_rate(config['symbol'])
+            except Exception:
+                if exchange_venues.venue(config)!='lighter':raise
+                fee_warning='Lighter 账户费率未核验，请核对并填写备用吃单费率；当前保留估算'
+        info=exchange_venues.metadata(config)
+        return {
+            'exchange':info, 'mode': mode, 'symbol': spec['symbol'], 'status': spec.get('status'),
+            'base_asset': spec.get('baseAsset'), 'quote_asset': spec.get('quoteAsset'),
+            'quote': quote, 'transport': transport, 'transport_warning': warning, 'stream_status':stream_status,
+            'usdt_usd': fx, 'account': account, 'permissions': permissions,
+            'permission_warning': permission_warning, 'fees': fees, 'fee_warning':fee_warning,
+            'message': info['name']+'公开行情及合约规格正常' if mode == 'paper'
+                       else (info['name']+'连接检查通过：行情、账户及基础权限正常。\n'
+                             '本次未进行开仓预检；该品种下单资格以交易台的开仓预检结果为准。'),
+            'orders_sent': False,
+        }
+
+    finally:
+        if hasattr(client,'close'): client.close()
 
 
 def inspect_binance_public_ip(config):
@@ -1664,7 +1674,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
-        if path in ("/app.js", "/workspace.js", "/pair-app.js", "/pool-app.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
+        if path in ("/app.js", "/workspace.js", "/pair-app.js", "/exchange-ui.js", "/pool-app.js", "/trading-app.js", "/quote-stream.js", "/style.css", "/echarts.min.js"):
             suffix = path[1:]
             data = (ROOT / suffix).read_bytes()
             content_type = "text/javascript; charset=utf-8" if suffix.endswith("js") else "text/css; charset=utf-8"
@@ -1699,6 +1709,8 @@ class Handler(BaseHTTPRequestHandler):
             safe = json.loads(json.dumps(config))
             safe["binance"]["api_key_configured"] = bool(safe["binance"].get("api_key"))
             safe["binance"]["api_secret_configured"] = bool(safe["binance"].get("api_secret"))
+            if 'lighter' in safe:
+                safe['lighter']['api_private_key_configured']=bool(safe['lighter'].pop('api_private_key',''))
             self.send_json({"ok": True, "config": safe, "errors": validate_config(config)})
             return
         if path == '/api/pairs':
@@ -1807,7 +1819,9 @@ class Handler(BaseHTTPRequestHandler):
                                 if profile.get('mode')=='pool' and old.get('mode')=='pool':
                                     profile['mt5_pool']=copy.deepcopy(old['mt5_pool'])
                                 for key in ('strategy','costs','execution','risk_alerts'):
-                                    if key in old: profile[key]=old[key]
+                                    if key in old: profile[key]=copy.deepcopy(old[key])
+                                if profile['type']=='exchange_mt5' and old.get('exchange','binance')!=profile.get('exchange','binance'):
+                                    profile['costs'].update(usdt_usd=1.,usdt_usd_auto=True,binance_fee_auto=True,binance_rebate_percent=0.)
                             rows=[x for x in rows if x['id']!=profile['id']]+[profile]
                         if not profile: raise ValueError('组合不存在，请刷新后重试')
                         if path=='/api/pairs/activate' or profile['id']==active:
@@ -1898,6 +1912,7 @@ class Handler(BaseHTTPRequestHandler):
                         current.setdefault('binance', {})['api_key'] = ''
                         current.setdefault('binance', {})['api_secret'] = ''
                         current.setdefault('mt5', {})['mcp_token'] = ''
+                        current.setdefault('lighter',{})['api_private_key']=''
                     incoming = deep_merge({}, body)
                     incoming.pop('clear_credentials', None)
                     incoming.pop('expected_pair_id',None)
@@ -1906,6 +1921,12 @@ class Handler(BaseHTTPRequestHandler):
                         if name in b: b[name] = str(b[name] or '').strip()
                     if 'mt5' in incoming and 'mcp_token' in incoming['mt5']:
                         incoming['mt5']['mcp_token'] = str(incoming['mt5']['mcp_token'] or '').strip()
+                    lighter=incoming.get('lighter',{})
+                    lighter.pop('api_private_key_configured',None)
+                    if 'api_private_key' in lighter:
+                        key=str(lighter['api_private_key'] or '').strip()
+                        if key: lighter['api_private_key']=key
+                        else: lighter.pop('api_private_key',None)
                     saved = deep_merge(current, incoming)
                     errors = validate_config(saved)
                     if errors:
