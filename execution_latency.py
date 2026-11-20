@@ -9,8 +9,14 @@ class LatencyStats:
     LIMIT = 512
     PHASES = frozenset(('quote_wait_ms', 'binance_quote_age_ms', 'mt5_quote_age_ms', 'decision_ms', 'strategy_pass_ms',
         'quote_pickup_ms', 'strategy_lock_wait_ms', 'strategy_cycle_ms', 'pool_prepare_ms', 'pool_rank_ms',
+        'mt5_push_parse_ms', 'mt5_push_accept_ms', 'mt5_push_notify_ms',
+        'mt5_ea_prepare_ms', 'mt5_ea_send_ms',
+        'binance_push_to_publish_ms', 'mt5_push_to_publish_ms',
+        'binance_push_to_strategy_ms', 'mt5_push_to_strategy_ms',
         'result_journal_ms', 'open_dispatch_gap_ms', 'open_execution_to_dispatch_ms', 'close_execution_to_dispatch_ms',
         'receipt_handling_wait_ms', 'second_leg_quote_ms',
+        'open_dispatch_quote_age_ms', 'close_dispatch_quote_age_ms',
+        'open_dispatch_quote_alignment_ms', 'close_dispatch_quote_alignment_ms',
         'open_quote_to_execution_ms', 'close_quote_to_execution_ms', 'mt5_quote_queue_ms', 'mt5_quote_roundtrip_ms',
         'mt5_terminal_queue_ms', 'mt5_terminal_roundtrip_ms', 'mt5_worker_preflight_ms',
         'mt5_order_check_ms', 'mt5_order_send_ms', 'mt5_fill_normalize_ms', 'mt5_worker_submit_ms',
@@ -51,6 +57,7 @@ class LatencyStats:
     def published(quote):
         # Local publication only; not broker time and never used for trade eligibility.
         quote['_published_monotonic'] = time.monotonic()
+        quote['_published_perf_counter'] = time.perf_counter()
 
     def outcome(self, order, result, valid):
         leg, action = order.get('leg'), order.get('action')
@@ -85,6 +92,12 @@ class LatencyStats:
         values = [('quote_wait_ms', now_ms-max(times))]
         for leg, received in zip(('binance', 'mt5'), times):
             values.append((leg+'_quote_age_ms', now_ms-received))
+            pushed=quote.get(leg,{}).get('_push_received_perf_counter')
+            published=quote.get('_published_perf_counter')
+            if isinstance(pushed,(int,float)) and not isinstance(pushed,bool) and math.isfinite(pushed):
+                values.append((leg+'_push_to_strategy_ms',(time.perf_counter()-pushed)*1000))
+                if isinstance(published,(int,float)) and not isinstance(published,bool):
+                    values.append((leg+'_push_to_publish_ms',(published-pushed)*1000))
         published = quote.get('_published_monotonic')
         if isinstance(published, (int, float)) and not isinstance(published, bool):
             values.append(('quote_pickup_ms', (time.monotonic()-published)*1000))

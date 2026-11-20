@@ -34,6 +34,7 @@ from runtime_maintenance import MaintenanceMonitor
 from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
 from entry_observations import PROCESS_ENTRY_OBSERVATIONS
+from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS
 from execution_diagnostics import export_report
 from chart_reference import ReferenceHistory
 import position_adoption
@@ -277,9 +278,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 self._restore_push_bridge()
                 def publish(q):
                     self.store.sample(q)
-                    self.quote_events.publish(q)
                 new_pump = QuotePump(config,new_binance,new_stream,new_terminal,self.push_bridge,
-                                     inspect_paper_terminal,publish,self.market_wake,self.mt5_freshness)
+                                     inspect_paper_terminal,publish,self.market_wake,self.mt5_freshness,self.quote_events)
                 new_pump.last_stamp=new_quote['time_ms']
                 if mode=='live':
                     observer=Binance(production=True,key=api_key,secret=api_secret,
@@ -315,6 +315,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             self.latency.reset(mode)
             PROCESS_EXIT_OBSERVATIONS.reset(mode)
             PROCESS_ENTRY_OBSERVATIONS.reset(mode)
+            self.engine.entry_confirmations.clear()
             self.engine.quote_provider = self._execution_quote
             self.engine.close_quote_provider = self._cached_close_quote
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
@@ -1282,6 +1283,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 'position_report': self.position_report,
                 'external_close_status': copy.deepcopy(getattr(self,'external_close_status',None)),
                 'strategy_runtime': {'entry_spread_usd': display_config['strategy']['entry_spread_usd'],
+                                     'entry_confirmation': self.engine.entry_confirmations.snapshot(pair_key(display_config),max_age_ms=display_config['strategy']['max_quote_age_ms']),
+                                     **{k:display_config['strategy'].get(k,v) for k,v in CONFIRMATION_DEFAULTS.items()},
                                      'entry_lower_usd':display_config['strategy'].get('entry_lower_usd',-5),
                                      'direction_mode':display_config['strategy'].get('direction_mode','forward'),
                                      'dynamic_reference_enabled':display_config['strategy'].get('dynamic_reference_enabled',False),

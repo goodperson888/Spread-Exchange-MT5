@@ -8,7 +8,8 @@ import socket
 import socketserver
 import threading
 import time
-from execution_latency import LatencyStats
+from execution_latency import LatencyStats, PROCESS_LATENCY
+from quote_fallback import BackgroundRead
 
 
 def milliseconds():
@@ -29,7 +30,7 @@ class TickFreshness:
         self.lock = threading.Lock()
         self.ticks = {}
 
-    def observe(self, value, settings, observed_ms=None):
+    def observe(self, value, settings, observed_ms=None, *, discard_older=False):
         quote = observed_quote(value, observed_ms)
         identity = tuple(str(settings.get(k, '')) for k in ('account', 'server', 'symbol'))
         signature = (quote['source_time_ms'], quote['bid'], quote['ask'])
@@ -38,6 +39,7 @@ class TickFreshness:
             if previous:
                 old_signature, first_seen = previous
                 if signature[0] < old_signature[0]:
+                    if discard_older:return None
                     raise ValueError('MT5 报价时间倒退，等待新 tick')
                 if signature == old_signature:
                     quote['observed_ms'] = min(first_seen, quote['observed_ms'])
@@ -70,11 +72,12 @@ class QuoteEvents:
 
 class PushBridge:
     """Authenticated, loopback-only MQL5 TCP receiver with one writer per identity."""
-    def __init__(self, token, port=8767, notify=None):
+    def __init__(self, token, port=8767, notify=None, latency=None):
         self.token, self.port, self.notify = token, port, notify
         self.lock = threading.Lock()
         self.values, self.owners = {}, {}
         self.server = None
+        self.latency = latency if latency is not None else PROCESS_LATENCY
 
     def start(self):
         bridge = self
@@ -100,6 +103,7 @@ class PushBridge:
                     last_seq = -1
                     while True:
                         line = self.rfile.readline(4097)
+                        received_counter=time.perf_counter();received_ms=milliseconds()
                         if not line or len(line) > 4096: break
                         data = json.loads(line)
                         if not isinstance(data, dict): break
@@ -107,7 +111,10 @@ class PushBridge:
                         if bridge.identity(data) != identity: break
                         seq = int(data['seq'])
                         if seq <= last_seq: continue
-                        if bridge.accept(identity, owner, data): last_seq = seq
+                        parsed=time.perf_counter()
+                        if bridge.accept(identity, owner, data, received_ms, received_counter):
+                            last_seq = seq
+                            bridge.latency.record('mt5_push_parse_ms',(parsed-received_counter)*1000)
                 except (OSError, ValueError, TypeError, KeyError, OverflowError):
                     pass
                 finally:
@@ -128,15 +135,31 @@ class PushBridge:
     def identity(data):
         return tuple(str(data.get(k, '')) for k in ('account', 'server', 'symbol'))
 
-    def accept(self, identity, owner, data):
+    def accept(self, identity, owner, data, received_ms=None, received_counter=None):
+        started=time.perf_counter()
         bid, ask, at = float(data['bid']), float(data['ask']), int(data['time_ms'])
         if not (math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask): return False
         with self.lock:
             old = self.values.get(identity)
             if self.owners.get(identity) is not owner or (old and at < old['source_time_ms']): return False
-            self.values[identity] = observed_quote(dict(bid=bid, ask=ask, time_ms=at,
-                                                        transport='EA Socket 推送'))
-        if self.notify: self.notify()
+            quote=observed_quote(dict(bid=bid, ask=ask, time_ms=at,
+                transport='EA Socket 推送', _push_received_perf_counter=(
+                    received_counter if received_counter is not None else started)),received_ms)
+            if old and (at,bid,ask)==(old['source_time_ms'],old['bid'],old['ask']):
+                quote['observed_ms']=old['observed_ms']
+                quote['_push_received_perf_counter']=old['_push_received_perf_counter']
+            self.values[identity]=quote
+        accepted=time.perf_counter()
+        if self.notify:self.notify()
+        timings=[('mt5_push_accept_ms',(accepted-started)*1000),
+                 ('mt5_push_notify_ms',(time.perf_counter()-accepted)*1000)]
+        # The EA reports its previous successful send, measured on its own
+        # monotonic clock. Never subtract an EA clock from the Python clock.
+        for field,phase in (('prev_prepare_us','mt5_ea_prepare_ms'),('prev_send_us','mt5_ea_send_ms')):
+            value=data.get(field)
+            if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and 0<=value<=60000000:
+                timings.append((phase,value/1000))
+        self.latency.record_many(timings)
         return True
 
     def quote(self, settings, max_age_ms):
@@ -154,13 +177,14 @@ class PushBridge:
 class QuotePump:
     """Quote intake and persistence independent of the serialized trading worker."""
     def __init__(self, config, exchange, stream, terminal, bridge, paper_quote, publish, wake_strategy,
-                 mt5_freshness=None):
+                 mt5_freshness=None, quote_events=None):
         self.config, self.exchange, self.stream, self.terminal = config, exchange, stream, terminal
         self.bridge, self.paper_quote, self.publish, self.wake_strategy = bridge, paper_quote, publish, wake_strategy
         self.changed, self.stopped = threading.Event(), threading.Event()
         self.lock = threading.Lock()
         self.latest = None
         self.error = ''
+        self.sampling_error = ''
         self.version = 0
         self.mt5_transport = '等待行情'
         self.binance_transport = '等待行情'
@@ -169,17 +193,31 @@ class QuotePump:
         self.mt5_cache = self.rest_cache = None
         self.mt5_read_at = self.rest_read_at = 0
         self.mt5_freshness = mt5_freshness or TickFreshness()
+        self.quote_events = quote_events
+        self.pending_sample = None
+        self.sample_wake = threading.Event()
+        self.mt5_fallback = BackgroundRead(lambda:self._read_mt5(discard_older=True),self.changed,'pair-mt5-fallback')
+        self.rest_fallback = BackgroundRead(lambda: observed_quote(self.exchange.quote(self.config['symbol'])),
+                                            self.changed,'pair-rest-fallback')
 
     def start(self):
         self.stream.on_quote = self.changed.set
+        self.sample_thread = threading.Thread(target=self._samples,name='pair-quote-history',daemon=True)
+        self.sample_thread.start()
         self.thread = threading.Thread(target=self.run, name='pair-quote-intake', daemon=True)
         self.thread.start()
         return self
 
     def read(self):
-        with self.lock: return self.latest, self.version, self.error
+        with self.lock: return self.latest, self.version, self.error or self.sampling_error
 
-    def collect(self):
+    def _read_mt5(self,discard_older=False):
+        c=self.config
+        value=(self.paper_quote(c['mt5']) if c['mt5']['adapter']=='paper' else
+               self.terminal.call('quote' if c['mt5']['adapter']=='native' else 'snapshot'))['quote']
+        return self.mt5_freshness.observe(value,c['mt5'],discard_older=discard_older)
+
+    def collect(self,background=False):
         c = self.config
         age = c['strategy']['max_quote_age_ms']
         poll = c['execution']['poll_ms'] / 1000
@@ -189,22 +227,32 @@ class QuotePump:
             mt5 = pushed
             self.mt5_transport = 'EA Socket 推送'
         else:
-            if self.mt5_cache is None or now - self.mt5_read_at >= poll:
-                if c['mt5']['adapter'] == 'paper': self.mt5_cache = self.paper_quote(c['mt5'])['quote']
-                else: self.mt5_cache = self.terminal.call('quote' if c['mt5']['adapter'] == 'native' else 'snapshot')['quote']
-                self.mt5_read_at = time.monotonic()
-            mt5 = self.mt5_cache
+            if background:
+                mt5,error=self.mt5_fallback.read(poll)
+                if error:raise error
+                if mt5 is None:return
+            else:
+                if self.mt5_cache is None or not self.mt5_read_at or now - self.mt5_read_at >= poll:
+                    self.mt5_cache = self._read_mt5()
+                    self.mt5_read_at = time.monotonic()
+                mt5 = self.mt5_cache
             self.mt5_transport = ('MCP' if c['mt5']['adapter']=='mcp' else '原生') + '轮询兼容（EA 未接入或报价过期）'
         # Record receipt before a potentially slow REST fallback on the other
         # platform. Pair construction must not hide that elapsed time.
-        mt5 = self.mt5_freshness.observe(mt5, c['mt5'])
+        mt5 = self.mt5_freshness.observe(mt5, c['mt5'],discard_older=background)
+        if mt5 is None:return
         # Read exchange AFTER any blocking terminal read, never pair a fresh MT5 tick with an old cached exchange tick.
         market = self.stream.quote(max_age_ms=age)
         if market is None:
-            if self.rest_cache is None or time.monotonic() - self.rest_read_at >= 1:
-                self.rest_cache = observed_quote(self.exchange.quote(c['symbol']))
-                self.rest_read_at = time.monotonic()
-            market = self.rest_cache
+            if background:
+                market,error=self.rest_fallback.read(1)
+                if error:raise error
+                if market is None:return
+            else:
+                if self.rest_cache is None or not self.rest_read_at or time.monotonic() - self.rest_read_at >= 1:
+                    self.rest_cache = observed_quote(self.exchange.quote(c['symbol']))
+                    self.rest_read_at = time.monotonic()
+                market = self.rest_cache
             self.binance_transport = 'REST 回退'
         else: self.binance_transport = 'WebSocket bookTicker'
         fx = c['costs']['usdt_usd']
@@ -230,19 +278,34 @@ class QuotePump:
             LatencyStats.published(q)
             self.latest, self.version, self.error = q, self.version + 1, ''
         self.wake_strategy.set()
-        # History/chart publication can include disk I/O. Let the strategy
-        # see this sample before that work, while keeping broker writes durable.
-        self.publish(q)
+        if self.quote_events:self.quote_events.publish(q)
+        if background:
+            with self.lock:self.pending_sample=q
+            self.sample_wake.set()
+        else:self.publish(q)
+
+    def _samples(self):
+        while not self.stopped.is_set():
+            self.sample_wake.wait(.1);self.sample_wake.clear()
+            with self.lock:pending=self.pending_sample;self.pending_sample=None
+            if pending is not None:
+                try:self.publish(pending)
+                except Exception as exc:
+                    with self.lock:self.sampling_error='行情历史写入失败：'+str(exc)
+                    self.wake_strategy.set()
+            self.stopped.wait(.1)
 
     def run(self):
         while not self.stopped.is_set():
             self.changed.clear()
-            try: self.collect()
+            try: self.collect(background=True)
             except Exception as exc:
                 with self.lock: self.error = str(exc)
                 self.wake_strategy.set()
             self.changed.wait(self.config['execution']['poll_ms'] / 1000)
 
     def close(self):
-        self.stopped.set(); self.changed.set()
+        self.stopped.set(); self.changed.set();self.sample_wake.set()
+        self.mt5_fallback.close();self.rest_fallback.close()
         if hasattr(self, 'thread'): self.thread.join(timeout=.5)
+        if hasattr(self,'sample_thread'):self.sample_thread.join(timeout=.5)

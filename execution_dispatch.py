@@ -1,5 +1,6 @@
 """Broker I/O only. Workers never read or mutate engine/journal state."""
 import time
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
 
@@ -20,27 +21,37 @@ def dispatch_order(broker, order, started=None, ready=None, clock_ms=wall_ms):
     dispatched_monotonic=time.monotonic()
     dispatched=clock_ms()
     order['dispatch_ms']=dispatched
+    observed={leg:book.get('observed_ms') for leg,book in order.get('quote_context',{}).items()
+              if isinstance(book,dict)}
+    observed={leg:value for leg,value in observed.items() if isinstance(value,(int,float))
+              and not isinstance(value,bool) and math.isfinite(value) and 0<value<=dispatched}
+    quote_timing={}
+    if order.get('leg') in observed:
+        quote_timing['dispatch_quote_age_ms']=dispatched-observed[order['leg']]
+    if 'binance' in observed and 'mt5' in observed:
+        quote_timing['dispatch_quote_alignment_ms']=abs(observed['binance']-observed['mt5'])
     try: result=broker.submit(order)
     except Exception as exc: result=dict(status='unknown',qty=0,price=0,error=str(exc))
     received=time.monotonic()
     return dict(result=result,dispatch_ms=dispatched,dispatch_monotonic=dispatched_monotonic,
                 request_ms=round((received-started)*1000),
                 response_received_ms=clock_ms(),received_monotonic=received,
+                **quote_timing,
                 **({'dispatch_queue_ms':round((dispatched_monotonic-ready)*1000,3)} if ready is not None else {}))
 
 
-def dispatch_pair(broker, orders, ready, clock_ms=wall_ms, can_start=None):
+def dispatch_pair(broker, orders, ready, clock_ms=wall_ms, can_start=None, action='close'):
     """Release both workers only after both tasks exist; yield receipts as ready.
 
     Adapter timeouts remain authoritative. A future timeout must never leave a
-    live write running while the engine starts another close of that position.
+    live write running while the engine starts another write of that position.
     """
     gate=Event();abort=Event();futures={};abort_code='DISPATCH_NOT_STARTED'
     def send(order):
         gate.wait()
         if abort.is_set(): return not_dispatched(abort_code,clock_ms=clock_ms)
         return dispatch_order(broker,order,ready=ready,clock_ms=clock_ms)
-    try: pool=ThreadPoolExecutor(max_workers=2,thread_name_prefix='gold-pair-close')
+    try: pool=ThreadPoolExecutor(max_workers=2,thread_name_prefix='gold-pair-'+action)
     except Exception as exc:
         for index in range(len(orders)): yield index,not_dispatched('DISPATCH_NOT_STARTED',str(exc),clock_ms=clock_ms)
         return

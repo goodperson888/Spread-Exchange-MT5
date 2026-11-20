@@ -1005,7 +1005,12 @@ def worker_main():
                     selling=(position_side==1)==opening
                     tick=mt.symbol_info_tick(s.name); price=tick.bid if selling else tick.ask
                     if (not selling and price>o['limit']) or (selling and price<o['limit']):
-                        data=dict(status='done',qty=0,price=0,error='MT5 报价已超出滑点预算')
+                        data=dict(status='done',qty=0,price=0,submitted=False,
+                            error_code='MT5_SLIPPAGE_PRECHECK',error_kind='local_validation',
+                            error='MT5 报价已超出滑点预算',
+                            execution_precheck=dict(bid=tick.bid,ask=tick.ask,price=price,
+                                limit=o['limit'],slippage=o['slippage'],point=s.point,
+                                tick_time_ms=getattr(tick,'time_msc',None)))
                     else:
                         filling=mt.ORDER_FILLING_IOC if s.filling_mode&2 else mt.ORDER_FILLING_FOK if s.filling_mode&1 else None
                         if filling is None: raise ValueError('该 MT5 合约未提供可用的 IOC/FOK 成交方式')
@@ -1053,6 +1058,9 @@ def worker_main():
                             data['ack_received_ms']=ack_received_ms
                             timings['fill_normalize_ms']=round((time.monotonic()-normalize_started)*1000,3)
                         data['precheck_receipt']=capture_receipt('mt5',check)
+                        data['execution_request']=dict(price=req['price'],bid=tick.bid,ask=tick.ask,point=s.point,
+                            deviation_points=req['deviation'],trade_execution_mode=getattr(s,'trade_exemode',None),
+                            filling=req['type_filling'])
                         if check is None or (check.retcode==0 and result is None):
                             try:
                                 native_error=mt.last_error()

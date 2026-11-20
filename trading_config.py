@@ -6,6 +6,7 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 from liquidation_risk import validate_alerts
 from pair_instruments import native_pair, short_symbol, pool_pair
+from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS
 
 REBATE_FIELDS=('binance_rebate_percent','mt5_rebate_percent')
 
@@ -36,6 +37,18 @@ def validate_proxy_url(value):
 
 
 def validate(c):
+    for k,v in CONFIRMATION_DEFAULTS.items(): c['strategy'].setdefault(k,v)
+    s=c['strategy']
+    for direction in ('forward','reverse'):
+        if s[f'entry_{direction}_confirmation_mode'] not in ('equal','at_or_better'):
+            raise ValueError('连续报价确认方式必须为等于或达到／优于设定值')
+        count=s[f'entry_{direction}_confirmation_ticks']
+        if type(count) is not int or not 1<=count<=1000:
+            raise ValueError('连续新报价次数必须为 1～1000 的整数')
+    if type(s['entry_confirmation_decimals']) is not int or not 0<=s['entry_confirmation_decimals']<=8:
+        raise ValueError('价差比较小数位必须为 0～8 的整数')
+    c['execution'].setdefault('entry_dispatch', 'auto')
+    c['execution'].setdefault('mt5_quote_poll_ms', 50)
     if pool_pair(c):
         from mt5_pool_config import candidates
         for fixed in candidates(c).values(): validate(fixed)
@@ -62,8 +75,8 @@ def validate(c):
         if mode not in ('forward','reverse','auto'): raise ValueError('MT5 组合方向模式无效')
         if isinstance(lower,bool) or not isinstance(lower,(int,float)) or not math.isfinite(lower) or not -100000<=lower<=100000:
             raise ValueError('反向开仓下限必须在 -100000～100000 之间')
-        if mode=='auto' and lower>=s['entry_spread_usd']:
-            raise ValueError(f"自动双向的下限必须小于上限：买 A 卖 B 的下限 {lower:g}，须小于卖 A 买 B 的上限 {s['entry_spread_usd']:g}。允许负数；方向表示买卖顺序，与价差正负无关。保存失败，当前生效参数未改变。")
+        if mode=='auto' and lower>s['entry_spread_usd']:
+            raise ValueError(f"自动选择两种买卖组合的下限不能大于上限：当前下限 {lower:g} > 上限 {s['entry_spread_usd']:g}。允许相等、零和负数；两项同时到价且空仓时等待报价区分。保存失败，当前生效参数未改变。")
         a,b=short_symbol(c),c['mt5']['symbol']
         if not all(isinstance(x,str) and re.fullmatch(r'[\w.#+/-]{1,40}',x) for x in (a,b)) or (a==b and not c.get('pair',{}).get('endpoints')):
             raise ValueError('请填写两个不同的 MT5 完整品种名')
@@ -77,6 +90,8 @@ def validate(c):
         raise ValueError('运行模式或行情来源无效')
     if e.get('entry_leg') not in ('binance', 'mt5'):
         raise ValueError('入场优先腿必须选择币安或 MT5')
+    if e['entry_dispatch'] not in ('auto', 'serial'):
+        raise ValueError('开仓派发方式必须为不同终端自动并发或串行')
     if c['mt5']['adapter'] not in ('paper', 'mcp', 'native'):
         raise ValueError('MT5 适配器无效')
     if e['mode'] == 'live' and (e['quote_source'] != 'market' or c['mt5']['adapter'] != 'native'):
@@ -115,7 +130,8 @@ def validate(c):
         raise ValueError('保护性平仓滑点不能小于普通最大滑点')
     if s['grid_enabled'] and int(s['max_groups']) < 1 + int(s['grid_max_adds']):
         raise ValueError('启用网格时，最大持仓组数必须至少为 1 + 网格补仓次数')
-    for k, lo, hi in [('poll_ms', 250, 5000), ('magic', 1, 2147483647), ('close_retry_limit', 1, 5)]:
+    for k, lo, hi in [('poll_ms', 250, 5000), ('mt5_quote_poll_ms', 10, 1000),
+                     ('magic', 1, 2147483647), ('close_retry_limit', 1, 5)]:
         v=e[k]
         if type(v) is not int or not lo <= v <= hi:
             raise ValueError(k+' 不在有效整数范围')

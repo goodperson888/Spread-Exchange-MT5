@@ -14,7 +14,7 @@
     const same=native(config),a=same?config.pair.short_symbol:config.symbol,b=config.mt5.symbol;
     node('pair-active-name').textContent=config.pair?.name||`${a} × ${b}`;
     node('pair-active-detail').textContent=same?'同一 MT5 · 双腿相同手数':'币安永续 × MT5 · 黄金数量配平';
-    node('pair-direction').textContent=same?`${a} / ${b} · ${{auto:'自动双向',reverse:'买 A · 卖 B',forward:'卖 A · 买 B'}[config.strategy.direction_mode||'forward']}`:`卖 ${a} · 买 ${b} · 币安 × MT5`;
+    node('pair-direction').textContent=same?`${a} / ${b} · ${{auto:'两种买卖组合自动选择',reverse:`买 ${a}／卖 ${b}`,forward:`卖 ${a}／买 ${b}`}[config.strategy.direction_mode||'forward']}`:`卖 ${a} · 买 ${b} · 币安 × MT5`;
     node('exchange-symbol-field').hidden=same;node('exchange-network').hidden=same;
     node('exchange-heading').textContent=same?'执行模式与优先腿':'币安连接配置';
     node('exchange-settings').querySelector('.eyebrow').textContent=same?'02 · 执行设置':'02 · 币安永续';
@@ -40,10 +40,13 @@
     node('check-binance').hidden=same;node('native-pair-costs').hidden=!same;
     for(const id of ['auto-fx','usdt-fx','auto-binance-fee','binance-fee','binance-rebate','paper-funding'])node(id).closest('label').hidden=same;
     node('mt5-short-swap').closest('label').hidden=config.execution.mode==='live';
-    node('live-entry-label').textContent=same?'正向入场':'入场价差';
-    node('live-exit-label').textContent=same?'反向入场':'退出价差';
-    node('market-overview').querySelectorAll('small')[0].textContent=same?'A Bid − B Ask（同时为反向退出）':'卖币安 Bid − 买 MT5 Ask';
-    node('market-overview').querySelectorAll('small')[1].textContent=same?'A Ask − B Bid（正向退出／反向入场）':'买回币安 Ask − 卖 MT5 Bid';
+    node('entry-forward-confirm-label').textContent=`卖 ${a}／买 ${b} · 确认方式`;
+    node('entry-reverse-confirm-label').textContent=`买 ${a}／卖 ${b} · 确认方式`;
+    node('live-entry-label').textContent=same?`卖 ${a}／买 ${b}`:'入场价差';
+    node('live-exit-label').textContent=same?`买 ${a}／卖 ${b}`:'退出价差';
+    node('market-overview').querySelectorAll('small')[0].textContent=same?`${a} Bid − ${b} Ask`:'卖币安 Bid − 买 MT5 Ask';
+    node('market-overview').querySelectorAll('small')[1].textContent=same?`${a} Ask − ${b} Bid`:'买回币安 Ask − 卖 MT5 Bid';
+    if(same)for(const option of node('direction-mode').options)option.textContent=({auto:'两种买卖组合自动选择',forward:`卖 ${a}／买 ${b}`,reverse:`买 ${a}／卖 ${b}`})[option.value]||option.textContent;
     node('risk-binance-heading').closest('.risk-card').hidden=same;
     for(const id of ['risk-binance-warning','risk-binance-danger','recv-window'])node(id).closest('label').hidden=same;
     label('bid',same?'品种 A Bid（USD）':'参考币安 Bid（USDT）');
@@ -53,7 +56,8 @@
     label('contract',same?'品种 B 每手合约数量':'每手盎司');
     label('volume-min',same?'品种 B 最小手数':'最小手数');
     label('volume-step',same?'品种 B 手数步长':'手数步长');
-    label('entry',same?'正向开仓上限 A−B（USD/报价单位）':'自动开仓阈值（USD/盎司）');
+    label('entry',same?`卖 ${a}／买 ${b} · 开仓上限（USD/报价单位）`:'自动开仓阈值（USD/盎司）');
+    if(same)label('entry-lower',`买 ${a}／卖 ${b} · 开仓下限（USD/报价单位）`);
     label('lots',same?'每组每腿手数（两腿相同）':'每组 MT5 手数');
     label('mt5-fee',same?'品种 B 备用佣金（USD/手/单边）':'MT5 备用佣金（USD/手/单边）');
     label('auto-mt5-fee',same?'后台获取品种 B 佣金参考':'后台获取 MT5 佣金参考');
@@ -114,7 +118,7 @@
     node('pair-activate').disabled=!p||p.id===catalogue.active_id;
     node('pair-delete').disabled=!p||p.id===catalogue.active_id;
     const s=p?.strategy,c=p?.costs;
-    node('pair-parameters-preview').textContent=s?`此组合已保存：每腿 ${s.mt5_lots} 手 · 最多 ${s.max_groups} 组 · 总手数 ${s.max_total_lots} · 开仓上限 ${s.entry_spread_usd}${p.type==='mt5_mt5'?' / 下限 '+(s.entry_lower_usd??-5)+' / '+({auto:'自动双向',reverse:'反向',forward:'正向'}[s.direction_mode||'forward']):''} · 收窄 ${s.take_contraction_usd} · 最低净收益 ${s.min_net_profit_usd} USD · ${p.type==='mt5_mt5'?'A/B 单边佣金 '+(c.mt5_short_commission_per_lot_side||0)+' / '+c.mt5_commission_per_lot_side:'吃单费率 '+c.binance_taker_percent+'%'}。设为当前组合后在主页面编辑，仅保存到此组合。`:'新组合将初次复制当前参数，保存后可切换并独立调整。';
+    node('pair-parameters-preview').textContent=s?`此组合已保存：每腿 ${s.mt5_lots} 手 · 最多 ${s.max_groups} 组 · 总手数 ${s.max_total_lots} · 开仓上限 ${s.entry_spread_usd}${p.type==='mt5_mt5'?' / 下限 '+(s.entry_lower_usd??-5)+' / '+(p.mode==='pool'?'按各终端对独立规则':{auto:'两种买卖组合自动选择',reverse:`买 ${p.short_symbol}／卖 ${p.long_symbol}`,forward:`卖 ${p.short_symbol}／买 ${p.long_symbol}`}[s.direction_mode||'forward']):''} · 收窄 ${s.take_contraction_usd} · 最低净收益 ${s.min_net_profit_usd} USD · ${p.type==='mt5_mt5'?'A/B 单边佣金 '+(c.mt5_short_commission_per_lot_side||0)+' / '+c.mt5_commission_per_lot_side:'吃单费率 '+c.binance_taker_percent+'%'}。设为当前组合后在主页面编辑，仅保存到此组合。`:'新组合将初次复制当前参数，保存后可切换并独立调整。';
     preview();
   }
   async function refresh(id) {

@@ -55,6 +55,34 @@ class NativeMT5FillTests(unittest.TestCase):
             self.assertGreaterEqual(data['timings'][key],0)
         self.mt.order_check.assert_called_once();self.mt.order_send.assert_called_once()
 
+    def test_worker_captures_actual_request_prices_and_execution_mode_without_extra_calls(self):
+        self.ack.volume=.01;self.ack.price=4000
+        self.mt.symbol_info.return_value.trade_exemode=2
+        r=self.run_worker({**self.o,'defer_position_lookup':True})
+        self.assertTrue(r['ok'])
+        evidence=r['data']['execution_request'];request=self.mt.order_send.call_args.args[0]
+        self.assertEqual(evidence,dict(price=request['price'],bid=3999.9,ask=4000,point=.01,
+            deviation_points=request['deviation'],trade_execution_mode=2,filling=request['type_filling']))
+        self.mt.symbol_info_tick.assert_called_once_with('XAUUSD')
+        self.mt.order_check.assert_called_once();self.mt.order_send.assert_called_once()
+        self.mt.positions_get.assert_not_called();self.mt.history_deals_get.assert_not_called()
+
+    def test_worker_slippage_precheck_records_unsent_quote_for_open_and_close(self):
+        for action,limit,price in (('open',3999,4000),('close',4001,3999.9)):
+            with self.subTest(action=action):
+                self.mt.reset_mock()
+                result=self.run_worker({**self.o,'action':action,'limit':limit})
+                self.assertTrue(result['ok']);data=result['data']
+                self.assertEqual((data['status'],data['qty']),('done',0))
+                self.assertFalse(data['submitted'])
+                self.assertEqual(data['error_code'],'MT5_SLIPPAGE_PRECHECK')
+                self.assertEqual(data['error_kind'],'local_validation')
+                self.assertEqual(data['execution_precheck'],dict(bid=3999.9,ask=4000,
+                    price=price,limit=limit,slippage=1,point=.01,tick_time_ms=None))
+                self.mt.symbol_info_tick.assert_called_once_with('XAUUSD')
+                self.mt.order_check.assert_not_called();self.mt.order_send.assert_not_called()
+                self.mt.positions_get.assert_not_called();self.mt.history_deals_get.assert_not_called()
+
     def test_partial_or_missing_deal_ack_does_not_use_fast_binding_path(self):
         self.mt.TRADE_RETCODE_DONE=10009;self.ack.price=4000
         for volume,deal in ((.005,600),(.01,0)):

@@ -90,6 +90,17 @@ test('combined entry spread guard is opt-in and saves separately from per-leg sl
  assert.equal(f.el('entry-spread-guard-on').checked,false);
 });
 
+test('opening dispatch and MT5 quote interval restore, dirty and save as pair execution settings',async()=>{
+ const f=await fixture();
+ assert.equal(f.el('entry-dispatch').value,'auto');assert.equal(f.el('mt5-quote-poll-ms').value,'50');
+ f.edit('entry-dispatch','serial');f.edit('mt5-quote-poll-ms','20');
+ assert.equal(f.run('dirtyFields.has("entry-dispatch")'),true);
+ assert.equal(f.run('dirtyFields.has("mt5-quote-poll-ms")'),true);
+ const c=f.run('formConfig()');assert.equal(c.execution.entry_dispatch,'serial');assert.equal(c.execution.mt5_quote_poll_ms,20);
+ f.run('populate({...formConfig(),execution:{...formConfig().execution,entry_dispatch:"auto",mt5_quote_poll_ms:50}})');
+ assert.equal(f.el('entry-dispatch').value,'auto');assert.equal(f.el('mt5-quote-poll-ms').value,'50');
+});
+
 test('MT5 commission references show source samples and preserve manual fallback and separate switches',async()=>{
  const ref={symbol:'GOLD-A',checked_ms:Date.now(),profiles:{
    open_0:{state:'ready',rate:6,samples:3},close_1:{state:'ready',rate:0,samples:4},
@@ -394,4 +405,21 @@ test('configuration saves carry the pair identity and independent directional fi
  assert.equal(body.expected_pair_id,'pair-b');assert.equal(body.strategy.direction_mode,'auto');
  assert.equal(body.strategy.entry_lower_usd,3);assert.equal(body.strategy.entry_spread_usd,12);
  assert.match(f.el('config-status').textContent,/组合乙/);
+});
+
+test('entry confirmation modes and counts restore and save independently for each buy/sell combination',async()=>{
+  const f=await fixture();
+  assert.equal(f.el('entry-forward-confirm-mode').value,'at_or_better');
+  assert.equal(f.el('entry-forward-confirm-ticks').value,'1');
+  f.edit('entry-forward-confirm-mode','equal');f.edit('entry-forward-confirm-ticks','5');
+  f.edit('entry-reverse-confirm-mode','at_or_better');f.edit('entry-reverse-confirm-ticks','3');
+  f.edit('entry-confirm-decimals','2');
+  const s=f.run('formConfig().strategy');
+  assert.equal(s.entry_forward_confirmation_mode,'equal');assert.equal(s.entry_forward_confirmation_ticks,5);
+  assert.equal(s.entry_reverse_confirmation_mode,'at_or_better');assert.equal(s.entry_reverse_confirmation_ticks,3);
+  assert.equal(s.entry_confirmation_decimals,2);
+  assert.equal(f.run("dirtyFields.has('entry-forward-confirm-mode')"),true);
+  assert.equal(f.run("dirtyFields.has('entry-forward-confirm-ticks')"),true);
+  f.run("populate({...formConfig(),strategy:{...formConfig().strategy,entry_forward_confirmation_ticks:9}})");
+  assert.equal(f.el('entry-forward-confirm-ticks').value,'9');
 });

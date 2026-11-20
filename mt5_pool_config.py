@@ -7,11 +7,12 @@ import ntpath
 import re
 from itertools import combinations
 from mt5_session import normalize_path
+from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS
 
 RULE_FIELDS = ('entry_spread_usd', 'entry_lower_usd', 'direction_mode', 'take_contraction_usd',
                'target_mode', 'exit_spread_usd', 'require_net_profit', 'min_net_profit_usd',
                'group_loss_enabled', 'group_max_loss_usd', 'max_hold_minutes',
-               'entry_spread_guard_enabled', 'entry_spread_slippage_usd')
+               'entry_spread_guard_enabled', 'entry_spread_slippage_usd', *CONFIRMATION_DEFAULTS)
 
 
 def fingerprint(e):

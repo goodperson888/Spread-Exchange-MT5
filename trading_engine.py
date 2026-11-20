@@ -7,8 +7,10 @@ from trading_config import pair_key, rollover_status
 from execution_evidence import reason_code, REASON_LABELS, result_evidence, validation_issues
 from execution_dispatch import dispatch_order, dispatch_pair, not_dispatched
 from pair_instruments import (native_pair, pair_info, native_valuation, native_thresholds, reverse_pair,
-                              position_side, order_sells, direction_quote, entry_direction)
+                              position_side, order_sells, direction_quote, entry_direction, entry_ambiguous)
 from commission_reference import fee_rate, attach as attach_commission_reference
+from mt5_session import normalize_path
+from entry_confirmation import EntryConfirmations
 
 
 def stamp(): return int(time.time()*1000)
@@ -50,6 +52,7 @@ class Engine:
         self._close_confirmation_deadlines={}
         self._execution_timers={}
         self._reconcile_notices={}
+        self.entry_confirmations=EntryConfirmations()
         self.state=store.load() or dict(groups=[],orders=[],last_open_ms=0,enabled=False,mode='paper',key=None,alarm='',recovery=False)
         self.state['enabled']=False
         self.state['boot_ms']=stamp()
@@ -75,7 +78,8 @@ class Engine:
     def observe_entry(self, c, q, code, **evidence):
         observer = getattr(self, 'entry_observations', None)
         if observer is not None:
-            observer.observe(c, q, code, enabled=self.state.get('enabled', False), **evidence)
+            observer.observe(c, q, code, enabled=self.state.get('enabled', False),
+                confirmation=self.entry_confirmations.snapshot(pair_key(c),max_age_ms=c['strategy']['max_quote_age_ms']), **evidence)
 
     def observe_exit_wait(self, c, q, code):
         if getattr(self, 'exit_observations', None) is None: return
@@ -86,6 +90,7 @@ class Engine:
     def active(self): return [g for g in self.state['groups'] if g['status']!='closed']
 
     def pause(self, reason='已暂停新开仓；已有仓位继续管理', keep_entry=False):
+        self.entry_confirmations.reset()
         if not keep_entry: self._entry_deadlines.clear()
         self._close_confirmation_deadlines.clear()
         code=reason_code(reason)
@@ -99,6 +104,7 @@ class Engine:
         if any(g['status'] in ('opening','unwinding','closing','attention') for g in self.active()):
             raise ValueError('尚有未完成或异常交易组')
         before={key:self.state[key] for key in ('key','mode','last_start_ms') if key in self.state}
+        self.entry_confirmations.reset()
         self.state.update(enabled=True,key=pair_key(c),mode=c['execution']['mode'],alarm='')
         self.state['last_start_ms']=stamp()
         try:
@@ -137,9 +143,9 @@ class Engine:
         first=next((o for o in orders if o['leg']==g.get('first_leg')),None)
         second=next((o for o in orders if o['leg']==g.get('second_leg')),None)
         if not first or not second: return False
-        r=second['result'];ack=second.get('initial_result',{});proof=ack.get('confirmation',{})
-        return (first['result'].get('status')=='done' and first['result'].get('qty')==g['qty']
-                and r.get('status')=='unknown' and r.get('qty')==0
+        def awaiting_native_history(order):
+            r=order['result'];ack=order.get('initial_result',{});proof=ack.get('confirmation',{})
+            return (r.get('status')=='unknown' and r.get('qty')==0
                 and ack.get('valid') is True and ack.get('retcode')==10009
                 and ack.get('ack_volume')==g['lots'] and ack.get('ack_price')==0
                 and bool(r.get('ticket'))
@@ -147,6 +153,13 @@ class Engine:
                 and proof.get('deal_matches')==1
                 and all(proof.get(key)==1 for key in
                         ('ticket_matches','symbol_matches','magic_matches','side_matches','entry_matches')))
+        if g.get('entry_dispatch')=='parallel':
+            pending=self.uncertain(g)
+            return (len(orders)==2 and bool(pending) and all(awaiting_native_history(o) for o in pending)
+                    and all(o in pending or (o['result'].get('status')=='done'
+                            and abs(o['result'].get('qty',0)-g['qty'])<1e-8) for o in orders))
+        return (first['result'].get('status')=='done' and first['result'].get('qty')==g['qty']
+                and awaiting_native_history(second))
 
     def _waiting_close_confirmation(self, g):
         # An active closing group already blocks all new entries. A native
@@ -287,8 +300,12 @@ class Engine:
             result=dict(metadata,status='unknown',qty=0,price=0,error='成交回报无效，等待对账',
                         error_code='INVALID_RESPONSE',error_kind='invalid_response')
             initial_evidence.update(error_code='INVALID_RESPONSE',error_kind='invalid_response')
-        for key in ('dispatch_ms','dispatch_queue_ms'):
+        for key in ('dispatch_ms','dispatch_queue_ms','dispatch_quote_age_ms','dispatch_quote_alignment_ms'):
             if key in receipt: o[key]=receipt[key]
+        if 'dispatch_quote_age_ms' in receipt:
+            self._latency(o['action']+'_dispatch_quote_age_ms',receipt['dispatch_quote_age_ms'])
+        if 'dispatch_quote_alignment_ms' in receipt:
+            self._latency(o['action']+'_dispatch_quote_alignment_ms',receipt['dispatch_quote_alignment_ms'])
         if 'request_ms' in receipt:
             result['request_ms']=receipt['request_ms']
             self._latency(o['leg']+'_'+o['action']+'_request_ms', result['request_ms'])
@@ -578,6 +595,16 @@ class Engine:
         moment later.  It deliberately keeps the original group timestamp so
         the configured one-sided exposure window still bounds the recovery.
         """
+        if g.get('entry_dispatch')=='parallel':
+            orders=[o for o in self.state['orders'] if o['group']==g['id'] and o['action']=='open']
+            if len(orders)!=2 or {o['leg'] for o in orders}!={'binance','mt5'}:
+                g.update(status='attention',reason='并发开仓意图不完整，须核验原订单；禁止补发开仓')
+                self.pause(g['reason']);return True
+            if self.uncertain(g):
+                if self._waiting_second_confirmation(g):return True
+                g['reason']='并发开仓回报待核验；保留原订单查询，禁止重复下单'
+                if self.state['enabled']: self.pause(g['reason'],keep_entry=True)
+                return True
         first_leg=g.get('first_leg') or ('binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5')
         second_leg=g.get('second_leg') or ('mt5' if first_leg=='binance' else 'binance')
         first_label=('MT5 '+('卖出' if order_sells(g,first_leg,'open') else '买入')+'腿') if native_pair(c) else ('币安' if first_leg=='binance' else 'MT5')
@@ -590,7 +617,10 @@ class Engine:
             g['status']='unwinding';g['reason']=f'{first_label} 开仓拒单或部分成交，正在保护性平仓';self.pause(g['reason'])
             self.close_group(g,q);return True
         deadline=self._entry_deadlines.get(g['id'])
-        if (stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms'] or
+        both_parallel_filled=(g.get('entry_dispatch')=='parallel' and all(
+            o['result'].get('status')=='done' and abs(o['result'].get('qty',0)-g['qty'])<1e-8
+            for o in orders))
+        if not both_parallel_filled and (stamp()-g['opened_ms']>=g['parameters']['max_unhedged_ms'] or
                 (deadline is not None and time.monotonic()>=deadline)):
             g['status']='unwinding';g['reason']='第一腿成交后超出敞口期限或报价过期，正在保护性平仓';self.pause(g['reason'])
             self.close_group(g,q);return True
@@ -625,6 +655,7 @@ class Engine:
                 # reconciliation instead of churning fees with a blind close.
                 g['status']='attention';g['reason']='两边已成交但无法计算实际价差，请对账核验';self.pause(g['reason']);return True
             g['status']='open';g['open_binance']=(first if first_leg=='binance' else second)['result']['price']
+            if g.get('entry_dispatch')=='parallel':g['reason']=''
             g['entry_signal']=g.get('entry_signal',g['entry']);g['entry']=actual
             self._complete_execution(g,'open')
             if threshold is None: threshold=g.get('entry_threshold',g['parameters']['entry_spread_usd'])
@@ -665,6 +696,62 @@ class Engine:
             self.close_group(g,q)
         return True
 
+    @staticmethod
+    def _parallel_entry(c):
+        if not native_pair(c) or c['execution'].get('entry_dispatch','auto')!='auto': return False
+        endpoints=c.get('pair',{}).get('endpoints',{})
+        if set(endpoints)!={'binance','mt5'}: return False
+        a,b=(endpoints[leg] for leg in ('binance','mt5'))
+        return bool(a.get('id') and b.get('id') and a['id']!=b['id']
+                    and a.get('terminal_path') and b.get('terminal_path')
+                    and normalize_path(a['terminal_path'])!=normalize_path(b['terminal_path']))
+
+    def _parallel_open(self, c, p, g, q, previous_open_ms):
+        # The group and BOTH intents become durable in the same transaction.
+        # Only the owner mutates state; workers receive independent copies.
+        orders=[self._prepare_order(g,leg,'open',p['qty'],q) for leg in ('binance','mt5')]
+        for o in orders: o['dispatch_mode']='parallel'
+        self.state['orders'].extend(orders)
+        journal_started=time.monotonic()
+        try:
+            self.store.commit_many(self.state,[('group_opening',{'group':g['id'],'dispatch_mode':'parallel'}),
+                *[('order_intent',self._intent_data(o)) for o in orders]])
+        except Exception:
+            del self.state['orders'][-2:]
+            self.state['groups'].remove(g);self.state['last_open_ms']=previous_open_ms
+            self._entry_deadlines.pop(g['id'],None);self._execution_timers.pop((g['id'],'open'),None)
+            self.state.update(enabled=False,alarm='并发开仓意图保存失败，两腿均未发送；请检查数据磁盘')
+            raise
+        ready=time.monotonic()
+        for o in orders:
+            o['intent_journal_ms']=round((ready-journal_started)*1000,3)
+            self._latency('intent_journal_ms',o['intent_journal_ms'])
+        limits={**g['parameters'],'max_quote_age_ms':min(250,g['parameters']['max_quote_age_ms'])}
+        can_start=lambda:(time.monotonic()<self._entry_deadlines[g['id']]
+                          and valid_group_quote(q,g['key'],limits))
+        # No platform reads or state/journal writes run before the common gate.
+        for index,receipt in dispatch_pair(self.broker,[copy.deepcopy(o) for o in orders],ready,
+                clock_ms=stamp,can_start=can_start,action='open'):
+            self._accept_order_result(g,orders[index],receipt)
+        local={o['result'].get('error_code') for o in orders}
+        if local <= {'DISPATCH_NOT_STARTED','STALE_EXECUTION_QUOTE'} and all(o['result'].get('submitted') is False and o['result'].get('status')=='done'
+               and o['result'].get('qty')==0 for o in orders):
+            startup_failed='DISPATCH_NOT_STARTED' in local
+            reason=('并发开仓线程创建失败，两腿均未发送；检查后手动启动' if startup_failed else
+                    '并发派发前报价过期或敞口预算已用完，两腿均未发送；等待下一次机会')
+            g.update(status='closed',closed_ms=stamp(),entry_skipped=True,reason=reason)
+            g['valuation']=self.valuation(g,q)
+            self._entry_deadlines.pop(g['id'],None);self._execution_timers.pop((g['id'],'open'),None)
+            self.save('entry_skipped',{'group':g['id'],'reason':reason})
+            if startup_failed:self.pause(reason)
+            return
+        # Read missing-price confirmations only after BOTH submit calls return.
+        # Unknown submissions keep their original IDs and normal query backoff.
+        for o in orders:
+            if self._price_only_full_fill(o):o['reconcile']['next_ms']=stamp()
+        if any(self._price_only_full_fill(o) for o in orders):self.resolve(g)
+        self._finish_open(c,p,g,q)
+
     def open(self, c, p, q, grid_index=0, min_entry_spread=None, direction='forward'):
         now=stamp()
         entry_started=time.monotonic()
@@ -686,21 +773,28 @@ class Engine:
             return
         self._preflight_log=None
         self.observe_entry(c,q,'ENTRY_SUBMIT',direction=direction,stage='preflight',threshold=-threshold if direction=='reverse' else threshold)
+        self.entry_confirmations.reset(pair_key(c))
         first_leg='binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5'
         second_leg='mt5' if first_leg=='binance' else 'binance'
+        parallel=self._parallel_entry(c)
         g=dict(id=uuid.uuid4().hex[:12],status='opening',opened_ms=now,qty=p['qty'],lots=p['lots'],contract=p['contract'],
             symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],mode=c['execution']['mode'],
             parameters=copy.deepcopy(c['strategy']),costs=copy.deepcopy(c['costs']),attempts=0,
             retry_limit=c['execution']['close_retry_limit'],entry=q['entry'],entry_signal=q['entry'],reason='',key=pair_key(c),
-            first_leg=first_leg,second_leg=second_leg,entry_threshold=threshold,grid_index=int(grid_index))
+            first_leg=first_leg,second_leg=second_leg,entry_threshold=threshold,grid_index=int(grid_index),
+            entry_dispatch='parallel' if parallel else 'serial')
         g['pair']=pair_info(c)
         if native_pair(c):
             g.update(leg_contracts=copy.deepcopy(p['leg_contracts']),quantity_unit='lot',direction=direction)
             if c.get('pair',{}).get('endpoints'): g['magic']=c['execution']['magic']
         attach_commission_reference(self,c,g)
         self._begin_execution(g,'open',q,entry_started,now)
-        self.state['groups'].append(g);self.state['last_open_ms']=now;self.save('group_opening',{'group':g['id']})
+        previous_open_ms=self.state['last_open_ms']
+        self.state['groups'].append(g);self.state['last_open_ms']=now
         self._entry_deadlines[g['id']]=entry_started+c['strategy']['max_unhedged_ms']/1000
+        if parallel:
+            self._parallel_open(c,p,g,q,previous_open_ms);return
+        self.save('group_opening',{'group':g['id']})
         first=self.order(g,first_leg,'open',p['qty'],q)
         result=first['result']
         # Only a local pre-submit block on the first leg can be skipped.
@@ -983,10 +1077,12 @@ class Engine:
     def tick(self, c, p, q):
         self.reconcile_pending(c)
         if self.state['recovery']:
+            self.entry_confirmations.reset(pair_key(c))
             self.observe_exit_wait(c,q,'RECOVERY_PENDING')
             self.observe_entry(c,q,'RECOVERY_PENDING')
             return
         if not valid_quote(q,c):
+            self.entry_confirmations.reset(pair_key(c))
             if self.active(): self.state['alarm']='报价过期、时钟偏差或品种不符，等待有效行情；已有仓位仍未平仓'
             self.observe_exit_wait(c,q,'QUOTE_UNAVAILABLE')
             self.observe_entry(c,q,'QUOTE_INVALID')
@@ -1076,24 +1172,32 @@ class Engine:
         started = time.monotonic() if measure else 0
         q=market_quote
         s=c['strategy'];all_active=self.active();active=[g for g in all_active if not g.get('imported')];grid_index=0;grid_allowed=True
-        direction=entry_direction(c,q,scoped() if getattr(self,'multi_pair',False) else all_active)
         effective_upper,effective_lower=native_thresholds(c,q)
-        open_threshold=-effective_lower if direction=='reverse' else effective_upper
-        entry_q=direction_quote(q,{'pair':c.get('pair',{}),'direction':direction})
         if s.get('grid_enabled') and active:
             # Grid additions are separate paired groups. They only continue
             # a homogeneous grid chain; unrelated/manual groups block adds.
             if all(g.get('parameters',{}).get('grid_enabled') for g in active):
                 grid_index=max(int(g.get('grid_index',0)) for g in active)+1
-                open_threshold+=grid_index*s['grid_spacing_usd']
+                effective_upper+=grid_index*s['grid_spacing_usd']
+                effective_lower-=grid_index*s['grid_spacing_usd']
                 grid_allowed=grid_index<=int(s['grid_max_adds'])
             else:
                 grid_allowed=False
+        direction=entry_direction(c,q,scoped() if getattr(self,'multi_pair',False) else all_active,
+                                  thresholds=(effective_upper,effective_lower))
+        open_threshold=-effective_lower if direction=='reverse' else effective_upper
         rollover=rollover_status(s) if s.get('rollover_guard_enabled') else {'blocked':False}
+        confirmation={}
+        for d in ('forward','reverse') if native_pair(c) else ('forward',):
+            bound=effective_lower if d=='reverse' else effective_upper
+            confirmation[d]=self.entry_confirmations.observe(q['key'],s,q,d,bound,
+                enabled=self.state['enabled'] and (not native_pair(c) or s.get('direction_mode','forward') in ('auto',d)),level=grid_index)
+        confirmed=confirmation.get(direction,{}).get('ready',False)
         should_open = (self.state['enabled'] and getattr(self,'entry_candidate_key',q['key'])==q['key'] and not exit_event and all(g['status']=='open' for g in all_active)
             and grid_allowed and len(active)<s['max_groups']
             and sum(g['lots'] for g in all_active)+p['lots']<=s['max_total_lots']+1e-9
-            and direction is not None and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000 and entry_q['entry']>=open_threshold
+            and direction is not None and stamp()-self.state['last_open_ms']>=s['cooldown_seconds']*1000
+            and confirmed
             and not rollover.get('blocked'))
         if self.state['enabled'] and rollover.get('blocked'):
             self.state['alarm']=rollover['message']
@@ -1106,11 +1210,14 @@ class Engine:
                     'EXIT_PROCESSING' if exit_event else 'ORDER_PENDING' if any(g['status']!='open' for g in all_active) else
                     'GRID_LIMIT' if not grid_allowed else 'GROUP_LIMIT' if len(active)>=s['max_groups'] else
                     'LOTS_LIMIT' if sum(g['lots'] for g in all_active)+p['lots']>s['max_total_lots']+1e-9 else
+                    'AMBIGUOUS_THRESHOLD' if direction is None and entry_ambiguous(c,q,scoped() if getattr(self,'multi_pair',False) else all_active) else
                     'DIRECTION_OR_THRESHOLD' if direction is None else
                     'COOLDOWN' if stamp()-self.state['last_open_ms']<s['cooldown_seconds']*1000 else
-                    'WAIT_THRESHOLD' if entry_q['entry']<open_threshold else
+                    'WAIT_THRESHOLD' if not confirmation.get(direction,{}).get('matched') else
+                    'WAIT_CONFIRMATION' if not confirmed else
                     'ROLLOVER_GUARD' if rollover.get('blocked') else 'DIRECTION_OR_THRESHOLD')
             self.observe_entry(c,q,code,direction=direction,
+                               thresholds=(effective_upper,effective_lower),
                                threshold=(-open_threshold if direction=='reverse' else open_threshold) if direction else None)
 
     @staticmethod

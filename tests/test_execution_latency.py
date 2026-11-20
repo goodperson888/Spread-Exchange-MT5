@@ -86,6 +86,17 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(stats.snapshot()['counters'],dict(mt5_open_full_fill=1,mt5_open_partial_fill=1,
             mt5_open_zero_fill=1,mt5_open_unconfirmed=2))
 
+    def test_push_stages_use_only_python_monotonic_clock_and_keep_leg_identity(self):
+        stats=LatencyStats()
+        q=dict(key='test',binance=dict(observed_ms=100,_push_received_perf_counter=10),
+               mt5=dict(observed_ms=103,_push_received_perf_counter=10.002),_published_perf_counter=10.005)
+        with patch('execution_latency.time.perf_counter',return_value=10.012):stats.quote(q,110)
+        phases=stats.snapshot()['phases']
+        self.assertEqual(phases['binance_push_to_publish_ms']['median_ms'],5)
+        self.assertEqual(phases['mt5_push_to_publish_ms']['median_ms'],3)
+        self.assertEqual(phases['binance_push_to_strategy_ms']['median_ms'],12)
+        self.assertEqual(phases['mt5_push_to_strategy_ms']['median_ms'],10)
+
     def test_strategy_lock_wait_and_cycle_are_separate(self):
         import _test_runtime
         from server import TradingRuntime
@@ -109,11 +120,15 @@ class LatencyTests(unittest.TestCase):
             store=Store(Path(temp)/'state.db')
             try:
                 q=quote(config());LatencyStats.published(q)
+                q['mt5']['_push_received_perf_counter']=123.456
                 store.sample(q)
                 for table in ('quotes','quote_minutes'):
                     raw=store.db.execute('SELECT data FROM '+table).fetchone()[0]
                     self.assertNotIn('_published_monotonic',raw)
+                    self.assertNotIn('_published_perf_counter',raw)
+                    self.assertNotIn('_push_received_perf_counter',raw)
                 self.assertIn('_published_monotonic',q)
+                self.assertIn('_push_received_perf_counter',q['mt5'])
             finally:store.close()
 
     def test_native_quote_read_captures_queue_and_roundtrip_without_extra_calls(self):

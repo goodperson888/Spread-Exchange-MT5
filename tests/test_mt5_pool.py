@@ -113,6 +113,27 @@ class DefinitionTests(unittest.TestCase):
 
 
 class PoolTests(unittest.TestCase):
+    def test_unconfirmed_best_score_does_not_starve_confirmed_pair(self):
+        self.owner.contexts['t1~t3'].config['strategy']['entry_forward_confirmation_ticks']=5
+        self.r._pool_poll()
+        groups=self.r.engine.active()
+        self.assertEqual(len(groups),1)
+        self.assertEqual([e['id'] for e in groups[0]['pair']['endpoints'].values()],['t1','t2'])
+        waiting=next(r for r in self.owner.ranking if r['edge']=='t1~t3' and r['direction']=='forward')
+        self.assertEqual(waiting['reason_code'],'WAIT_CONFIRMATION')
+        self.assertEqual(waiting['confirmation']['count'],1)
+
+    def test_pool_status_reads_and_repeated_strategy_ticks_never_inflate_confirmation(self):
+        for ctx in self.owner.contexts.values():
+            ctx.config['strategy']['entry_forward_confirmation_ticks']=3
+            ctx.config['strategy']['entry_reverse_confirmation_ticks']=3
+        for _ in range(10):self.owner.rank(self.owner.pump.all())
+        self.assertFalse(self.r.engine.entry_confirmations.rows)
+        for _ in range(5):self.r._pool_poll()
+        self.assertFalse(self.r.engine.state['orders'])
+        key=pair_key(self.owner.contexts['t1~t3'].config)
+        self.assertEqual(self.r.engine.entry_confirmations.snapshot(key)['forward']['count'],1)
+
     def setUp(self):
         tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
         self.store=Store(Path(tmp.name)/'pool.db');self.addCleanup(self.store.close)
@@ -148,6 +169,19 @@ class PoolTests(unittest.TestCase):
         self.assertAlmostEqual(rows['reverse']['spread'],.9)
         self.assertEqual(rows['reverse']['threshold'],.4);self.assertTrue(rows['reverse']['ready'])
         self.assertFalse(rows['forward']['ready'])
+
+    def test_equal_zero_rules_can_be_saved_and_ambiguous_flat_quote_is_not_ranked_ready(self):
+        c=config(2);c['mt5_pool']['rules']['t1~t2'].update(entry_spread_usd=0,entry_lower_usd=-0.0)
+        validate(c)
+        ctx=self.owner.contexts['t1~t2'];ctx.config['strategy'].update(entry_spread_usd=0,entry_lower_usd=0)
+        q=copy.deepcopy(self.owner.pump.all()['t1~t2'])
+        for leg in ('binance','mt5'):q[leg].update(bid=4000,ask=4000)
+        q.update(entry=0,exit=0)
+        self.owner.rank({'t1~t2':q})
+        rows=[r for r in self.owner.ranking if r['edge']=='t1~t2']
+        self.assertEqual(len(rows),2)
+        self.assertTrue(all(not r['ready'] and r['reason_code']=='AMBIGUOUS_THRESHOLD' for r in rows))
+        self.assertFalse(self.r.engine.state['orders'])
 
     def test_actual_pool_evaluations_record_reached_blocker_without_writes_or_queries(self):
         observer=self.r.engine.entry_observations=EntryObservations()
@@ -261,6 +295,28 @@ class PoolTests(unittest.TestCase):
     def test_fees_change_ranking_and_are_not_an_unconditional_zero(self):
         ctx=self.owner.contexts['t1~t3'];ctx.config['costs']['mt5_short_commission_per_lot_side']=1000
         self.assertEqual(self.owner.rank(self.owner.pump.all())['edge'],'t1~t2')
+
+    def test_candidate_fee_cache_invalidates_on_cost_rebate_reference_and_expiry(self):
+        import commission_reference
+        ctx=self.owner.contexts['t1~t2']
+        with patch('commission_reference.fee_rate',wraps=commission_reference.fee_rate) as fee:
+            self.owner.rank(self.owner.pump.all());first=fee.call_count
+            self.owner.rank(self.owner.pump.all());self.assertEqual(fee.call_count,first)
+            ctx.config['costs']['mt5_short_commission_per_lot_side']=10
+            self.owner.rank(self.owner.pump.all());self.assertGreater(fee.call_count,first)
+        before=self.owner._roundtrip_cost(ctx,'forward')
+        ctx.config['costs']['mt5_short_rebate_percent']=50
+        self.assertLess(self.owner._roundtrip_cost(ctx,'forward'),before)
+        ctx.config['costs']['mt5_short_fee_auto']=True
+        ctx.engine.commission_reference={'legs':{'binance':dict(symbol='XAUUSD',checked_ms=100,
+            profiles={f'{action}_{side}':dict(state='ready',rate=20,lots=.01,samples=3)
+                      for action in ('open','close') for side in (0,1)})}}
+        with patch('mt5_pool.stamp',return_value=101):
+            learned=self.owner._roundtrip_cost(ctx,'forward')
+            ctx.engine.commission_reference['legs']['binance']['profiles']['open_1']['rate']=30
+            self.assertGreater(self.owner._roundtrip_cost(ctx,'forward'),learned)
+        with patch('mt5_pool.stamp',return_value=101+commission_reference.MAX_AGE_MS):
+            self.assertEqual(self.owner._roundtrip_cost(ctx,'forward'),before*.5)
     def test_quote_ingestion_wakes_strategy_without_disk_io(self):
         with patch.object(self.r.store,'sample',side_effect=AssertionError('disk on quote thread')):
             self.books([4006,4000,3998]);self.assertTrue(self.r.market_wake.is_set())

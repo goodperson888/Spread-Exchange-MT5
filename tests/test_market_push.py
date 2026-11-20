@@ -16,6 +16,7 @@ from trading_config import pair_key
 from trading_engine import Engine, valid_quote
 from trading_store import Store
 from trading_brokers import PaperBroker
+from execution_latency import LatencyStats
 from test_trading_engine import config
 
 
@@ -49,6 +50,35 @@ class PushTests(unittest.TestCase):
         second=self.client();self.assertEqual(second.recv(100),b'')
         self.arrived.clear();first.sendall((json.dumps(self.quote())+'\n').encode())
         self.assertTrue(self.arrived.wait(1));self.assertIsNotNone(self.bridge.quote(self.identity,5000))
+
+    def test_duplicate_tick_does_not_renew_receipt_and_ea_timings_are_allowlisted(self):
+        stats=self.bridge.latency=LatencyStats()
+        identity=self.bridge.identity(self.identity);owner=object();self.bridge.owners[identity]=owner
+        q=dict(self.quote(),prev_send_us=250,prev_prepare_us=100)
+        self.assertTrue(self.bridge.accept(identity,owner,q,10000,10))
+        self.assertTrue(self.bridge.accept(identity,owner,q,20000,20))
+        with patch('market_push.milliseconds',return_value=20000):
+            self.assertIsNone(self.bridge.quote(self.identity,3000))
+        self.assertEqual(self.bridge.values[identity]['observed_ms'],10000)
+        self.assertEqual(self.bridge.values[identity]['_push_received_perf_counter'],10)
+        phases=stats.snapshot()['phases']
+        self.assertEqual(phases['mt5_ea_send_ms']['median_ms'],.25)
+        self.assertEqual(phases['mt5_ea_prepare_ms']['median_ms'],.1)
+        q.update(prev_send_us=True,prev_prepare_us=float('nan'))
+        self.bridge.accept(identity,owner,q,20000,20)
+        self.assertEqual(stats.snapshot()['phases']['mt5_ea_send_ms']['samples'],2)
+
+    def test_socket_intake_records_parse_and_notify_without_trusting_remote_clocks(self):
+        stats=self.bridge.latency=LatencyStats();sock=self.client();self.assertEqual(sock.recv(100),b'OK\n')
+        q=dict(self.quote(),time_ms=milliseconds()+7200000,prev_send_us=120)
+        sock.sendall((json.dumps(q)+'\n').encode());self.assertTrue(self.arrived.wait(1))
+        deadline=time.monotonic()+1
+        while 'mt5_push_parse_ms' not in stats.snapshot()['phases'] and time.monotonic()<deadline:
+            threading.Event().wait(.002)
+        phases=stats.snapshot()['phases']
+        for key in ('mt5_push_parse_ms','mt5_push_accept_ms','mt5_push_notify_ms','mt5_ea_send_ms'):
+            self.assertIn(key,phases)
+        self.assertAlmostEqual(phases['mt5_ea_send_ms']['median_ms'],.12)
 
     def test_accept_server_timezone_offset_but_reject_invalid_and_backwards_ticks(self):
         identity=self.bridge.identity(self.identity);owner=object();self.bridge.owners[identity]=owner
@@ -92,7 +122,8 @@ class PumpTests(unittest.TestCase):
         s.quote.return_value=dict(s.quote.return_value,bid=4307)
         s.on_quote()
         self.assertTrue(w.wait(1))  # event wakes a 5s compatibility interval immediately
-        self.assertTrue(trade.is_alive());self.assertGreaterEqual(p.call_count,2)
+        self.assertTrue(trade.is_alive())
+        self.assertEqual(pump.read()[0]['binance']['bid'],4307)
         release_trade.set();trade.join(1)
 
     def test_stopped_old_connection_cannot_publish(self):

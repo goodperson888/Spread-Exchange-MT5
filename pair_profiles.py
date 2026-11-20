@@ -3,6 +3,7 @@ import copy
 import re
 import uuid
 from pair_instruments import pair_info,pool_pair
+from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS
 
 
 def capture(config):
@@ -10,7 +11,9 @@ def capture(config):
     return {**info, **({'mt5_pool':copy.deepcopy(config['mt5_pool'])} if pool_pair(config) else {}), 'symbol':config['symbol'],
             'strategy':copy.deepcopy(config['strategy']), 'costs':copy.deepcopy(config['costs']),
             'risk_alerts':copy.deepcopy(config.get('risk_alerts',{})),
-            'execution':{k:config['execution'][k] for k in ('mode','entry_leg','poll_ms','magic','close_retry_limit')}}
+            'execution':{**{k:config['execution'][k] for k in ('mode','entry_leg','poll_ms','magic','close_retry_limit')},
+                         'entry_dispatch':config['execution'].get('entry_dispatch','auto'),
+                         'mt5_quote_poll_ms':config['execution'].get('mt5_quote_poll_ms',50)}}
 
 
 def catalogue(config, saved):
@@ -69,12 +72,15 @@ def activate(config, profile):
     # Older saved profiles may predate newly added strategy controls.
     c['strategy']=copy.deepcopy(config.get('strategy',{}));c['strategy'].update(copy.deepcopy(profile.get('strategy',{})))
     saved_strategy=profile.get('strategy',{})
+    c['strategy'].update({k:copy.deepcopy(saved_strategy.get(k,v)) for k,v in CONFIRMATION_DEFAULTS.items()})
     c['strategy']['entry_spread_guard_enabled']=saved_strategy.get('entry_spread_guard_enabled',False)
     c['strategy']['entry_spread_slippage_usd']=saved_strategy.get('entry_spread_slippage_usd',
         saved_strategy.get('max_slippage_usd',c['strategy'].get('max_slippage_usd',.5)))
     c['costs']=copy.deepcopy(profile.get('costs',config.get('costs',{})))
     c['risk_alerts']=copy.deepcopy(profile.get('risk_alerts',{}))
     c['execution'].update(copy.deepcopy(profile['execution']))
+    c['execution']['entry_dispatch']=profile['execution'].get('entry_dispatch','auto')
+    c['execution']['mt5_quote_poll_ms']=profile['execution'].get('mt5_quote_poll_ms',50)
     if profile['type']=='mt5_mt5':
         c['costs'].update(usdt_usd=1.,usdt_usd_auto=False,binance_fee_auto=False)
         if c['mt5']['adapter']!='paper': c['mt5']['adapter']='native'

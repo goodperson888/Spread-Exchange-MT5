@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const bindings = {
   mt5: {adapter:'mt5-adapter', symbol:'mt5-symbol', terminal_path:'terminal-path', mcp_url:'mcp-url', account:'account', server:'mt5-server'},
-  strategy: {mt5_lots:'lots', entry_spread_usd:'entry', take_contraction_usd:'take', max_groups:'max-groups', max_quote_age_ms:'max-age', max_clock_skew_ms:'max-clock-skew', max_unhedged_ms:'max-unhedged', max_slippage_usd:'slippage', unwind_slippage_usd:'unwind-slippage', entry_spread_slippage_usd:'entry-spread-slippage', grid_spacing_usd:'grid-spacing', grid_max_adds:'grid-adds'},
+  strategy: {entry_forward_confirmation_ticks:'entry-forward-confirm-ticks',entry_reverse_confirmation_ticks:'entry-reverse-confirm-ticks',entry_confirmation_decimals:'entry-confirm-decimals',mt5_lots:'lots', entry_spread_usd:'entry', take_contraction_usd:'take', max_groups:'max-groups', max_quote_age_ms:'max-age', max_clock_skew_ms:'max-clock-skew', max_unhedged_ms:'max-unhedged', max_slippage_usd:'slippage', unwind_slippage_usd:'unwind-slippage', entry_spread_slippage_usd:'entry-spread-slippage', grid_spacing_usd:'grid-spacing', grid_max_adds:'grid-adds'},
   risk_alerts: {binance_warning_distance_percent:'risk-binance-warning',binance_danger_distance_percent:'risk-binance-danger',mt5_warning_margin_level_percent:'risk-mt5-warning',mt5_danger_margin_level_percent:'risk-mt5-danger'},
 };
 const DRAFT_KEY = 'GoldPairLocal.configDraft.v2';
@@ -12,8 +12,8 @@ const dirtySecrets = new Set();
 const sectionFields = {
   mt5: new Set([...Object.values(bindings.mt5), 'mt5-mcp-token']),
   binance: new Set(['symbol','recv-window','binance-proxy','trading-api-key','trading-api-secret']),
-  execution: new Set(['exec-mode','entry-leg','poll-ms','magic','close-retries']),
-  strategy: new Set([...Object.values(bindings.strategy),'entry-spread-guard-on','grid-enabled','cooldown','max-total','exit-mode','target-mode','native-dynamic-reference','native-reference-window','native-entry-deviation',
+  execution: new Set(['exec-mode','entry-leg','entry-dispatch','mt5-quote-poll-ms','poll-ms','magic','close-retries']),
+  strategy: new Set([...Object.values(bindings.strategy),'entry-forward-confirm-mode','entry-reverse-confirm-mode','entry-spread-guard-on','grid-enabled','cooldown','max-total','exit-mode','target-mode','native-dynamic-reference','native-reference-window','native-entry-deviation',
     'absolute-exit','direction-mode','entry-lower','require-net','min-net','group-loss-on','group-loss','total-loss-on','total-loss','max-hold','rollover-guard-on','rollover-utc-hour','rollover-utc-minute','rollover-guard-minutes']),
   risk_alerts: new Set(Object.values(bindings.risk_alerts)),
 };
@@ -74,12 +74,12 @@ function formConfig() {
     mode:'paper', symbol:window.GoldPairPairs?.native({pair:window.GoldPairPairs.info()})?window.GoldPairPairs.info().short_symbol:value('symbol').toUpperCase(), mt5,
     risk_alerts:Object.fromEntries(Object.entries(bindings.risk_alerts).map(([key,id])=>[key,Number(value(id))])),
     binance:{recv_window_ms:Number(value('recv-window')),proxy_url:value('binance-proxy'),api_key:value('trading-api-key'),api_secret:value('trading-api-secret')},
-    strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),entry_spread_guard_enabled:$('entry-spread-guard-on').checked,direction_mode:value('direction-mode')||'forward',entry_lower_usd:Number(value('entry-lower')||-5),dynamic_reference_enabled:$('native-dynamic-reference').checked,reference_window_minutes:Number(value('native-reference-window')||240),entry_deviation_usd:Number(value('native-entry-deviation')||0),grid_enabled:$('grid-enabled').checked,
+    strategy:{...Object.fromEntries(Object.entries(bindings.strategy).map(([key,id]) => [key, Number(value(id))])),entry_forward_confirmation_mode:value('entry-forward-confirm-mode')||'at_or_better',entry_reverse_confirmation_mode:value('entry-reverse-confirm-mode')||'at_or_better',entry_spread_guard_enabled:$('entry-spread-guard-on').checked,direction_mode:value('direction-mode')||'forward',entry_lower_usd:Number(value('entry-lower')||-5),dynamic_reference_enabled:$('native-dynamic-reference').checked,reference_window_minutes:Number(value('native-reference-window')||240),entry_deviation_usd:Number(value('native-entry-deviation')||0),grid_enabled:$('grid-enabled').checked,
       cooldown_seconds:Number(value('cooldown')),max_total_lots:Number(value('max-total')),exit_mode:value('exit-mode'),target_mode:value('target-mode'),exit_spread_usd:Number(value('absolute-exit')),
       require_net_profit:$('require-net').checked,min_net_profit_usd:Number(value('min-net')),group_loss_enabled:$('group-loss-on').checked,group_max_loss_usd:Number(value('group-loss')),
       total_loss_enabled:$('total-loss-on').checked,total_max_loss_usd:Number(value('total-loss')),max_hold_minutes:Number(value('max-hold')),
       rollover_guard_enabled:$('rollover-guard-on').checked,rollover_utc_hour:Number(value('rollover-utc-hour')),rollover_utc_minute:Number(value('rollover-utc-minute')),rollover_guard_minutes:Number(value('rollover-guard-minutes'))},
-    execution:{mode:value('exec-mode'), quote_source:'market', entry_leg:value('entry-leg'), poll_ms:Number(value('poll-ms')), magic:Number(value('magic')), close_retry_limit:Number(value('close-retries'))},
+    execution:{mode:value('exec-mode'), quote_source:'market', entry_leg:value('entry-leg'), entry_dispatch:value('entry-dispatch')||'auto', mt5_quote_poll_ms:Number(value('mt5-quote-poll-ms')||50), poll_ms:Number(value('poll-ms')), magic:Number(value('magic')), close_retry_limit:Number(value('close-retries'))},
     costs:{usdt_usd_auto:$('auto-fx').checked,usdt_usd:Number(value('usdt-fx')),binance_fee_auto:$('auto-binance-fee').checked,binance_taker_percent:Number(value('binance-fee')), mt5_commission_per_lot_side:Number(value('mt5-fee')),binance_rebate_percent:Number(value('binance-rebate')),mt5_rebate_percent:Number(value('mt5-rebate')), mt5_swap_per_lot_day:Number(value('mt5-swap')), paper_funding_percent_day:Number(value('paper-funding')),
       mt5_fee_auto:$('auto-mt5-fee').checked,mt5_short_fee_auto:$('auto-mt5-short-fee').checked,
       mt5_short_commission_per_lot_side:Number(value('mt5-short-fee')||0),mt5_short_rebate_percent:Number(value('mt5-short-rebate')||0),mt5_short_swap_per_lot_day:Number(value('mt5-short-swap')||0)},
@@ -145,11 +145,15 @@ function populate(c) {
   $('symbol').value = c.symbol;
   $('exec-mode').value = c.execution?.mode ?? 'paper';
   $('entry-leg').value = c.execution?.entry_leg ?? 'binance';
+  $('entry-dispatch').value = c.execution?.entry_dispatch ?? 'auto';
+  $('mt5-quote-poll-ms').value = c.execution?.mt5_quote_poll_ms ?? 50;
   // 只支持 paper 和 live 两种模式
   $('poll-ms').value = c.execution?.poll_ms ?? 250;
   $('magic').value = c.execution?.magic ?? 9121701;
   $('close-retries').value = c.execution?.close_retry_limit ?? 3;
   const s=c.strategy || {}, costs=c.costs || {};
+  for(const d of ['forward','reverse']){$('entry-'+d+'-confirm-mode').value=s['entry_'+d+'_confirmation_mode']??'at_or_better';$('entry-'+d+'-confirm-ticks').value=s['entry_'+d+'_confirmation_ticks']??1;}
+  $('entry-confirm-decimals').value=s.entry_confirmation_decimals??2;
   $('direction-mode').value=s.direction_mode||'forward';$('entry-lower').value=s.entry_lower_usd??-5;$('native-dynamic-reference').checked=Boolean(s.dynamic_reference_enabled);$('native-reference-window').value=s.reference_window_minutes??240;$('native-entry-deviation').value=s.entry_deviation_usd??1;$('entry-spread-guard-on').checked=s.entry_spread_guard_enabled===true;
   $('pair-parameter-scope').textContent=`参数属于「${configPairName}」；策略、执行、费用及风险提醒按组合保存，账户连接共用。已有组保留原规则。`;
   const extra={cooldown_seconds:'cooldown',max_total_lots:'max-total',exit_mode:'exit-mode',target_mode:'target-mode',exit_spread_usd:'absolute-exit',min_net_profit_usd:'min-net',group_max_loss_usd:'group-loss',total_max_loss_usd:'total-loss',max_hold_minutes:'max-hold',rollover_utc_hour:'rollover-utc-hour',rollover_utc_minute:'rollover-utc-minute',rollover_guard_minutes:'rollover-guard-minutes'};
@@ -176,6 +180,8 @@ function syncConditionalFields(source='') {
   const same=window.GoldPairPairs?.info()?.type==='mt5_mt5';
   const pool=window.GoldPairPool?.enabled();
   $('native-direction-settings').hidden=!same||pool;$('entry-lower-field').hidden=!same||pool;$('native-reference-settings').hidden=!same||pool;
+  $('entry-confirmation-settings').hidden=Boolean(pool);
+  $('entry-reverse-confirm-field').hidden=!same;$('entry-reverse-confirm-count-field').hidden=!same;
   $('entry').min=same?'-100000':'0';
   const mcpAdapter=value('mt5-adapter')==='mcp';
   const incompatible=live && mcpAdapter;

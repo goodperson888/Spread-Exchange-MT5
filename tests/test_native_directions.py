@@ -11,6 +11,7 @@ from trading_store import Store
 from pair_instruments import equal_lot_plan, direction_quote, entry_direction, native_thresholds
 from execution_diagnostics import build_report
 from exit_observations import ExitObservations
+from entry_observations import EntryObservations
 from test_trading_engine import config, quote
 from test_pair_combinations import native_config, specs
 
@@ -152,10 +153,36 @@ class DirectionEngineTests(unittest.TestCase):
 
     def test_validation_rejects_bad_modes_and_overlapping_auto_thresholds(self):
         for changes in (dict(direction_mode='x'),dict(entry_lower_usd=True),dict(entry_lower_usd=float('nan')),
-                        dict(entry_lower_usd=5),dict(entry_lower_usd=10)):
+                        dict(entry_lower_usd=10)):
             c=copy.deepcopy(self.c);c['strategy'].update(changes)
             with self.assertRaises(ValueError):validate(c)
         c=copy.deepcopy(self.c);c['strategy'].update(entry_spread_usd=-3,entry_lower_usd=-10);validate(c)
+
+    def test_equal_thresholds_accept_zero_negative_zero_and_signed_values(self):
+        for value in (0,-0.0,-3.25,4):
+            with self.subTest(value=value):
+                c=copy.deepcopy(self.c);c['strategy'].update(entry_spread_usd=value,entry_lower_usd=value)
+                validate(c)
+
+    def test_equal_zero_thresholds_compare_separate_executable_sides(self):
+        self.c['strategy'].update(entry_spread_usd=0,entry_lower_usd=0)
+        self.assertEqual(entry_direction(self.c,self.market(100,100)),'forward')
+        q=quote(self.c,bid=99.9,ask=100,mt_bid=100,mt_ask=100.1)
+        self.assertEqual(entry_direction(self.c,q),'reverse')
+        neutral=quote(self.c,bid=99.9,ask=100.1,mt_bid=100,mt_ask=100)
+        self.assertIsNone(entry_direction(self.c,neutral))
+
+    def test_two_reached_sides_wait_and_record_reason_without_submitting(self):
+        self.c['strategy'].update(entry_spread_usd=0,entry_lower_usd=0)
+        q=quote(self.c,bid=100,ask=100,mt_bid=100,mt_ask=100)
+        self.e.entry_observations=EntryObservations()
+        self.e.tick(self.c,self.p,q)
+        self.assertFalse(self.e.state['orders']);self.assertFalse(self.e.active())
+        episodes=self.e.entry_observations.snapshot()['episodes']
+        self.assertTrue(episodes);self.assertEqual(episodes[-1]['code'],'AMBIGUOUS_THRESHOLD')
+        self.assertEqual(entry_direction(self.c,q,[{'direction':'reverse'}]),'reverse')
+        self.c['strategy']['direction_mode']='forward'
+        self.assertEqual(entry_direction(self.c,q),'forward')
 
     def test_exchange_direction_stays_fixed_even_if_native_mode_was_saved(self):
         c=config();c['strategy']['direction_mode']='auto'

@@ -9,6 +9,36 @@ from trading_store import Store
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_local_mt5_slippage_rejection_keeps_unsent_evidence_and_redacts_fields(self):
+        result=dict(status='done',qty=0,price=0,submitted=False,
+            error_code='MT5_SLIPPAGE_PRECHECK',error_kind='local_validation',error='SECRET',
+            execution_precheck=dict(bid=3999.9,ask=4000,price=4000,limit=3999,slippage=1,
+                point=.01,tick_time_ms=1234,account='SECRET',comment='SECRET',invalid=float('nan')))
+        state={'groups':[{'id':'private'}],'orders':[{'id':'order','group':'private',
+            'result':result,'initial_result':result}]}
+        row=build_report(state,[])['orders'][0]
+        for field in ('result','initial_result'):
+            evidence=row[field]
+            self.assertFalse(evidence['submitted'])
+            self.assertEqual(evidence['error_code'],'MT5_SLIPPAGE_PRECHECK')
+            self.assertEqual(evidence['error_kind'],'local_validation')
+            self.assertEqual(evidence['execution_precheck'],{k:result['execution_precheck'][k]
+                for k in ('bid','ask','price','limit','slippage','point','tick_time_ms')})
+        self.assertNotIn('SECRET',json.dumps(row,allow_nan=False))
+
+    def test_mt5_execution_request_exports_only_finite_numeric_evidence(self):
+        evidence={'price':3720.1,'bid':3720.1,'ask':3720.3,'point':.001,'deviation_points':300,
+                  'trade_execution_mode':2,'filling':1,'account':'SECRET','comment':'SECRET','magic':123}
+        state={'groups':[{'id':'private'}],'orders':[{'id':'order','group':'private','result':{
+            'execution_request':{**evidence,'point':float('nan'),'filling':True}},
+            'initial_result':{'execution_request':evidence}}]}
+        report=build_report(state,[])
+        row=report['orders'][0]
+        self.assertEqual(row['result']['execution_request'],{k:evidence[k] for k in ('price','bid','ask','deviation_points','trade_execution_mode')})
+        self.assertEqual(row['initial_result']['execution_request']['point'],.001)
+        self.assertEqual(row['initial_result']['execution_request']['filling'],1)
+        self.assertNotIn('SECRET',json.dumps(report));self.assertNotIn('magic',row['initial_result']['execution_request'])
+
     def test_stage_timings_export_is_bounded_and_rejects_arbitrary_fields(self):
         state={'groups':[{'id':'private'}],'orders':[{'id':'private-order','group':'private','result':{
             'timings':{'terminal_queue_ms':0,'order_send_ms':875,'private-account':'SECRET',

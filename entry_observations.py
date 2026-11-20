@@ -4,9 +4,12 @@ import math
 import threading
 import time
 from pair_instruments import direction_quote, native_thresholds, native_pair
+from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS, reached
 
 LABELS = {
+    'WAIT_CONFIRMATION': '等待连续新报价确认',
     'WAIT_THRESHOLD': '对应方向的可成交价差未到阈值',
+    'AMBIGUOUS_THRESHOLD': '两种买卖组合同时到价，等待报价区分',
     'DIRECTION_DISABLED': '此买卖方向未启用',
     'QUOTE_INVALID': '等待新鲜同步报价',
     'OPPOSITE_POSITION': '此终端对已有相反方向持仓',
@@ -30,7 +33,7 @@ LABELS = {
     'ENTRY_SUBMIT': '下单前复查通过，进入开仓流程',
 }
 RULES = ('entry_spread_usd', 'entry_lower_usd', 'max_quote_age_ms', 'max_clock_skew_ms',
-         'max_groups', 'max_total_lots', 'cooldown_seconds', 'entry_deviation_usd')
+         'max_groups', 'max_total_lots', 'cooldown_seconds', 'entry_deviation_usd', *CONFIRMATION_DEFAULTS)
 
 
 def finite(x):
@@ -54,13 +57,15 @@ class EntryObservations:
             self.started_ms = int(time.time()*1000)
 
     def observe(self, c, quote, code, *, direction=None, stage='engine', enabled=False,
-                threshold=None, now=None):
+                threshold=None, now=None, confirmation=None, thresholds=None):
         if code not in LABELS or stage not in ('engine', 'pool_rank', 'preflight'): return
         now = int(time.time()*1000) if now is None else now
         q = direction_quote(quote, {'pair': c.get('pair', {}), 'direction': 'forward'}) or {}
         s = c.get('strategy', {})
-        upper, lower = native_thresholds(c, q)
+        upper, lower = thresholds if thresholds is not None else native_thresholds(c, q)
         rules = {k:s[k] for k in RULES if finite(s.get(k))}
+        for d in ('forward','reverse'):
+            rules[f'entry_{d}_confirmation_mode']=s.get(f'entry_{d}_confirmation_mode','at_or_better')
         mode = s.get('direction_mode', 'forward') if native_pair(c) else 'forward'
         rules['direction_mode'] = mode if mode in ('forward', 'reverse', 'auto') else 'unknown'
         rules['dynamic_reference_enabled'] = s.get('dynamic_reference_enabled') is True
@@ -86,6 +91,8 @@ class EntryObservations:
         directions = [direction] if direction in ('forward', 'reverse') else (('forward', 'reverse') if native_pair(c) else ('forward',))
         for d in directions:
             evidence = dict(sample)
+            if confirmation and d in confirmation:
+                evidence['confirmation'] = dict(confirmation[d])
             evidence['direction_enabled'] = mode in ('auto', d)
             if type(q.get('reference_ready')) is bool: evidence['reference_ready'] = q['reference_ready']
             bound = threshold if finite(threshold) else lower if d == 'reverse' else upper
@@ -93,8 +100,8 @@ class EntryObservations:
             if finite(bound): evidence['threshold'] = bound
             if finite(value): evidence['executable_spread'] = value
             if finite(value) and finite(bound):
-                evidence['threshold_reached'] = value <= bound if d == 'reverse' else value >= bound
-                evidence['distance'] = max(0, value-bound if d == 'reverse' else bound-value)
+                evidence['threshold_reached'] = reached(s,d,value,bound)
+                evidence['distance'] = (0 if evidence['threshold_reached'] else abs(value-bound)) if s.get(f'entry_{d}_confirmation_mode')=='equal' else max(0, value-bound if d == 'reverse' else bound-value)
             signature = (code, stage, tuple(rules.items()), bound if not rules['dynamic_reference_enabled'] else None, bool(enabled))
             index = (key, d, stage)
             with self.lock:

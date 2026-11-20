@@ -94,13 +94,14 @@ def build_report(state, events):
         'quote_source=cache表示下单前使用后台缓存报价，refresh表示走原同步报价读取路径；不是纯网络耗时。开仓第二腿缓存需两边本机接收时间均在250毫秒内，同时满足用户配置的更严格行情时效和时差限制；缓存不足仍走原查询，不放宽开仓敞口时限。',
         'pnl_schema_version=2将币安线性合约价差盈亏先以USDT计算后换汇；已平仓的换算汇率固定，不对开平两笔名义本金分别换汇。旧记录的价差变化不能直接当作净收益。',
         'exit_decision记录下单前止盈判断的预估收益、预计返佣及阈值，不是成交保证；exit_deferred表示第一腿前报价已不满足逐组止盈条件。adverse_slippage按各订单原报价和成交价计算，正值为不利，slippage_exceeded提示超出预算但不否定真实成交。',
+        'execution_request复用MT5下单前已读取的报价与请求：price为请求价格，bid/ask为发单前终端报价，point为最小报价单位，deviation_points为请求允许偏差点数，trade_execution_mode为MT5执行模式数字码，filling为成交方式。只保留数值白名单，不含请求账号、终端路径、编号或注释，不额外查询。MT5市价执行的偏差参数不等于保证成交价格上限。MT5_SLIPPAGE_PRECHECK表示本地滑点检查拦截，submitted=false，未调用order_check/order_send；execution_precheck记录已有终端报价、可执行价price、允许边界limit及滑点预算，tick_time_ms仅为平台原始时间。',
         '币安平仓直接回报为完整FILLED数量但缺少均价时，会做一次有请求超时预算的原订单补查；补查失败保持暂停，已暂停状态不自动恢复。',
         'runtime为本机最后已提交状态，不代表导出时实时持仓；启动/暂停历史受最近2000条事件上限约束。',
         'initial_result保留下单直接回报，valid仅指通过本机字段校验，不代表已确认成交；reconcile.last_query及事件保留查询预算、耗时、固定错误分类和平台数字错误码，不导出原始错误或账号标识。',
         'query_timeout_ms是适配器请求超时参数，并非严格总耗时上限；多阶段网络请求可能超出该值。1.5秒等敞口配置仍单独决定能否开第二腿。',
         'confirmation为MT5成交核对阶段、各查询返回状态和数量校验字段；has_ticket/has_deal等只表示是否取得编号，不含编号值。first_unconfirmed_query保留第一次未确认的查询；稳定重复事件限频，attempt仍累计实际查询次数。',
         'close_attempts为各平台实际平仓请求次数，retry_limit为每个平台的请求上限；等待报价或查询原订单不占次数。订单close_attempt和slippage_mode记录该次请求计数及普通/保护滑点。close_protection记录发现单边剩余敞口的本机时间和数量，close_halt保留达到重试上限时的平台及剩余数量；后续外部平仓不会抹去这些证据。旧版整轮计数不能还原为每个平台请求次数。',
-        'dispatch_mode=parallel表示已配平程序组双边意图在一个事务中持久化，再并发调用适配器；同一组close_batch标识同批请求。serial表示开仓或逐笔减仓。dispatch_queue_ms为意图全部落盘至该线程调用的单调耗时，last_dispatch_gap_ms为最近一批两个适配器调用的本机时间间隔，不是同时成交保证。未发出的本地拦截记录submitted=false，不计实际请求耗时；线程创建失败须手动重试，报价在落盘后过期则等待新报价。',
+        'dispatch_mode=parallel表示双边开仓或已配平程序组平仓的两腿意图在一个事务中持久化，再并发调用适配器；同一组close_batch标识同批平仓请求。serial表示串行开仓或逐笔减仓。dispatch_queue_ms为意图全部落盘至该线程调用的单调耗时，last_dispatch_gap_ms为最近一批两个适配器调用的本机时间间隔，不是同时成交保证。未发出的本地拦截记录submitted=false，不计实际请求耗时；线程创建失败须手动重试，报价在落盘后过期则等待新报价。',
         '原生MT5平仓成功回执缺价格、原订单短暂待处理时最多提供300ms本机核对期，期间平仓组继续阻止开新仓；超时或部分成交仍暂停，不恢复已暂停的程序。cost_verification_stage为已平仓后台费用核验的固定步骤分类；缺失或待核验不能视为实际费用为零。',
         'receipt为已有平台回执的白名单字段与原字段类型；missing、null、零值和无法解析分别保留。币安values含avgPrice、cumQuote、executedQty及平台时间，price_source说明归一化价格来源；MT5含直接order_send回执，precheck_receipt单列order_check结果，即使同次调用已由历史确认也保留原回执。编号仅保留有无，不导出请求回显、账户、注释和错误原文。',
         'validation_issues为本机校验失败的固定分类；reconcile.first_cancel/last_cancel记录首次及最近一次撤单调用返回与耗时，returned仅代表调用正常返回，不证明撤单成功；撤单后仍查询原订单。ack_received_ms为MT5原生下单调用返回的本机时间，早于可能的历史补查。所有新增采集复用已有调用和日志提交，不增加查询；平台原始时间不用于推断时区或本机延迟。',
@@ -166,6 +167,7 @@ def build_report(state, events):
         for action in ('open','close'):
             if 'execution_'+action in g:
                 row['execution_'+action]=numbers(g['execution_'+action],'started_ms signal_time_ms signal_spread confirmed_ms elapsed_ms parallel_batches last_dispatch_gap_ms dispatch_gap_ms quote_to_execution_ms')
+        if g.get('entry_dispatch') in ('serial','parallel'):row['entry_dispatch']=g['entry_dispatch']
         report['groups'].append(row)
     for o in orders:
         result=o.get('result',{})
@@ -173,7 +175,7 @@ def build_report(state, events):
              'leg':choice(o,'leg',('binance','mt5')),'action':choice(o,'action',('open','close')),
              'symbol':symbol(o.get('symbol')),'imported':bool(o.get('imported')),
              'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
-             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms dispatch_queue_ms execution_to_dispatch_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt close_batch')}
+             **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms dispatch_queue_ms execution_to_dispatch_ms dispatch_quote_age_ms dispatch_quote_alignment_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt close_batch')}
         if o.get('dispatch_mode') in ('serial','parallel'): row['dispatch_mode']=o['dispatch_mode']
         if o.get('platform')=='mt5': row['platform']='mt5'
         if isinstance(o.get('endpoint'),dict):row['endpoint']=terminal_alias(o['endpoint'])
@@ -264,7 +266,7 @@ def build_report(state, events):
         if gid: row['data']['group']=gid
         report['events'].append(row)
     report['entry_observations']=PROCESS_ENTRY_OBSERVATIONS.snapshot(terminal_alias)
-    report['notes'].append('entry_observations为本次连接内实际策略评估的开仓证据，内存最多512段；每段记录对应方向的真实可成交价差、当前生效阈值、到价与阻拦原因、首末样本和方向极值。pool_rank表示候选筛选，engine表示执行条件检查，preflight表示下单前复查；ENTRY_SUBMIT仅表示进入开仓流程，不保证成交。反向仍统一使用A Ask−B Bid≤下限；P为本段内匿名配对，端点T与组内别名一致。记录不写盘、不新增平台查询；重新连接/重启清空，图表触线但未被策略取用的瞬时行情不能还原。')
+    report['notes'].append('entry_observations为本次连接内实际策略评估的开仓证据，内存最多512段；每段记录对应方向的真实可成交价差、当前生效阈值、到价与阻拦原因、首末样本和方向极值。pool_rank表示候选筛选，engine表示执行条件检查，preflight表示下单前复查；ENTRY_SUBMIT仅表示进入开仓流程，不保证成交。反向仍统一使用A Ask−B Bid≤下限；P为本段内匿名配对，端点T与组内别名一致。连续报价确认的规则、当前计数及要求次数随评估样本导出；仅统计策略实际取用的新源报价，不代表所有平台 tick 均被处理。记录不写盘、不新增平台查询；重新连接/重启清空，图表触线但未被策略取用的瞬时行情不能还原。')
     return report
 
 
@@ -290,6 +292,8 @@ def export_report(path):
     report['latency']=PROCESS_LATENCY.snapshot()
     report['notes'].append('latency为当前进程内每阶段最近最多512个样本的中位数、P95、P99、最大值和最新值，重启或重新连接清空，mode区分纸面与实盘；P99少于100个样本时标记p99_low_sample，不可视为稳定结论。不增加平台查询或日志提交。strategy_cycle包含锁内整轮调度，strategy_lock_wait为调度线程取得共享锁的等待；strategy_pass为一次engine.tick，含执行与确认，decision为条件评估及估值。')
     report['notes'].append('quote_pickup为本进程发布双边报价至首次策略取用的单调时钟耗时；quote_wait及两边quote_age沿用本机接收墙钟计算，不能当作跨平台网络延迟。counters中quote_push/poll/unknown为策略首次取用的报价样本传输方式，非收包率；binance/mt5在双MT5模式分别代表A/B腿。')
+    report['notes'].append('mt5_push_parse/accept/notify分别为Python读到完整一行后解析校验、缓存更新及唤醒通知耗时；不含操作系统或Socket缓冲区中读出前的排队。binance/mt5_push_to_publish及push_to_strategy为对应腿完整消息读出至组合发布及首次策略取用，复用未变化腿时包含其缓存停留；均使用Python单调时钟。mt5_ea_prepare/send由EA自己的单调时钟测量，随下一条报价报告上一次成功发送，send含编码及SocketSend调用；不是经纪商到终端或跨进程传输延迟，旧EA缺少时留空。')
     report['notes'].append('execution_to_dispatch_ms为本进程本次开/平仓流程开始至该腿调用适配器的单调耗时，execution_open.dispatch_gap_ms为两腿发送间隔；quote_to_execution_ms为触发报价发布至该流程开始的单调耗时。重启缺少计时起点则留空。receipt_handling_wait为收到回报到主线程处理前的等待；result_journal为原有回报落盘耗时。每笔初始回执及其timings可对照actual_spread/spread_slippage，不把后续核验替换后的回执当作初始请求。')
+    report['notes'].append('dispatch_quote_age_ms为调用适配器时该腿参考报价的本机年龄，dispatch_quote_alignment_ms为双边参考报价的本机收到时间差；缺少 observed_ms 则留空。两者不使用平台原始时钟，不代表网络传输延迟或成交延迟。')
     report['notes'].append('MT5的terminal_roundtrip包含工作进程内部阶段；worker_submit包含preflight、order_check、order_send和fill_normalize；request还包含适配器处理。上述计时以及strategy_cycle/strategy_pass是包含关系，不能相加；order_send也不等于纯网络耗时。counters中的full_fill/partial_fill/zero_fill/unconfirmed仅统计直接回执，不表示后续对账的最终结果。')
     return report

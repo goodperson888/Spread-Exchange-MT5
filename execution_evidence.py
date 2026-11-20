@@ -19,6 +19,7 @@ REASON_LABELS = {
     'CLOSE_RETRIES_EXHAUSTED': '平仓重试达到上限，仍须处理敞口',
     'CLOSE_RESIDUAL': '单边平仓未完成，继续保护性减仓，新开仓暂停',
     'CLOSE_DISPATCH_FAILED': '并发平仓调度未启动，请检查后重试平仓',
+    'OPEN_DISPATCH_FAILED': '并发开仓未启动，两腿均未发送，请检查后手动启动',
     'RISK_LIMIT': '策略亏损上限触发',
     'RECOVERED_PAUSED': '异常或延迟回报已确认，新开仓仍暂停',
     'PERMISSION_DENIED': '平台交易权限不可用',
@@ -51,6 +52,9 @@ def reason_code(reason):
         ('减仓重试达到上限', 'CLOSE_RETRIES_EXHAUSTED'),
         ('单边平仓未完成', 'CLOSE_RESIDUAL'),
         ('并发平仓调度失败', 'CLOSE_DISPATCH_FAILED'),
+        ('并发开仓线程创建失败', 'OPEN_DISPATCH_FAILED'),
+        ('并发开仓回报待核验', 'ORDER_UNCONFIRMED'),
+        ('并发开仓意图不完整', 'RECONCILE_REQUIRED'),
         ('亏损上限', 'RISK_LIMIT'),
         ('逐组止盈', 'TARGET_REACHED'),
         ('止盈报价已变化', 'TARGET_DEFERRED'),
@@ -77,7 +81,7 @@ def reason_code(reason):
 PLATFORM_STATUSES = {'NEW','PARTIALLY_FILLED','FILLED','CANCELED','PENDING_CANCEL',
                      'REJECTED','EXPIRED','EXPIRED_IN_MATCH'}
 ERROR_CODES = {'NETWORK','TIMEOUT','INVALID_RESPONSE','DEPTH_INSUFFICIENT','DEPTH_CHECK_FAILED',
-               'DISPATCH_NOT_STARTED','STALE_EXECUTION_QUOTE'}
+               'DISPATCH_NOT_STARTED','STALE_EXECUTION_QUOTE','MT5_SLIPPAGE_PRECHECK'}
 ERROR_KINDS = {'timeout','network','exchange','invalid_response','local_validation','unknown'}
 MT5_STAGES = {'positions_unavailable','identity_unresolved','deals_missing','pending_unavailable',
               'order_pending','order_history_missing','order_identity_mismatch','order_not_terminal',
@@ -222,6 +226,14 @@ def result_evidence(result):
         value=result.get(key)
         if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value): data[key]=value
     timings=result.get('timings')
+    precheck=result.get('execution_precheck')
+    if isinstance(precheck,dict):
+        data['execution_precheck']={key:precheck[key] for key in ('bid','ask','price','limit','slippage','point','tick_time_ms')
+            if isinstance(precheck.get(key),(int,float)) and not isinstance(precheck[key],bool) and math.isfinite(precheck[key])}
+    request=result.get('execution_request')
+    if isinstance(request,dict):
+        data['execution_request']={key:request[key] for key in ('price','bid','ask','point','deviation_points','trade_execution_mode','filling')
+            if isinstance(request.get(key),(int,float)) and not isinstance(request[key],bool) and math.isfinite(request[key])}
     if isinstance(timings,dict):
         data['timings']={key:timings[key] for key in ('terminal_queue_ms','terminal_roundtrip_ms','worker_preflight_ms',
             'order_check_ms','order_send_ms','fill_normalize_ms','worker_submit_ms')

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.00"
+#property version "1.01"
 #property description "GoldPairLocal quote-only local bridge. Does not place or modify orders."
 
 input int LocalPort=8767;
@@ -11,6 +11,8 @@ long previous_time=0;
 double previous_bid=0,previous_ask=0;
 string identity="",ack="";
 bool hello_sent=false;
+bool send_timing_ready=false;
+ulong previous_prepare_us=0,previous_send_us=0;
 
 string EscapeJSON(string s)
 {
@@ -33,6 +35,7 @@ void Disconnect()
    if(channel!=INVALID_HANDLE) SocketClose(channel);
    channel=INVALID_HANDLE;authenticated=false;ack="";hello_sent=false;
    previous_time=0;previous_bid=0;previous_ask=0;
+   send_timing_ready=false;
 }
 bool SendLine(string line)
 {
@@ -77,6 +80,7 @@ void ReceiveAck()
 }
 void PublishTick()
 {
+   ulong prepare_started=GetMicrosecondCount();
    if(!TerminalInfoInteger(TERMINAL_CONNECTED)) {Disconnect();return;}
    if(Identity()!=identity) {Disconnect();return;}
    ReceiveAck();
@@ -87,8 +91,20 @@ void PublishTick()
    sequence++;
    string data="{\"type\":\"tick\","+identity+",\"seq\":"+IntegerToString((long)sequence)+
       ",\"bid\":"+DoubleToString(tick.bid,10)+",\"ask\":"+DoubleToString(tick.ask,10)+
-      ",\"time_ms\":"+IntegerToString(tick.time_msc)+"}";
-   if(SendLine(data)) {previous_time=tick.time_msc;previous_bid=tick.bid;previous_ask=tick.ask;}
+      ",\"time_ms\":"+IntegerToString(tick.time_msc);
+   // Report the previous successful quote send, never a cross-process clock.
+   if(send_timing_ready)
+      data+=",\"prev_prepare_us\":"+IntegerToString((long)previous_prepare_us)+
+         ",\"prev_send_us\":"+IntegerToString((long)previous_send_us);
+   data+="}";
+   ulong send_started=GetMicrosecondCount();
+   ulong prepared_us=send_started-prepare_started;
+   if(SendLine(data))
+   {
+      previous_send_us=GetMicrosecondCount()-send_started;
+      previous_prepare_us=prepared_us;send_timing_ready=true;
+      previous_time=tick.time_msc;previous_bid=tick.bid;previous_ask=tick.ask;
+   }
 }
 int OnInit()
 {

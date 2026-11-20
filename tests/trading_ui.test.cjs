@@ -1058,10 +1058,10 @@ test('reverse MT5 rows, fills and chart targets use the saved direction and cano
  f.el('chart-window').value='60';await f.refresh();
  assert.match(f.el('groups').innerHTML,/买 FUT \/ 卖 SPOT/);
  assert.match(f.el('orders').innerHTML,/开仓 · 买入/);assert.match(f.el('orders').innerHTML,/开仓 · 卖出/);
- assert.match(f.el('native-direction-status').textContent,/锁定买 A／卖 B/);
+ assert.match(f.el('native-direction-status').textContent,/锁定买 FUT／卖 SPOT/);
  assert.match(f.el('orders').innerHTML,/-9.8[\s\S]*-9.7[\s\S]*偏移 \+0.1/);
- assert.match(f.el('live-distance').textContent,/0 USD · 反向/);
- assert.match(f.el('live-opportunity').textContent,/反向达到阈值/);
+ assert.match(f.el('live-distance').textContent,/0 USD · 买 FUT／卖 SPOT/);
+ assert.match(f.el('live-opportunity').textContent,/买 FUT／卖 SPOT达到阈值/);
  f.el('chart-focus').value='auto';f.el('chart-focus').onchange();
  const series=f.charts.at(-1).series,marks=series.find(s=>s.id==='entry').markLine.data;
  assert.ok(marks.some(m=>Math.abs(m.yAxis-(-7.8))<1e-8));
@@ -1069,7 +1069,7 @@ test('reverse MT5 rows, fills and chart targets use the saved direction and cano
  // belongs to the other quote side and must not masquerade as an exit target.
  assert.ok(!marks.some(m=>m.yAxis===-5));
  assert.equal(series.find(s=>s.id==='exit').data.length,0);
- assert.match(f.el('chart-focus-description').textContent,/反向退出/);
+ assert.match(f.el('chart-focus-description').textContent,/已有持仓：买 FUT／卖 SPOT/);
  assert.ok(series.find(s=>s.id==='open').data.some(p=>p.value[1]===-9.8));
 });
 
@@ -1099,7 +1099,7 @@ test('pool chart shows reached-price blocker and only locks directions for its o
  f.el('chart-window').value='60';await f.refresh();
  assert.match(f.el('spread-stats').innerHTML,/已到价；当前候选阻拦：开仓冷却中/);
  assert.doesNotMatch(f.el('spread-stats').innerHTML,/被持仓锁定/);
- assert.match(f.el('chart-focus-description').textContent,/方向表示买卖顺序，与价差正负无关/);
+ assert.match(f.el('chart-focus-description').textContent,/切换视角仅改变图表，不改变买卖方式/);
  assert.ok(f.calls.every(c=>c.method==='GET'));
 });
 
@@ -1113,18 +1113,18 @@ test('native single-line view never treats the other quote touching the upper bo
  assert.ok(entry.markLine.data.some(m=>m.yAxis===3));
  assert.ok(chart.yAxis.max({min:2.4,max:2.5})>3); // Keep the bound on-screen in single-line view.
  assert.equal(entry.markArea.data.length,0); // No full-width trigger shading.
- assert.match(f.el('spread-stats').innerHTML,/正向入场[\s\S]*还差 0.57/);
- assert.match(f.el('spread-stats').innerHTML,/反向入场[\s\S]*还差 0.92/);
+ assert.match(f.el('spread-stats').innerHTML,/卖 GC／买 XAUUSD.s[\s\S]*还差 0.57/);
+ assert.match(f.el('spread-stats').innerHTML,/买 GC／卖 XAUUSD.s[\s\S]*还差 0.92/);
  const hint=chart.tooltip.formatter([{seriesId:'entry',value:[snapshot.quote.time_ms,2.43]}]);
- assert.match(hint,/正向入场[^<]*2.430[^<]*≥ 3.000：未达到/);
- assert.match(hint,/反向入场[^<]*3.020[^<]*≤ 2.100：未达到/);
+ assert.match(hint,/卖 GC／买 XAUUSD.s[^<]*2.430[^<]*≥ 3.000：未达到/);
+ assert.match(hint,/买 GC／卖 XAUUSD.s[^<]*3.020[^<]*≤ 2.100：未达到/);
  assert.match(hint,/两侧报价差：0.590/);
  assert.ok(f.calls.every(c=>c.method==='GET'));
  // A delayed stream tick must not override a newer status quote in the cards.
  f.listeners.visibilitychange();await flushUI();
  f.streams.at(-1).emit({samples:[{...snapshot.quote,time_ms:snapshot.quote.time_ms+1,entry:2.44}]});await flushUI();
  snapshot.quote={...snapshot.quote,time_ms:snapshot.quote.time_ms+2,entry:2.5};await f.refresh();
- assert.match(f.el('spread-stats').innerHTML,/正向入场[^]*?<strong>2.500<\/strong>/);
+ assert.match(f.el('spread-stats').innerHTML,/卖 GC／买 XAUUSD.s[^]*?<strong>2.500<\/strong>/);
 });
 
 test('native chart perspective switches quote sides and bounds locally without trading or history calls',async()=>{
@@ -1155,7 +1155,7 @@ test('native auto focus follows held forward exit quote and puts its target only
  assert.equal(chart.series.find(s=>s.id==='entry').data.length,0);
  assert.ok(chart.series.find(s=>s.id==='exit').markLine.data.some(m=>m.yAxis===2.5));
  assert.ok(!chart.series.find(s=>s.id==='exit').markLine.data.some(m=>m.yAxis===2.1));
- assert.match(f.el('chart-focus-description').textContent,/正向退出/);
+ assert.match(f.el('chart-focus-description').textContent,/已有持仓：卖 GC／买 XAUUSD.s/);
  f.el('chart-focus').value='forward';f.el('chart-focus').onchange();chart=f.charts.at(-1);
  assert.ok(!chart.series.find(s=>s.id==='entry').markLine.data.some(m=>m.yAxis===2.5));
  assert.match(f.el('chart-focus-description').textContent,/不含另一侧平仓目标/);
@@ -1179,10 +1179,10 @@ test('native default midpoint band preserves negative values, zero crossings and
  assert.ok(middle.data.some(p=>p[1]===null));assert.ok(base.data.some(p=>p[1]===null));assert.ok(band.data.some(p=>p[1]===null));
  assert.equal(chart.series.find(s=>s.id==='entry').data.length,0);
  assert.equal(chart.series.find(s=>s.id==='exit').data.length,0);
- assert.ok(middle.markLine.data.some(m=>m.yAxis===3&&m.label.formatter==='下沿 ≥ 3.00'));
- assert.ok(middle.markLine.data.some(m=>m.yAxis===2.1&&m.label.formatter==='上沿 ≤ 2.10'));
+ assert.ok(middle.markLine.data.some(m=>m.yAxis===3&&m.label.formatter==='整条带 ≥ 3.00 → 卖 GC／买 XAUUSD.s'));
+ assert.ok(middle.markLine.data.some(m=>m.yAxis===2.1&&m.label.formatter==='整条带 ≤ 2.10 → 买 GC／卖 XAUUSD.s'));
  const hint=chart.tooltip.formatter([{seriesId:'midpoint',value:middle.data[0]}]);
- assert.match(hint,/中间价差（参考）：-9.000/);assert.match(hint,/正向入场[^<]*-10.000/);assert.match(hint,/反向入场[^<]*-8.000/);
+ assert.match(hint,/中间价差（参考）：-9.000/);assert.match(hint,/卖 GC／买 XAUUSD.s[^<]*-10.000/);assert.match(hint,/买 GC／卖 XAUUSD.s[^<]*-8.000/);
  assert.match(f.el('chart-focus-description').textContent,/主线碰线不代表可以开仓/);
  assert.ok(f.calls.every(c=>c.method==='GET'));
 });
@@ -1196,4 +1196,110 @@ test('midpoint held-position target identifies the executable band edge',async()
  const marks=f.charts.at(-1).series.find(s=>s.id==='midpoint').markLine.data;
  assert.ok(marks.some(m=>m.yAxis===2.5&&/上沿/.test(m.name)));
  assert.ok(!marks.some(m=>m.yAxis===2.1));
+});
+
+
+test('native chart names follow the displayed terminals and stay escaped when switching pairs',async()=>{
+ const snapshot=nativeChartSnapshot();
+ snapshot.pair={...snapshot.pair,endpoints:{binance:{name:'全局旧平台'},mt5:{name:'另一旧平台'}}};
+ snapshot.quote.pair={...snapshot.quote.pair,endpoints:{binance:{name:'平台甲<&'},mt5:{name:'平台乙'}}};
+ snapshot.pool={chart_pair:'t1~t2',candidates:[]};
+ snapshot.state.groups=[{id:'unrelated',key:'another-pair',pair:snapshot.pair,status:'open',direction:'reverse',entry:1,
+  qty:.01,lots:.01,leg_contracts:{binance:100,mt5:100},costs:{},parameters:{},valuation:{}}];
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,
+  '/api/trading/chart?minutes=60':()=>({samples:[snapshot.quote]})});
+ f.el('chart-focus').options=[{value:'forward'},{value:'reverse'}];
+ f.el('direction-mode').options=[{value:'auto'},{value:'forward'},{value:'reverse'}];
+ f.el('chart-window').value='60';await f.refresh();
+ assert.equal(f.el('live-entry-label').textContent,'卖 平台甲<&／买 平台乙');
+ assert.equal(f.el('chart-focus').options[0].textContent,'卖 平台甲<&／买 平台乙');
+ assert.equal(f.el('direction-mode').options[2].textContent,'买 平台甲<&／卖 平台乙');
+ assert.match(f.el('spread-stats').innerHTML,/卖 平台甲&lt;&amp;／买 平台乙/);
+ assert.doesNotMatch(f.el('native-direction-status').textContent,/锁定|旧平台|正向|反向/);
+ let chart=f.charts.at(-1),middle=chart.series.find(s=>s.id==='midpoint');
+ assert.ok(middle.markLine.data.some(m=>m.label.formatter==='整条带 ≥ 3.00 → 卖 平台甲<&／买 平台乙'));
+ const tooltip=chart.tooltip.formatter([{seriesId:'midpoint',value:middle.data[0]}]);
+ assert.match(tooltip,/下沿 · 开仓 · 卖 平台甲&lt;&amp;／买 平台乙/);
+ assert.doesNotMatch(tooltip,/平台甲<&|旧平台/);
+ snapshot.quote={...snapshot.quote,key:'selected-next',time_ms:snapshot.quote.time_ms+1,
+  pair:{...snapshot.quote.pair,endpoints:{binance:{name:'平台乙'},mt5:{name:'平台丙'}}}};
+ snapshot.pool.chart_pair='t2~t3';await f.refresh();
+ assert.equal(f.el('live-entry-label').textContent,'卖 平台乙／买 平台丙');
+ assert.equal(f.el('chart-focus').options[1].textContent,'买 平台乙／卖 平台丙');
+ assert.doesNotMatch(f.el('chart-focus-description').textContent,/平台甲|正向|反向/);
+ f.el('chart-focus').value='both';f.el('chart-focus').onchange();chart=f.charts.at(-1);
+ assert.equal(chart.series.find(s=>s.id==='entry').name,'开仓 · 卖 平台乙／买 平台丙');
+ assert.equal(chart.series.find(s=>s.id==='exit').name,'开仓 · 买 平台乙／卖 平台丙');
+ assert.equal(snapshot.strategy_runtime.direction_mode,'auto');
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+
+test('native window extremes use unthinned valid quotes and exclude reference prices',async()=>{
+ const snapshot=nativeChartSnapshot(),at=snapshot.quote.time_ms;
+ const samples=Array.from({length:7000},(_,i)=>({...snapshot.quote,time_ms:at-130000+i*10,entry:-.4,exit:.4}));
+ samples[1].entry=.031;samples[2].exit=-.321;samples[2].entry=-.8;
+ samples.push({...snapshot.quote,time_ms:at-1000,entry:999,exit:1000,valid:false});
+ samples.push({...snapshot.quote,time_ms:at-999,key:'other-pair',entry:888,exit:889});
+ samples.push({...snapshot.quote,time_ms:at,entry:-.1,exit:.2});
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,
+  '/api/trading/chart?minutes=60':()=>({samples,reference:{state:'ready',samples:[{time_ms:at,spread:777}]}})});
+ f.el('chart-window').value='60';await f.refresh();
+ assert.match(f.el('spread-stats').innerHTML,/卖 GC／买 XAUUSD.s[\s\S]*窗口最高 0.031 · 最低 -0.800/);
+ assert.match(f.el('spread-stats').innerHTML,/买 GC／卖 XAUUSD.s[\s\S]*窗口最低 -0.321 · 最高 0.400/);
+ assert.doesNotMatch(f.el('spread-stats').innerHTML,/窗口最高 (999|888|777)/);
+ assert.match(f.el('spread-stats').innerHTML,/按显示前原始样本计算/);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+test('equal entry thresholds show an explicit wait if both executable sides reach them',async()=>{
+ const snapshot=nativeChartSnapshot();snapshot.strategy_runtime.entry_spread_usd=0;snapshot.strategy_runtime.entry_lower_usd=-0;
+ snapshot.quote.entry=0;snapshot.quote.exit=0;
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot,
+  '/api/trading/chart?minutes=60':()=>({samples:[snapshot.quote]})});
+ f.el('chart-window').value='60';await f.refresh();
+ assert.match(f.el('live-opportunity').textContent,/同时到价，等待报价区分/);
+ assert.match(f.el('native-direction-status').textContent,/同时到价，等待报价区分/);
+ assert.match(f.el('spread-stats').innerHTML,/同时到价，等待报价区分/);
+ assert.doesNotMatch(f.el('spread-stats').innerHTML,/data-reached="true"/);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+test('execution rows distinguish renewed quotes from serial wait and flag actual slippage',async()=>{
+ const snapshot=nativeChartSnapshot(),at=snapshot.quote.time_ms;
+ const g={id:'latency-group',key:snapshot.quote.key,pair:snapshot.pair,status:'open',direction:'forward',
+  entry:-.129,lots:.04,qty:.04,leg_contracts:{binance:100,mt5:100},parameters:{},costs:{},valuation:{},
+  execution_open:{started_ms:at-1000,signal_spread:.521,dispatch_gap_ms:453,elapsed_ms:562}};
+ snapshot.state.groups=[g];
+ snapshot.state.orders=[{id:'slow-first',group:g.id,leg:'binance',action:'open',native_position_side:1,requested:.04,
+  created_ms:at-999,signal_time_ms:at-1000,dispatch_ms:at-992,execution_to_dispatch_ms:0,dispatch_mode:'serial',
+  signal_spread:.521,quote_spread:.521,actual_spread:-.129,spread_slippage:-.65,adverse_slippage:.42,slippage:.3,slippage_exceeded:true,
+  result:{status:'done',qty:.04,price:3719.931,request_ms:453,timings:{order_send_ms:999}},
+  initial_result:{timings:{order_send_ms:438},execution_request:{price:3720.351,bid:3720.351,ask:3720.591,deviation_points:300,trade_execution_mode:2}}},
+ {id:'second',group:g.id,leg:'mt5',action:'open',native_position_side:0,requested:.04,
+  created_ms:at-547,signal_time_ms:at-555,dispatch_ms:at-547,execution_to_dispatch_ms:453,dispatch_mode:'serial',
+  signal_spread:.521,quote_spread:-.119,actual_spread:-.129,spread_slippage:-.65,adverse_slippage:.01,slippage:.3,
+  result:{status:'done',qty:.04,price:3720.06,request_ms:94,timings:{order_send_ms:79}}}];
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ const html=f.el('orders').innerHTML;
+ assert.match(html,/采样→调用 8 ms/);assert.match(html,/本组执行→调用 453 ms/);
+ assert.match(html,/串行发单间隔 453 ms/);assert.match(html,/MT5 order_send 438 ms/);
+ assert.doesNotMatch(html,/MT5 order_send 999 ms/);
+ assert.match(html,/本腿超设定滑点/);assert.match(html,/不利滑点 0.42/);
+ assert.match(html,/本组原始触发价差 0.521/);assert.match(html,/调用前双边报价差 -0.119/);
+ assert.match(html,/同组两行重复展示，不能相加/);assert.match(html,/执行模式码 2/);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
+});
+
+test('exact-value entry displays confirmation progress by terminal and rejects a merely better spread',async()=>{
+ const snapshot=nativeChartSnapshot();snapshot.strategy_runtime.direction_mode='forward';
+ Object.assign(snapshot.strategy_runtime,{entry_spread_usd:.01,entry_forward_confirmation_mode:'equal',entry_confirmation_decimals:2,
+  entry_confirmation:{forward:{mode:'equal',decimals:2,count:3,required:5,ready:false}}});
+ snapshot.quote.entry=.02;
+ const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
+ assert.match(f.el('entry-confirmation-progress').textContent,/连续确认 3\/5/);
+ assert.match(f.el('entry-confirmation-progress').textContent,/等于（2位）/);
+ assert.doesNotMatch(f.el('live-opportunity').textContent,/达到阈值/);
+ assert.match(f.el('native-direction-status').textContent,/0.02 = 0.01，等待/);
+ assert.ok(f.calls.every(c=>c.method==='GET'));
 });

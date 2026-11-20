@@ -54,18 +54,29 @@ def direction_quote(quote,group):
     return {**quote,'entry':negate(quote.get('exit')),'exit':negate(quote.get('entry')),'_spread_direction':desired}
 
 
-def entry_direction(config,quote,active=()):
+def entry_ambiguous(config,quote,active=(),*,thresholds=None):
+    """Flat auto pairs must not arbitrarily choose between two reached sides."""
+    if not native_pair(config) or config['strategy'].get('direction_mode','forward')!='auto' or active or not quote:
+        return False
+    upper,lower=thresholds if thresholds is not None else native_thresholds(config,quote)
+    from entry_confirmation import reached
+    return reached(config['strategy'],'forward',quote['entry'],upper) and reached(config['strategy'],'reverse',quote['exit'],lower)
+
+
+def entry_direction(config,quote,active=(),*,thresholds=None):
     """Choose only an allowed, reached direction; open groups lock the pair."""
     if not native_pair(config): return 'forward'
+    if entry_ambiguous(config,quote,active,thresholds=thresholds): return None
     s=config['strategy'];mode=s.get('direction_mode','forward')
-    upper, lower=native_thresholds(config,quote)
+    upper, lower=thresholds if thresholds is not None else native_thresholds(config,quote)
     directions={'forward','reverse'} if mode=='auto' else {mode}
     held={g.get('direction','forward') for g in active}
     if held:
         if len(held)!=1: return None
         directions &= held
-    if 'forward' in directions and quote['entry']>=upper: return 'forward'
-    if 'reverse' in directions and quote['exit']<=lower: return 'reverse'
+    from entry_confirmation import reached
+    if 'forward' in directions and reached(s,'forward',quote['entry'],upper): return 'forward'
+    if 'reverse' in directions and reached(s,'reverse',quote['exit'],lower): return 'reverse'
     return None
 
 

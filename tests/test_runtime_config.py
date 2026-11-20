@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import _test_runtime
 from server import TradingRuntime
 from test_trading_engine import config
+from entry_confirmation import EntryConfirmations
 
 
 class RuntimeConfigTests(unittest.TestCase):
@@ -16,7 +17,7 @@ class RuntimeConfigTests(unittest.TestCase):
         runtime.config['mt5']['adapter']='native'
         runtime.config['costs'].update(usdt_usd_auto=True,binance_fee_auto=True)
         runtime.lock=threading.RLock();runtime.connected=True;runtime.reconciled=False;runtime.quote=None
-        runtime.engine=SimpleNamespace(state={'enabled':False,'groups':[],'orders':[]})
+        runtime.engine=SimpleNamespace(state={'enabled':False,'groups':[],'orders':[]},entry_confirmations=EntryConfirmations())
         runtime.plan={'lots':.02,'qty':2};runtime.last_error='';runtime.market_meta={}
         runtime.store=SimpleNamespace(events=lambda:[]);runtime.position_report=None
         runtime.entry_preflight=None;runtime.binance=SimpleNamespace(position_mode='hedge')

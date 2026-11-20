@@ -120,3 +120,5 @@ section[aria-labelledby=plan-heading]>.grid{grid-template-columns:1fr}
 #pool-rule-editors input,#pool-endpoint-editors input{min-height:44px}#pool-settings .actions{margin-top:16px}button:focus-visible,summary:focus-visible{outline:3px solid #76b7e0;outline-offset:3px}
 @media(max-width:600px){.pool-endpoint-card{padding:12px}.pool-endpoint-card .grid{grid-template-columns:1fr 1fr}.pool-rule .grid{grid-template-columns:1fr}.pool-status-grid{grid-template-columns:1fr}}
 button.saved{background:#f5f8fa;color:#647487;border-color:#d7e1ea}
+
+#entry-confirmation-settings{grid-column:1/-1;min-width:0}#entry-confirmation-settings>details{border:1px solid #d7e1ea;border-radius:8px;padding:12px}#entry-confirmation-settings .grid{margin-top:12px}#entry-confirmation-progress:empty{display:none}

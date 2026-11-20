@@ -81,9 +81,14 @@ class Store:
                 [(int(time.time()*1000),kind,json.dumps(data or {},allow_nan=False)) for kind,data in events])
 
     def sample(self, quote):
-        # A monotonic publication marker is meaningful only in this process.
-        if '_published_monotonic' in quote:
-            quote={key:value for key,value in quote.items() if key!='_published_monotonic'}
+        # Process-local clocks cannot be interpreted after a restart. Copy
+        # only for history; the strategy retains its original timing markers.
+        quote={key:value for key,value in quote.items()
+               if key not in ('_published_monotonic','_published_perf_counter')}
+        for leg in ('binance','mt5'):
+            value=quote.get(leg)
+            if isinstance(value,dict) and '_push_received_perf_counter' in value:
+                quote[leg]={key:item for key,item in value.items() if key!='_push_received_perf_counter'}
         with self.lock, self.db:
             # The timestamp is the sample identity. A duplicate timestamp must
             # not mutate an already-rendered historical point.

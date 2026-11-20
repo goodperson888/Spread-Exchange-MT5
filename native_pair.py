@@ -12,6 +12,7 @@ from trading_config import pair_key
 from trading_engine import valid_group_quote, stamp
 from pair_instruments import short_symbol, equal_lot_plan, native_thresholds, pair_info, position_side
 from market_push import TickFreshness
+from quote_fallback import BackgroundRead
 from execution_latency import LatencyStats
 from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from runtime_maintenance import evidence
@@ -72,27 +73,45 @@ class NativePairPump:
         self.mt5_transport='MT5 双品种报价轮询';self.binance_transport='MT5 品种 A'
         self.thread=threading.Thread(target=self._loop,name='mt5-pair-quotes',daemon=True)
         self.sample_thread=threading.Thread(target=self._samples,name='mt5-pair-history',daemon=True)
+        self.fallback=BackgroundRead(self._read_quotes,self.changed,'mt5-pair-fallback')
 
     def start(self): self.sample_thread.start();self.thread.start()
     def close(self):
-        self.stopped.set();self.changed.set();self.sample_wake.set();self.terminal.close()
+        self.stopped.set();self.changed.set();self.sample_wake.set();self.fallback.close();self.terminal.close()
         if self.thread.is_alive() and threading.current_thread() is not self.thread:self.thread.join(timeout=.5)
         if self.sample_thread.is_alive() and threading.current_thread() is not self.sample_thread:self.sample_thread.join(timeout=.5)
     def read(self):
         with self.lock: return self.latest,self.version,self.error or self.sampling_error
 
-    def refresh(self,publish=True,timeout_seconds=None):
+    def _read_quotes(self):
+        rows=self.terminal.call('pair_quotes');c=self.config
+        # Stamp at read completion, not when intake eventually consumes it.
+        observed=stamp()
+        return {name:self.runtime.mt5_freshness.observe(rows[name],{**c['mt5'],'symbol':name},observed,discard_older=True)
+                for name in (short_symbol(c),c['mt5']['symbol'])}
+
+    def refresh(self,publish=True,timeout_seconds=None,background=False):
         r=self.runtime;c=self.config
         names={'binance':short_symbol(c),'mt5':c['mt5']['symbol']}
         quotes={leg:self.bridge.quote({**c['mt5'],'symbol':name},c['strategy']['max_quote_age_ms'])
                 if self.bridge else None for leg,name in names.items()}
+        for leg,name in names.items():
+            if quotes[leg] is not None:
+                quotes[leg]=r.mt5_freshness.observe(quotes[leg],{**c['mt5'],'symbol':name},discard_older=background)
         self.binance_transport='EA Socket 推送' if quotes['binance'] else '原生双品种报价轮询'
         self.mt5_transport='EA Socket 推送' if quotes['mt5'] else '原生双品种报价轮询'
         if not all(quotes.values()):
-            rows=self.terminal.call('pair_quotes',**({'timeout_seconds':timeout_seconds} if timeout_seconds is not None else {}))
+            if background:
+                rows,error=self.fallback.read(c['execution'].get('mt5_quote_poll_ms',50)/1000)
+                if error: raise error
+                if rows is None: return None
+            else:
+                rows=self.terminal.call('pair_quotes',**({'timeout_seconds':timeout_seconds} if timeout_seconds is not None else {}))
             for leg,name in names.items():
                 if quotes[leg] is None:
-                    quotes[leg]=r.mt5_freshness.observe(rows[name],{**c['mt5'],'symbol':name})
+                    if rows[name] is None:return None
+                    quotes[leg]=r.mt5_freshness.observe(rows[name],{**c['mt5'],'symbol':name},discard_older=background)
+                    if quotes[leg] is None:return None
         q=dict(key=pair_key(c),time_ms=stamp(),usdt_usd=1.,**quotes,
                binance_transport=self.binance_transport,mt5_transport=self.mt5_transport,
                pair=pair_info(c),entry=quotes['binance']['bid']-quotes['mt5']['ask'],
@@ -149,11 +168,11 @@ class NativePairPump:
     def _loop(self):
         while not self.stopped.is_set():
             self.changed.clear()
-            try: self.refresh()
+            try: self.refresh(background=True)
             except Exception as exc:
                 with self.lock: self.error=str(exc)
                 self.runtime.market_wake.set()
-            self.changed.wait(.1)
+            self.changed.wait(self.config['execution'].get('mt5_quote_poll_ms',50)/1000)
 
 
 def leg_view(state, group, leg):
@@ -465,6 +484,7 @@ class NativePairRuntime:
                 self.position_report=None;self.adoption_preview=None;self.external_close_status=None
                 self.market_meta=dict(pair=pair_info(c),strategy_trigger='双品种报价驱动；同一 MT5 请求由持久会话有序发送')
                 self.latency.reset(mode);PROCESS_ENTRY_OBSERVATIONS.reset(mode);self._restore_push_bridge()
+                self.engine.entry_confirmations.clear()
                 self.pump=pump;pump_installed=True;self.pump.bridge=self.push_bridge
                 self.pump.publish(quote);self.pump.start()
                 if mode=='live':

@@ -173,8 +173,12 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(exchange.depth.call_count,1)
         engine.state['last_open_ms']=0
         # A later opportunity can open without clicking Start again.
+        # Make this an actual new source tick even on sub-millisecond test runs.
+        later=quote(self.c)
+        for leg in ('binance','mt5'):
+            later[leg]['source_time_ms']=later[leg]['time_ms']+10
         engine.broker=PaperBroker()
-        engine.tick(self.c,self.plan,quote(self.c))
+        engine.tick(self.c,self.plan,later)
         self.assertEqual(len(engine.active()),1)
         self.assertEqual(engine.active()[0]['status'],'open')
 

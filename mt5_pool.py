@@ -10,11 +10,12 @@ import time
 from types import SimpleNamespace
 
 from mt5_pool_config import (candidates, clean_pool, endpoint_ref, endpoint_settings, fingerprint, RULE_FIELDS)
-from pair_instruments import equal_lot_plan, pair_info, position_side, direction_quote
+from pair_instruments import equal_lot_plan, pair_info, position_side, direction_quote, entry_ambiguous
 from trading_config import pair_key
 from trading_engine import stamp, valid_group_quote
 from trading_brokers import Terminal, PaperBroker
 from market_push import TickFreshness
+from quote_fallback import BackgroundRead
 from execution_latency import LatencyStats
 from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from native_pair import NativePairBroker, NativePairObserver
@@ -96,6 +97,7 @@ class PoolPump:
     def __init__(self,owner):
         self.owner=owner;self.runtime=owner.runtime;self.stopped=threading.Event();self.lock=threading.RLock()
         self.books={};self.errors={};self.quotes={};self.version=0;self.threads=[];self.readers={}
+        self.fallbacks={}
         self.pending_samples={};self.sample_wake=threading.Event();self.sampling_error=''
         self.quote_wakes={e['id']:threading.Event() for e in owner.endpoints}
         self.edges_by_endpoint={e['id']:[(edge,ctx) for edge,ctx in owner.contexts.items()
@@ -110,7 +112,10 @@ class PoolPump:
     def close(self):
         self.stopped.set();self.sample_wake.set()
         for wake in self.quote_wakes.values():wake.set()
-        with self.lock: readers=list(self.readers.values());self.readers.clear()
+        with self.lock:
+            readers=list(self.readers.values());self.readers.clear()
+            fallbacks=list(self.fallbacks.values())
+        for fallback in fallbacks:fallback.close()
         for r in readers: r.close()
         for thread in self.threads:
             if thread is not threading.current_thread(): thread.join(timeout=1)
@@ -124,6 +129,11 @@ class PoolPump:
         chart_quote=None
         with self.lock:
             if self.stopped.is_set(): return
+            previous_book=self.books.get(e['id'])
+            if previous_book:
+                old_at=previous_book.get('source_time_ms',previous_book.get('time_ms',0))
+                at=book.get('source_time_ms',book.get('time_ms',0))
+                if at<old_at:return
             self.errors.pop(e['id'],None)
             if self.books.get(e['id'])==book: return
             self.books[e['id']]=book
@@ -153,27 +163,43 @@ class PoolPump:
     def _loop(self,e):
         freshness=TickFreshness();settings=endpoint_settings(self.owner.config,e)
         wake=self.quote_wakes[e['id']]
+        def read_quote():
+            reader=self.readers.get(e['id'])
+            if reader is None:
+                reader=Terminal(settings,self.owner.config['execution']['magic'],read_only=True)
+                with self.lock:
+                    if self.stopped.is_set():reader.close();return None
+                    self.readers[e['id']]=reader
+            try:
+                book=freshness.observe(reader.call('quote',symbol=e['symbol'])['quote'],settings,discard_older=True)
+                if book is None:return None
+                book['transport']='独立原生轮询'
+                return book
+            except Exception:
+                with self.lock:
+                    if self.readers.get(e['id']) is reader:self.readers.pop(e['id'],None)
+                reader.close()
+                raise
+        fallback=BackgroundRead(read_quote,wake,'pool-fallback-'+e['id'])
+        with self.lock:
+            if self.stopped.is_set():fallback.close();return
+            self.fallbacks[e['id']]=fallback
         while not self.stopped.is_set():
             wake.clear()
             try:
                 bridge=getattr(self.runtime,'push_bridge',None)
                 book=bridge.quote(settings,self.owner.config['strategy']['max_quote_age_ms']) if bridge else None
                 if book is None:
-                    reader=self.readers.get(e['id'])
-                    if reader is None:
-                        reader=Terminal(settings,self.owner.config['execution']['magic'],read_only=True)
-                        with self.lock:
-                            if self.stopped.is_set(): reader.close();return
-                            self.readers[e['id']]=reader
-                    book=freshness.observe(reader.call('quote',symbol=e['symbol'])['quote'],settings)
-                    book['transport']='独立原生轮询'
-                self.ingest(e,book)
+                    book,error=fallback.read(self.owner.config['execution'].get('mt5_quote_poll_ms',50)/1000)
+                    if error:raise error
+                if book is not None:
+                    book=freshness.observe(book,settings,discard_older=True)
+                    if book is not None:self.ingest(e,book)
             except Exception as exc:
                 with self.lock:
-                    self.errors[e['id']]=str(exc);reader=self.readers.pop(e['id'],None)
-                if reader: reader.close()
-                self.runtime.market_wake.set();self.stopped.wait(1)
-            wake.wait(.05)
+                    self.errors[e['id']]=str(exc)
+                self.runtime.market_wake.set()
+            wake.wait(self.owner.config['execution'].get('mt5_quote_poll_ms',50)/1000)
 
 
 class PoolOwner:
@@ -332,18 +358,29 @@ class PoolOwner:
                     or required<=0 or required>available):return 'MARGIN',e['name']+' 保证金不足或尚未核验'
         return '', ''
     def rank(self,quotes,*,observe=False,recovery=False):
+        from entry_confirmation import reached
         rows=[]
         for edge,ctx in self.contexts.items():
-            c=ctx.config;q=quotes.get(edge);s=c['strategy']
+            c=ctx.config;q=quotes.get(edge);s=c['strategy'];key=ctx.engine.key
             for direction in ('forward','reverse'):
                 projected=direction_quote(q,dict(pair=c['pair'],direction=direction)) if q else None
                 threshold=s['entry_spread_usd'] if direction=='forward' else -s.get('entry_lower_usd',-5)
                 enabled=s.get('direction_mode','auto') in ('auto',direction)
+                confirmations=self.runtime.engine.entry_confirmations
+                valid=valid_group_quote(q,key,s)
+                if observe:
+                    progress=confirmations.observe(key,s,q,direction,
+                        -threshold if direction=='reverse' else threshold,valid=valid,
+                        enabled=enabled and not recovery and self.runtime.engine.state.get('enabled',False))
+                else:
+                    progress=confirmations.snapshot(key,max_age_ms=s['max_quote_age_ms']).get(direction,{})
                 code='';reason=''
                 if not enabled:code,reason='DIRECTION_DISABLED','此方向已关闭'
-                elif not valid_group_quote(q,pair_key(c),s):code,reason='QUOTE_INVALID','等待新鲜同步报价'
+                elif not valid:code,reason='QUOTE_INVALID','等待新鲜同步报价'
                 elif any(g.get('direction','forward')!=direction for g in ctx.engine.active()):code,reason='OPPOSITE_POSITION','此终端对已有相反方向持仓'
-                elif projected['entry']<threshold:code,reason='WAIT_THRESHOLD','未到独立开仓阈值'
+                elif entry_ambiguous(c,q,ctx.engine.active()):code,reason='AMBIGUOUS_THRESHOLD','两种买卖组合同时到价，等待报价区分'
+                elif not reached(s,direction,q['exit'] if direction=='reverse' else q['entry'],
+                                 -threshold if direction=='reverse' else threshold):code,reason='WAIT_THRESHOLD','未到独立开仓阈值'
                 else:code,reason=self.block_info(ctx,direction)
                 if not reason:
                     active=self.runtime.engine.active()
@@ -352,18 +389,15 @@ class PoolOwner:
                     elif len(active)>=s['max_groups']:code,reason='GROUP_LIMIT','全池最大组数已用满'
                     elif sum(g['lots'] for g in active)+ctx.plan['lots']>s['max_total_lots']+1e-9:code,reason='LOTS_LIMIT','全池总手数额度不足'
                     elif stamp()-self.runtime.engine.state['last_open_ms']<s['cooldown_seconds']*1000:code,reason='COOLDOWN','开仓冷却中'
+                if not reason and not progress.get('ready',s.get(f'entry_{direction}_confirmation_ticks',1)==1):
+                    code,reason='WAIT_CONFIRMATION',f"连续新报价确认 {progress.get('count',0)}/{s.get(f'entry_{direction}_confirmation_ticks',1)}"
                 gross=projected['entry'] if projected else None
                 # Prospective round trip commissions; rebate remains an estimate.
-                from commission_reference import fee_rate
-                basis=dict(pair=c['pair'],direction=direction,symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],
-                           costs=c['costs'],lots=ctx.plan['lots'],opened_ms=stamp(),
-                           commission_reference=ctx.engine.commission_reference.get('legs',{}))
-                fee=sum(fee_rate(basis,leg,action)*(1-c['costs'].get('mt5_short_rebate_percent' if leg=='binance' else 'mt5_rebate_percent',0)/100)
-                        for leg in LEGS for action in ('open','close'))/ctx.plan['leg_contracts']['mt5']
+                fee=self._roundtrip_cost(ctx,direction)
                 endpoints=c['pair']['endpoints'];sell='binance' if direction=='forward' else 'mt5';buy='mt5' if sell=='binance' else 'binance'
-                rows.append(dict(edge=edge,key=pair_key(c),direction=direction,buy=endpoints[buy]['name'],sell=endpoints[sell]['name'],
+                rows.append(dict(edge=edge,key=key,direction=direction,buy=endpoints[buy]['name'],sell=endpoints[sell]['name'],
                     spread=gross,threshold=threshold,estimated_roundtrip_cost=fee,score=gross-fee if gross is not None else None,
-                    ready=not reason,reason=reason or '报价及账户条件满足',reason_code=code or 'CANDIDATE_READY',selected=False))
+                    confirmation=progress,ready=not reason,reason=reason or '报价及账户条件满足',reason_code=code or 'CANDIDATE_READY',selected=False))
         rows.sort(key=lambda x:(not x['ready'],-(x['score'] if x['score'] is not None else -1e20),x['edge'],x['direction']))
         winner=next((x for x in rows if x['ready']),None)
         if winner:winner['selected']=True
@@ -376,6 +410,27 @@ class PoolOwner:
                     self.runtime.engine.observe_entry(self.contexts[row['edge']].config,quotes.get(row['edge']),code,
                                                       direction=row['direction'],stage='pool_rank')
         return winner
+
+    @staticmethod
+    def _roundtrip_cost(ctx,direction):
+        from commission_reference import fee_rate, MAX_AGE_MS, finite
+        c=ctx.config;now=stamp();refs=ctx.engine.commission_reference.get('legs',{})
+        # Reference eligibility can change at its future/expiry boundary even
+        # without a replacement snapshot. Preserve those exact fee gates.
+        eligible=tuple(finite(refs.get(leg,{}).get('checked_ms')) and
+                       0<=now-refs[leg]['checked_ms']<=MAX_AGE_MS for leg in LEGS)
+        key=(c['symbol'],c['mt5']['symbol'],ctx.plan['lots'],ctx.plan['leg_contracts']['mt5'],
+             c['costs'],refs,eligible)
+        cache=getattr(ctx,'_fee_cache',{})
+        previous=cache.get(direction)
+        if previous and previous[0]==key:return previous[1]
+        basis=dict(pair=c['pair'],direction=direction,symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],
+                   costs=c['costs'],lots=ctx.plan['lots'],opened_ms=now,commission_reference=refs)
+        fee=sum(fee_rate(basis,leg,action)*(1-c['costs'].get(
+            'mt5_short_rebate_percent' if leg=='binance' else 'mt5_rebate_percent',0)/100)
+                for leg in LEGS for action in ('open','close'))/ctx.plan['leg_contracts']['mt5']
+        cache[direction]=(copy.deepcopy(key),fee);ctx._fee_cache=cache
+        return fee
 
 
 class PoolRuntime:
@@ -429,6 +484,7 @@ class PoolRuntime:
                 self.position_report=None;self.external_close_status=None;self.last_error=''
                 self.latency.reset(c['execution']['mode'])
                 PROCESS_ENTRY_OBSERVATIONS.reset(c['execution']['mode'])
+                self.engine.entry_confirmations.clear()
                 for e in owner.endpoints:owner.pump.ingest(e,initial[e['id']])
                 self.quote=owner.pump.read()[0]
                 owner.start();self.connection_attempt.update(state='connected',stage='终端池已连接',elapsed_ms=round((time.monotonic()-self._connection_started)*1000))

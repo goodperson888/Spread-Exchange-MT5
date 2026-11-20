@@ -7,6 +7,8 @@
   const clone=x=>JSON.parse(JSON.stringify(x));
   const pairs=rows=>{const sorted=[...rows].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);return sorted.flatMap((a,i)=>sorted.slice(i+1).map(b=>({id:[a.id,b.id].join('~'),a,b})));};
   const defaults=()=>({entry_spread_usd:current.strategy.entry_spread_usd,entry_lower_usd:current.strategy.entry_lower_usd??-5,
+    entry_confirmation_decimals:current.strategy.entry_confirmation_decimals??2,
+    ...Object.fromEntries(['forward','reverse'].flatMap(d=>[[`entry_${d}_confirmation_mode`,current.strategy[`entry_${d}_confirmation_mode`]??'at_or_better'],[`entry_${d}_confirmation_ticks`,current.strategy[`entry_${d}_confirmation_ticks`]??1]])),
     direction_mode:'auto',target_mode:current.strategy.target_mode,take_contraction_usd:current.strategy.take_contraction_usd,
     exit_spread_usd:current.strategy.exit_spread_usd,require_net_profit:current.strategy.require_net_profit,
     min_net_profit_usd:current.strategy.min_net_profit_usd,group_loss_enabled:current.strategy.group_loss_enabled,
@@ -16,13 +18,13 @@
   const note=(text,error=false)=>{el('pool-settings-result').textContent=text;el('pool-settings-result').classList.toggle('error',error);};
   function change(){dirty=true;refreshRuleStates();note('有未保存的终端或独立规则修改；点击“保存终端与独立规则”。');}
   function field(label,key,value,{type='number',min='',max='',step='any'}={}) {
-    return `<label>${label}<input data-pool-field="${key}" type="${type}" value="${escape(value)}" ${min!==''?`min="${min}"`:''} ${max!==''?`max="${max}"`:''} step="${step}" spellcheck="false"></label>`;
+    return `<label>${escape(label)}<input data-pool-field="${key}" type="${type}" value="${escape(value)}" ${min!==''?`min="${min}"`:''} ${max!==''?`max="${max}"`:''} step="${step}" spellcheck="false"></label>`;
   }
-  function select(label,key,value,options){return `<label>${label}<select data-pool-rule="${key}">${Object.entries(options).map(([v,t])=>`<option value="${v}"${String(value)===v?' selected':''}>${t}</option>`).join('')}</select></label>`;}
-  const ruleSummary=(a,b,r,unsaved=false)=>`${a.name} × ${b.name} · 上限 ${r.entry_spread_usd??'待填写'} / 下限 ${r.entry_lower_usd??'待填写'}${unsaved?' · 未保存':''}`;
+  function select(label,key,value,options){return `<label>${escape(label)}<select data-pool-rule="${key}">${Object.entries(options).map(([v,t])=>`<option value="${v}"${String(value)===v?' selected':''}>${escape(t)}</option>`).join('')}</select></label>`;}
+  const ruleSummary=(a,b,r,unsaved=false)=>`卖 ${a.name}／买 ${b.name} ≥ ${r.entry_spread_usd??'待填写'}；买 ${a.name}／卖 ${b.name} ≤ ${r.entry_lower_usd??'待填写'}${unsaved?' · 未保存':''}`;
   function ruleError(r){
-    if(r.direction_mode==='auto'&&Number.isFinite(r.entry_lower_usd)&&Number.isFinite(r.entry_spread_usd)&&r.entry_lower_usd>=r.entry_spread_usd)
-      return `自动双向要求下限 < 上限；当前下限 ${r.entry_lower_usd} ≥ 上限 ${r.entry_spread_usd}，无法保存。允许负数，请按买卖方向填写。`;
+    if(r.direction_mode==='auto'&&Number.isFinite(r.entry_lower_usd)&&Number.isFinite(r.entry_spread_usd)&&r.entry_lower_usd>r.entry_spread_usd)
+      return `自动选择两种买卖组合要求下限 ≤ 上限；当前下限 ${r.entry_lower_usd} > 上限 ${r.entry_spread_usd}，无法保存。允许相等、零和负数。`;
     return '';
   }
   function refreshRuleStates(){
@@ -33,9 +35,12 @@
       const active=lastPool?.pairs?.find(p=>p.id===id)?.rules;
       const same=active&&Object.keys(r).every(k=>r[k]===active[k]);
       const pending=dirty?'未保存':same?'已保存，当前连接已生效':'已保存，待连接或重新连接';
-      const applied=active?`当前连接生效：卖 A 买 B ≥ ${active.entry_spread_usd}；买 A 卖 B ≤ ${active.entry_lower_usd}。`:'当前尚无此终端对的运行参数。';
+      const [aid,bid]=id.split('~'),name=key=>lastPool?.endpoints?.find(e=>e.id===key)?.name||draft.endpoints.find(e=>e.id===key)?.name||key;
+      const a=name(aid),b=name(bid);
+      const applied=active?`当前连接生效：卖 ${a}／买 ${b} ≥ ${active.entry_spread_usd}；买 ${a}／卖 ${b} ≤ ${active.entry_lower_usd}。`:'当前尚无此终端对的运行参数。';
       const error=ruleError(r);
-      output.textContent=`${pending}。${applied}${error?' '+error:''}`;
+      const equality=r.direction_mode==='auto'&&r.entry_lower_usd===r.entry_spread_usd?' 上下限相等可保存；两种买卖组合同时到价且空仓时等待报价区分。':'';
+      output.textContent=`${pending}。${applied}${error?' '+error:equality}`;
       output.classList.toggle('error',!!error);
     }
   }
@@ -63,11 +68,15 @@
     el('pool-rule-editors').innerHTML=list.map(({id,a,b})=>{
       const r=draft.rules[id]={...defaults(),...draft.rules[id]};
       const number=(label,key)=>field(label,key,r[key]).replace('data-pool-field','data-pool-rule');
-      return `<details class="pool-rule" data-pool-edge="${escape(id)}"${expanded.has(id)?' open':''}><summary>${escape(ruleSummary(a,b,r,dirty))}</summary><p class="note">A = ${escape(a.name)}，B = ${escape(b.name)}。方向指买卖顺序，与价差正负无关，两项均可填负数。卖 A 买 B 只比较 A Bid − B Ask；买 A 卖 B 只比较 A Ask − B Bid。</p><p class="note" data-pool-rule-state role="status"></p><div class="grid">`+
-        select('允许方向','direction_mode',r.direction_mode,{auto:'自动双向',forward:'只卖 A 买 B',reverse:'只买 A 卖 B'})+
-        number('卖 A 买 B · 可成交价差 ≥ 上限','entry_spread_usd')+number('买 A 卖 B · 可成交价差 ≤ 下限','entry_lower_usd')+
-        select('止盈方式','target_mode',r.target_mode,{contraction:'相对实际开仓价差收窄',absolute:'绝对 A−B 退出阈值'})+
-        number('收窄目标 USD/报价单位','take_contraction_usd')+number('绝对退出价差 A−B','exit_spread_usd')+
+      return `<details class="pool-rule" data-pool-edge="${escape(id)}"${expanded.has(id)?' open':''}><summary>${escape(ruleSummary(a,b,r,dirty))}</summary><p class="note">价差固定按 ${escape(a.name)} − ${escape(b.name)} 显示。卖 ${escape(a.name)}／买 ${escape(b.name)} 比较 Bid − Ask；买 ${escape(a.name)}／卖 ${escape(b.name)} 比较 Ask − Bid。两项均可填负数。连续确认仅统计新报价；不达标、过期、暂停或下单后清零。等于模式按小数位四舍五入，优于模式比较原始值。次数增加会延长确认等待。</p><p class="note" data-pool-rule-state role="status"></p><div class="grid">`+
+        select('允许的买卖组合','direction_mode',r.direction_mode,{auto:'两种买卖组合自动选择',forward:`只卖 ${a.name}／买 ${b.name}`,reverse:`只买 ${a.name}／卖 ${b.name}`})+
+        number(`卖 ${a.name}／买 ${b.name} · 价差 ≥ 上限`,'entry_spread_usd')+number(`买 ${a.name}／卖 ${b.name} · 价差 ≤ 下限`,'entry_lower_usd')+
+        select(`卖 ${a.name}／买 ${b.name} · 确认方式`,'entry_forward_confirmation_mode',r.entry_forward_confirmation_mode,{at_or_better:'达到或优于设定值',equal:'按精度等于设定值'})+
+        number('连续新报价次数','entry_forward_confirmation_ticks')+
+        select(`买 ${a.name}／卖 ${b.name} · 确认方式`,'entry_reverse_confirmation_mode',r.entry_reverse_confirmation_mode,{at_or_better:'达到或优于设定值',equal:'按精度等于设定值'})+
+        number('连续新报价次数','entry_reverse_confirmation_ticks')+number('等于模式比较小数位（0～8）','entry_confirmation_decimals')+
+        select('止盈方式','target_mode',r.target_mode,{contraction:'相对实际开仓价差收窄',absolute:`绝对 ${a.name} − ${b.name} 退出阈值`})+
+        number('收窄目标 USD/报价单位','take_contraction_usd')+number(`绝对退出价差 ${a.name} − ${b.name}`,'exit_spread_usd')+
         select('平仓净收益门槛','require_net_profit',r.require_net_profit,{true:'要求达到最低净收益',false:'不要求净收益'})+
         number('最低净收益 USD','min_net_profit_usd')+select('单组亏损保护','group_loss_enabled',r.group_loss_enabled,{false:'关闭',true:'开启'})+
         number('最大单组亏损 USD','group_max_loss_usd')+number('最长持仓分钟，0 关闭','max_hold_minutes')+
@@ -199,7 +208,8 @@
     preview();
     const pool=result.pool;lastPool=pool||null;refreshRuleStates();el('pool-chart-controls').hidden=!pool;
     if(!pool){el('pool-candidate-summary').textContent='连接终端池后显示';return;}
-    el('live-entry-label').textContent='图表终端对 · 正向入场';el('live-exit-label').textContent='图表终端对 · 反向入场';
+    const ep=(result.quote?.pair||result.pair)?.endpoints,a=ep?.binance?.name,b=ep?.mt5?.name;
+    if(a&&b){el('live-entry-label').textContent=`卖 ${a}／买 ${b}`;el('live-exit-label').textContent=`买 ${a}／卖 ${b}`;}
     const fmt=x=>Number.isFinite(x)?Number(x).toLocaleString('zh-CN',{maximumFractionDigits:4}):'—';
     const select=el('pool-chart-pair'),signature=JSON.stringify(pool.pairs);
     if(select.dataset.signature!==signature){select.dataset.signature=signature;select.replaceChildren(...pool.pairs.map(p=>new Option(p.name,p.id)));}
@@ -215,8 +225,9 @@
       const reverse=row.direction==='reverse',spread=reverse&&Number.isFinite(row.spread)?-row.spread:row.spread,threshold=reverse?-row.threshold:row.threshold;
       const distance=Number.isFinite(spread)&&Number.isFinite(threshold)?Math.max(0,reverse?spread-threshold:threshold-spread):null;
       const mapping=pool.pairs.find(p=>p.id===row.edge)?.name||'';
-      const state=!result.state?.enabled?'新开仓暂停':row.reason;
-      return `<tr data-selected="${row.selected}"><td>卖 ${escape(row.sell)} ／ 买 ${escape(row.buy)}<br><small>${escape(mapping)} · ${reverse?'买 A 卖 B':'卖 A 买 B'}</small></td><td title="${reverse?'A Ask − B Bid':'A Bid − B Ask'}">${fmt(spread)}<br><small>${reverse?'A Ask − B Bid':'A Bid − B Ask'}</small></td><td>${reverse?'≤':'≥'} ${fmt(threshold)}${distance!==null?`<br><small>${distance>0?'还差 '+fmt(distance):'价差已到位'}</small>`:''}</td><td>${fmt(row.score)}</td><td>${row.selected?'优先候选 · ':''}${escape(state)}</td></tr>`;
+      const r=row.confirmation||{},state=(!result.state?.enabled?'新开仓暂停':row.reason)+(r.required?` · 确认 ${r.count}/${r.required}`:'');
+      const formula=reverse?`${row.buy} Ask − ${row.sell} Bid`:`${row.sell} Bid − ${row.buy} Ask`;
+      return `<tr data-selected="${row.selected}"><td>卖 ${escape(row.sell)} ／ 买 ${escape(row.buy)}<br><small>${escape(mapping)}</small></td><td title="${escape(formula)}">${fmt(spread)}<br><small>${escape(formula)}</small></td><td>${r.mode==='equal'?'=':reverse?'≤':'≥'} ${fmt(threshold)}${distance!==null?`<br><small>${r.mode==='equal'?(r.matched?'指定精度下相等':'等待指定精度下相等'):distance>0?'还差 '+fmt(distance):'价差已到位'}</small>`:''}</td><td>${fmt(row.score)}</td><td>${row.selected?'优先候选 · ':''}${escape(state)}</td></tr>`;
     }).join('');
     const ready=pool.candidates.filter(x=>x.ready).length;
     el('pool-candidate-summary').textContent=`${ready} / ${pool.candidates.length} 个方向满足候选条件${result.state?.enabled?'':' · 新开仓暂停'}`;
