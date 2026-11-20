@@ -516,9 +516,10 @@ def native_chart_rates(mt,symbol,period,start_ms,end_ms,clock_offset_ms=0):
           if start_ms<=int(row['time'])*1000 and int(row['time'])*1000+interval<=end_ms]
     tick=mt.symbol_info_tick(symbol)
     data=dict(symbol=symbol,bars=bars,tick_time_ms=getattr(tick,'time_msc',None),observed_ms=int(time.time()*1000))
-    if clock_offset_ms:
-        current=mt.copy_rates_from_pos(symbol,getattr(mt,'TIMEFRAME_'+period),0,1)
-        data['current_bar_ms']=int(current[0]['time'])*1000 if current is not None and len(current) else None
+    # Even a zero-offset cross-platform history read must prove that current
+    # bar and tick timestamps use the same clock. This is display-worker I/O.
+    current=mt.copy_rates_from_pos(symbol,getattr(mt,'TIMEFRAME_'+period),0,1)
+    data['current_bar_ms']=int(current[0]['time'])*1000 if current is not None and len(current) else None
     return data
 
 

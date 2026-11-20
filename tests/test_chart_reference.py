@@ -172,21 +172,25 @@ class SourceTests(unittest.TestCase):
 
     def run_fetch(self,c,drift=0,request=None):
         end=int(time.time()*1000)//60000*60000;start=end-60000*600
-        terminal=Mock()
+        terminal=Mock();clock_calls=0;observed=int(time.time()*1000)
         def call(command,**kw):
+            nonlocal clock_calls
             if command=='chart_clock':
-                now=int(time.time()*1000)
-                return dict(observed_ms=now,ticks={name:now+drift for name in (c['mt5']['symbol'],c['pair']['short_symbol'])})
+                now=observed+clock_calls*350;clock_calls+=1
+                return dict(observed_ms=now,ticks={name:now+drift for name in
+                    (c['mt5']['symbol'],c.get('pair',{}).get('short_symbol',c['symbol']))})
             self.assertEqual(command,'chart_rates')
+            now=observed+clock_calls*350
             return dict(symbol=kw['symbol'],bars=[dict(t=start,close=4000)],
-                        tick_time_ms=int(time.time()*1000)+drift,observed_ms=int(time.time()*1000))
+                        tick_time_ms=now+drift,observed_ms=now,current_bar_ms=now//60000*60000)
         terminal.call.side_effect=call
         client=Mock();client.request.side_effect=request or [[
             [start+i*60000,0,0,0,'4005'] for i in range(499)],
             [[start+i*60000,0,0,0,'4006'] for i in range(499,600)]]
         with patch('trading_brokers.Terminal',return_value=terminal) as factory, \
              patch('trading_brokers.Binance',return_value=client) as exchange:
-            try:r=fetch_bars(c,'M1',start,end,threading.Event())
+            cancel=Mock();cancel.wait.return_value=False;cancel.is_set.return_value=False
+            try:r=fetch_bars(c,'M1',start,end,cancel)
             finally:self.terminal=terminal;self.factory=factory;self.exchange=exchange;self.client=client
         return r
 
@@ -207,8 +211,8 @@ class SourceTests(unittest.TestCase):
                          [c['mt5']['symbol'],c['pair']['short_symbol']])
         self.assertEqual(len(self.factory.call_args.args[0]['pair_symbols']),2)
 
-    def test_clock_mismatch_is_not_silently_corrected_or_joined(self):
-        with self.assertRaisesRegex(ValueError,'历史时基尚未确认'):self.run_fetch(config(),drift=7200000)
+    def test_tick_offset_without_matching_bar_clock_remains_blocked(self):
+        with self.assertRaisesRegex(ValueError,'K 线与报价的原始时基不一致'):self.run_fetch(config(),drift=7200000)
         self.client.request.assert_not_called();self.terminal.close.assert_called_once()
 
     def test_pagination_failure_closes_reader_and_does_not_return_partial_range(self):
@@ -219,6 +223,7 @@ class SourceTests(unittest.TestCase):
         at=int(time.time()*1000)//60000*60000-600000
         mt=Mock();mt.copy_rates_range.return_value=[dict(time=at//1000,close=4000),dict(time=(at+60000)//1000,close=4001)]
         mt.symbol_info_tick.return_value=NS(time_msc=int(time.time()*1000))
+        mt.copy_rates_from_pos.return_value=[dict(time=int(time.time())//60*60)]
         r=native_chart_rates(mt,'GOLD','M1',at,at+60000)
         self.assertEqual(r['bars'],[dict(t=at,close=4000)])
         self.assertEqual(mt.copy_rates_range.call_args.args[2].tzinfo.utcoffset(None).total_seconds(),0)
@@ -231,6 +236,7 @@ class SourceTests(unittest.TestCase):
         mt.terminal_info.return_value=NS(connected=True)
         mt.symbol_info.return_value=NS(name='GOLD')
         mt.symbol_info_tick.return_value=NS(time_msc=now)
+        mt.copy_rates_from_pos.return_value=[dict(time=now//1000)]
         mt.copy_rates_range.return_value=[dict(time=(now-60000)//1000,close=4000)]
         messages=[dict(command='init',settings=dict(account='123',server='TEST',symbol='GOLD'),magic=42,read_only=True),
                   dict(command='chart_rates',period='M1',start_ms=now-60000,end_ms=now)]

@@ -77,6 +77,43 @@ def native_clock(terminal, names, cancel, check, diagnostics):
     raise HistoryError('MT5 两腿未同时确认报价更新，不能区分时间偏移与旧报价；行情恢复后自动重试',diagnostics,'ticks_not_advancing')
 
 
+def exchange_clock(terminal,symbol,cancel,check,diagnostics):
+    """Measure the MT5 clock in the display worker, never the execution session.
+
+    Require two distinct tick advances. A single old/frozen quote cannot be
+    mistaken for a timezone. Only quarter-hour clock offsets are considered;
+    historical daylight-saving changes are not inferred from this live probe.
+    """
+    tolerance=10000;quantum=15*60000
+    def sample():
+        check()
+        probe=terminal.call('chart_clock',timeout_seconds=check())
+        observed=probe.get('observed_ms');tick=probe.get('ticks',{}).get(symbol)
+        diagnostics.setdefault('clock_samples',[]).append(clock_row('mt5',tick,observed))
+        if not positive(observed) or not positive(tick):
+            raise HistoryError('MT5 历史时间字段缺失，请导出诊断',diagnostics,'missing_time')
+        return observed,tick
+    observed,tick=sample();initial=tick-observed
+    offset=round(initial/quantum)*quantum
+    diagnostics.update(display_offset_ms=offset,alignment='mt5_to_exchange_utc',clock_tolerance_ms=tolerance)
+    if abs(offset)>14*3600000 or abs(initial-offset)>tolerance:
+        raise HistoryError('MT5 报价过旧或时间偏移无法确认，暂不配对跨平台历史，请稍后重试',diagnostics,'inconsistent_clocks')
+    advances=0
+    for _ in range(8):
+        if cancel.wait(.35):raise Cancelled()
+        observed2,tick2=sample();elapsed=observed2-observed;advanced=tick2-tick
+        if elapsed<=0 or advanced<0 or advanced>elapsed+3000:
+            raise HistoryError('MT5 报价时间跳变，暂不配对跨平台历史，请稍后重试',diagnostics,'clock_jump')
+        if abs(tick2-observed2-offset)>tolerance or abs(tick2-observed2-initial)>3000:
+            raise HistoryError('MT5 时间偏移不稳定，暂不配对跨平台历史，请稍后重试',diagnostics,'unstable_offset')
+        if advanced>0:advances+=1
+        observed,tick=observed2,tick2
+        if advances>=2:
+            diagnostics['clock_state']='mt5_advancing'
+            return offset
+    raise HistoryError('MT5 报价未确认持续更新，不能区分时间偏移与旧报价；行情恢复后自动重试',diagnostics,'ticks_not_advancing')
+
+
 def period_for(minutes):
     return 'M1' if minutes<=1440 else 'M5' if minutes<=10080 else 'M15'
 
@@ -119,13 +156,16 @@ def fetch_bars(config,period,start,end,cancel):
     settings.pop('mcp_token',None)
     if native_pair(config): settings['pair_symbols']=[short_symbol(config),settings['symbol']]
     terminal=Terminal(settings,config['execution']['magic'],read_only=True,timeout_seconds=check())
+    client=None
     try:
         offset=0
+        diagnostics['stage']='clock'
         if native_pair(config):
-            diagnostics['stage']='clock'
             offset=native_clock(terminal,[settings['symbol'],short_symbol(config)],cancel,check,diagnostics)
-            if offset%interval:
-                raise HistoryError('共同报价时间偏移与历史周期不匹配，暂不换算显示时间',diagnostics)
+        else:
+            offset=exchange_clock(terminal,settings['symbol'],cancel,check,diagnostics)
+        if offset%interval:
+            raise HistoryError('报价时间偏移与历史周期不匹配，暂不换算显示时间',diagnostics)
         def read(symbol,leg):
             diagnostics['stage']='rates'
             result=terminal.call('chart_rates',symbol=symbol,period=period,start_ms=start+offset,end_ms=end+offset,
@@ -137,11 +177,17 @@ def fetch_bars(config,period,start,end,cancel):
             row=dict(clock_row(leg,tick,observed),bar_count=len(result.get('bars',[])))
             if positive(result.get('current_bar_ms')): row['current_bar_ms']=result['current_bar_ms']
             diagnostics['legs'].append(row)
-            if not positive(tick) or not positive(observed) or abs(tick-observed-offset)>120000:
+            tolerance=120000 if native_pair(config) else diagnostics['clock_tolerance_ms']
+            if not positive(tick) or not positive(observed) or abs(tick-observed-offset)>tolerance:
                 detail=f'（平台原始时间−本机 {int(tick-observed)} ms）' if positive(tick) and positive(observed) else '（时间字段缺失）'
-                raise HistoryError('MT5 最新报价过旧或原始时间与本机明显错位'+detail+'，历史时基尚未确认；跨平台不自动加减时区',diagnostics)
-            if offset and (not positive(result.get('current_bar_ms')) or
-                           not 0<=tick-result['current_bar_ms']<interval+120000):
+                raise HistoryError('MT5 最新报价过旧或原始时间与已验证偏移不一致'+detail+'，历史时基尚未确认',diagnostics)
+            if not native_pair(config):
+                previous=diagnostics['clock_samples'][-1]
+                if observed<previous['observed_ms'] or tick<previous['tick_time_ms']:
+                    raise HistoryError('MT5 历史读取期间时间倒退，暂不配对历史，请稍后重试',diagnostics,'clock_jump')
+            current=result.get('current_bar_ms')
+            if (offset or not native_pair(config)) and (not positive(current) or current%interval or
+                           not 0<=tick-current<interval+(120000 if native_pair(config) else 0)):
                 raise HistoryError('MT5 当前 K 线与报价的原始时基不一致，暂不换算历史，请导出诊断',diagnostics,'bar_clock_mismatch')
             return result['bars']
         long=read(settings['symbol'],'mt5')
@@ -175,12 +221,20 @@ def fetch_bars(config,period,start,end,cancel):
             if cursor<end and len(page)==499: raise ValueError('历史分页超过单次上限')
         check()
         diagnostics['stage']='align'
-        rows=align_bars(short,long,start+offset,end+offset,interval)
-        # Join on ORIGINAL broker bar times first. Only the display x coordinate
-        # receives the measured common offset; historical DST is not inferred.
-        for row in rows:
-            row['source_time_ms']=row['time_ms']
-            row['time_ms']-=offset
+        if native_pair(config):
+            rows=align_bars(short,long,start+offset,end+offset,interval)
+            # Two symbols on one server share raw bar times.
+            for row in rows:
+                row['source_time_ms']=row['time_ms']
+                row['time_ms']-=offset
+        else:
+            # The exchange is already UTC. Convert ONLY the MT5 leg before an
+            # exact completed-bar join; never shift exchange prices with MT5.
+            long=[{**row,'t':row['t']-offset} for row in long]
+            rows=align_bars(short,long,start,end,interval)
+            for row in rows:
+                row.update(source_time_ms=row['time_ms'],exchange_source_time_ms=row['time_ms'],
+                           mt5_source_time_ms=row['time_ms']+offset)
         diagnostics['paired_count']=len(rows)
         diagnostics['stage']='complete'
         return HistoryRows(rows,diagnostics)
@@ -190,6 +244,7 @@ def fetch_bars(config,period,start,end,cancel):
         raise HistoryError(str(exc),diagnostics,'fetch_failed') from None
     finally:
         terminal.close()
+        if client is not None and hasattr(client,'close'):client.close()
 
 
 def fetch_terminal_bars(config,period,start,end,cancel):
@@ -265,7 +320,7 @@ class ReferenceHistory:
         expected=max(1,minutes*60000//interval)
         if len(covered)>=expected*.95:
             return dict(state='local',message='所选窗口已有本机采样，无需补取历史参考。',samples=[])
-        key=hashlib.sha256((pair_key(config)+'|'+str(minutes)+'|reference-v2').encode()).hexdigest()
+        key=hashlib.sha256((pair_key(config)+'|'+str(minutes)+'|reference-v3').encode()).hexdigest()
         with self.lock:
             entry=self.entries.get(key)
             if entry: self.entries.move_to_end(key)
@@ -309,7 +364,11 @@ class ReferenceHistory:
                   'error':error,'idle':'连接双边行情后可后台补取历史参考。'}
         message=messages.get(state,'历史参考尚未就绪')
         if state=='ready' and diagnostics.get('display_offset_ms'):
-            message+=f" 两腿原始 K 线按同一服务器时间配对；横轴按本次共同偏移 {diagnostics['display_offset_ms']/3600000:+g} 小时换算，仅供参考，历史夏令时未校准。"
+            hours=diagnostics['display_offset_ms']/3600000
+            if diagnostics.get('alignment')=='mt5_to_exchange_utc':
+                message+=f" MT5 时间偏移 {hours:+g} 小时已验证，K 线按本次偏移换算后与交易所 UTC 时间配对；历史夏令时变更未校准，仅供参考。"
+            else:
+                message+=f" 两腿原始 K 线按同一服务器时间配对；横轴按本次共同偏移 {hours:+g} 小时换算，仅供参考，历史夏令时未校准。"
         if not connected: message='未连接；保留已缓存的历史参考，不发起平台请求。'
         if state=='ready' and not values: message='平台未返回可按同一时间配对的完整 K 线，保留空缺。'
         return dict(state=state,message=message,samples=[row for row in values if row['time_ms']//interval not in covered],

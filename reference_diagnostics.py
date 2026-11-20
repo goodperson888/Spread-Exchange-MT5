@@ -12,13 +12,14 @@ class ReferenceDiagnostics:
         result=[]
         for entry in entries[-8:]:
             item={k:v for k,v in entry.items() if k in (
-                'checked_ms','start_ms','end_ms','display_offset_ms','paired_count')
+                'checked_ms','start_ms','end_ms','display_offset_ms','paired_count','clock_tolerance_ms')
                 and isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v)}
             for k,allowed in [('state',('error','ready')),('period',('M1','M5','M15')),
                               ('stage',('initialize','clock','rates','exchange','align','complete')),
                               ('error_code',('unconfirmed_clock','missing_time','inconsistent_clocks','clock_jump',
                                              'unstable_offset','ticks_not_advancing','bar_clock_mismatch','fetch_failed')),
-                              ('clock_state',('utc_compatible','shared_advancing'))]:
+                              ('clock_state',('utc_compatible','shared_advancing','mt5_advancing')),
+                              ('alignment',('mt5_to_exchange_utc',))]:
                 if entry.get(k) in allowed:item[k]=entry[k]
             for key in ('clock_samples','legs'):
                 rows=[]

@@ -338,7 +338,7 @@ class Lighter:
             stop=min(end,cursor+499*interval)
             page=self.public('/api/v1/candles',dict(market_id=self.spec(symbol)['market_id'],
                 resolution={'M1':'1m','M5':'5m','M15':'15m'}[period],start_timestamp=cursor,
-                end_timestamp=stop-1,count_back=499,set_timestamp_to_end='false'))
+                end_timestamp=stop-1,count_back=(stop-cursor)//interval,set_timestamp_to_end='false'))
             data=page.get('c')
             if not isinstance(data,list) or len(data)>499:raise ValueError('Lighter 历史 K 线不完整')
             batch=[dict(t=int(r['t']),close=float(r['c'])) for r in data]

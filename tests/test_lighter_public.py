@@ -141,4 +141,34 @@ class LighterPublicTests(unittest.TestCase):
         stream.close.assert_called_once()
 
 
+class LighterHistoryPaginationTests(unittest.TestCase):
+    def test_short_window_and_last_page_request_exact_count_back(self):
+        for period,count in [('M1',2),('M1',360),('M1',499),('M5',500),('M15',2880)]:
+            with self.subTest(period=period,count=count):
+                client=Lighter({});client.spec=Mock(return_value=dict(market_id=92))
+                interval={'M1':60000,'M5':300000,'M15':900000}[period]
+                end=1795177980000//interval*interval;start=end-count*interval
+                def page(path,params):
+                    self.assertEqual(path,'/api/v1/candles')
+                    page_end=params['end_timestamp']+1
+                    self.assertEqual(params['count_back'],(page_end-params['start_timestamp'])//interval)
+                    self.assertLessEqual(params['count_back'],499)
+                    # count_back is a lookback count, not a page-size ceiling:
+                    # the real API may return older candles to satisfy it.
+                    return dict(c=[dict(t=t,c=3500) for t in
+                        range(page_end-params['count_back']*interval,page_end,interval)])
+                client.public=Mock(side_effect=page)
+                rows=client.chart_bars('XAU',period,start,end,lambda:5)
+                self.assertEqual(len(rows),count)
+                self.assertEqual([r['t'] for r in rows],list(range(start,end,interval)))
+                self.assertEqual(client.public.call_count,(count+498)//499)
+                self.assertIsNone(client.session)
+
+    def test_outside_window_response_is_still_rejected(self):
+        client=Lighter({});client.spec=Mock(return_value=dict(market_id=92))
+        client.public=Mock(return_value=dict(c=[dict(t=1795177800000,c=3500)]))
+        with self.assertRaisesRegex(ValueError,'超出请求区间'):
+            client.chart_bars('XAU','M1',1795177860000,1795177980000,lambda:5)
+
+
 if __name__=='__main__':unittest.main()
