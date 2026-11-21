@@ -158,6 +158,26 @@ class ReferenceTests(unittest.TestCase):
         svc=ReferenceHistory(self.directory,self.fetch);self.addCleanup(svc.close)
         self.assertEqual(self.result(svc=svc)['state'],'ready');self.assertEqual(self.fetch.call_count,2)
 
+    def test_frozen_clock_retains_verified_cache_without_extending_quotes_or_refilling_gaps(self):
+        end=self.now-self.now%60000
+        self.fetch.side_effect=lambda *args:HistoryRows(self.rows(*args),dict(stage='complete',display_offset_ms=7200000))
+        before=self.result(minutes=43200)
+        self.now+=6*3600000
+        error=HistoryError('frozen',dict(error_code='inconsistent_clocks',stage='clock'))
+        self.fetch.side_effect=error
+        svc=ReferenceHistory(self.directory,self.fetch);self.addCleanup(svc.close)
+        with patch('chart_reference.time.time',return_value=self.now/1000):
+            after=self.result(minutes=43200,svc=svc)
+        self.assertEqual(after['state'],'ready');self.assertEqual(after['samples'],before['samples'])
+        self.assertTrue(after['diagnostics']['history_cached'])
+        self.assertEqual(after['diagnostics']['display_offset_ms'],7200000)
+        self.assertLessEqual(after['coverage_end'],end)
+        self.assertIn('行情停更',after['cache_warning'])
+
+    def test_frozen_clock_without_verified_cache_does_not_infer_timezone(self):
+        self.fetch.side_effect=HistoryError('frozen',dict(error_code='inconsistent_clocks',stage='clock'))
+        after=self.result();self.assertEqual(after['state'],'error');self.assertEqual(after['samples'],[])
+
 
 class SourceTests(unittest.TestCase):
     def test_pairing_requires_same_complete_bar_and_never_uses_nearest_time(self):

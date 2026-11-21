@@ -11,6 +11,7 @@ from pair_instruments import (native_pair, pair_info, native_valuation, native_t
 from commission_reference import fee_rate, attach as attach_commission_reference
 from mt5_session import normalize_path
 from entry_confirmation import EntryConfirmations
+from liquidity_guard import assess as assess_liquidity, safe_evidence as liquidity_evidence
 
 
 def stamp(): return int(time.time()*1000)
@@ -71,6 +72,66 @@ class Engine:
     def _latency(self, phase, value):
         latency = getattr(self, 'latency', None)
         if latency is not None: latency.record(phase, value)
+
+    @staticmethod
+    def _uses_depth(g):
+        return (g.get('pair',{}).get('type')!='mt5_mt5' and
+                g.get('pair',{}).get('exchange')=='lighter' and
+                g.get('parameters',g.get('strategy',{})).get('liquidity_guard_enabled',False))
+
+    def _depth(self,g,q,qty,action,threshold=None,strategy=None,book=None):
+        started=time.monotonic()
+        try:
+            if book is None:
+                provider=getattr(self,'depth_provider',None)
+                try:book=provider() if provider else None
+                except Exception:book=None
+            result=assess_liquidity(book,q,qty,strategy or g['parameters'],action,stamp(),
+                threshold=threshold,costs=g['costs'],contract=g['contract'],
+                mt5_open_fee=fee_rate(g,'mt5','open'),mt5_close_fee=fee_rate(g,'mt5','close'))
+            return liquidity_evidence(result)
+        finally:self._latency('liquidity_check_ms',(time.monotonic()-started)*1000)
+
+    def _depth_exits(self,groups,market_quote):
+        """One sweep for the sum of matching groups, never reuse the top level."""
+        results={}
+        for key in {g['key'] for g in groups if self._uses_depth(g)}:
+            members=[g for g in groups if g['key']==key]
+            s=dict(members[0]['parameters'])
+            for field in ('max_slippage_usd','max_quote_age_ms','max_clock_skew_ms','liquidity_max_usage_percent'):
+                s[field]=min(g['parameters'].get(field,80) for g in members)
+            qty=sum(self.amounts(g)['binance'] for g in members)
+            evidence=self._depth(members[0],market_quote,qty,'close',strategy=s)
+            # A different group with an outstanding close can consume this book.
+            if any(g['key']==key and g not in members and g['status'] in ('closing','unwinding','attention') for g in self.active()):
+                evidence.update(ready=False,code='LIQUIDITY_UNAVAILABLE')
+            evidence['aggregate_qty']=qty
+            for g in members: results[g['id']]=dict(evidence)
+        return results
+
+    def _profit_candidates(self,groups,market_quote):
+        candidates=[]
+        basket=[g for g in groups if g['parameters']['exit_mode']=='basket' and not g.get('imported')]
+        if basket:
+            qty=sum(g['qty'] for g in basket)
+            entry=sum(g['entry']*g['qty'] for g in basket)/qty
+            net=sum(g['valuation']['net'] if 'valuation' in g else self.valuation(g,direction_quote(market_quote,g))['net'] for g in basket)
+            if all(self.target(g,entry,direction_quote(market_quote,g)['exit']) and
+                   (not g['parameters']['require_net_profit'] or net>=g['parameters']['min_net_profit_usd']) for g in basket):
+                candidates.extend(basket)
+        for g in groups:
+            if g in basket:continue
+            q=direction_quote(market_quote,g);s=g['parameters'];v=g.get('valuation')
+            if v is None:v=self.valuation(g,q)
+            if self.target(g,g['entry'],q['exit']) and (not (g.get('imported') or s['require_net_profit']) or v['net']>=s['min_net_profit_usd']):
+                candidates.append(g)
+        return candidates
+
+    def _depth_quote(self,g,q,evidence):
+        if not evidence or not evidence.get('ready'): return q
+        fx=q.get('usdt_usd',g['costs']['usdt_usd'])
+        return {**q,'binance':{**q['binance'],'ask':evidence['vwap']},
+                'exit':evidence['vwap']*fx-q['mt5']['bid']}
 
     def _observe_exit(self, g, q, code=None, **evidence):
         observer = getattr(self, 'exit_observations', None)
@@ -238,6 +299,13 @@ class Engine:
             # REST depth when the top level cannot cover this order.
             top_key='bid_qty' if sell else 'ask_qty'
             o['top_qty']=q.get('binance',{}).get(top_key)
+            evidence=g.get('liquidity_'+('open' if action=='open' else 'close'))
+            if (self._uses_depth(g) and evidence and evidence.get('ready') and not protective and
+                    (action=='open' or g.get('reason') in ('逐组止盈','整篮子止盈','接管篮子收窄并盈利'))):
+                # Never loosen the ordinary per-leg slippage limit.
+                o['limit']=(max if sell else min)(o['limit'],evidence['limit'])
+                o['liquidity']=liquidity_evidence(evidence)
+            o['max_depth_age_ms']=g['parameters']['max_quote_age_ms']
         if q.get('execution_quote_source') in ('cache','refresh'): o['quote_source']=q['execution_quote_source']
         o['signal_spread']=q.get('entry' if action=='open' else 'exit')
         o['signal_time_ms']=q.get('time_ms')
@@ -788,7 +856,16 @@ class Engine:
                 self._preflight_log=(data,checked)
             return
         self._preflight_log=None
-        self.observe_entry(c,q,'ENTRY_SUBMIT',direction=direction,stage='preflight',threshold=-threshold if direction=='reverse' else threshold)
+        depth_group=dict(pair=pair_info(c),parameters=c['strategy'],costs=c['costs'],contract=p['contract'],
+                         symbol=c['symbol'],mt5_symbol=c['mt5']['symbol'],lots=p['lots'])
+        attach_commission_reference(self,c,depth_group)
+        depth=None
+        if self._uses_depth(depth_group):
+            depth=self._depth(depth_group,q,p['qty'],'open',threshold)
+            if not depth.get('ready'):
+                self.observe_entry(c,q,depth['code'],direction=direction,stage='preflight',threshold=threshold,liquidity=depth)
+                return
+        self.observe_entry(c,q,'ENTRY_SUBMIT',direction=direction,stage='preflight',threshold=-threshold if direction=='reverse' else threshold,liquidity=depth)
         self.entry_confirmations.reset(pair_key(c))
         first_leg='binance' if c.get('execution',{}).get('entry_leg','binance')=='binance' else 'mt5'
         second_leg='mt5' if first_leg=='binance' else 'binance'
@@ -800,6 +877,7 @@ class Engine:
             first_leg=first_leg,second_leg=second_leg,entry_threshold=threshold,grid_index=int(grid_index),
             entry_dispatch='parallel' if parallel else 'serial')
         g['pair']=pair_info(c)
+        if depth:g['liquidity_open']=depth
         if native_pair(c):
             g.update(leg_contracts=copy.deepcopy(p['leg_contracts']),quantity_unit='lot',direction=direction)
             if c.get('pair',{}).get('endpoints'): g['magic']=c['execution']['magic']
@@ -1022,6 +1100,44 @@ class Engine:
         amounts=self.amounts(g)
         if max(amounts.values())<1e-8:
             self.finalize_flat(g,q);return
+        if (self._uses_depth(g) and g.get('reason') in ('逐组止盈','整篮子止盈','接管篮子收窄并盈利')
+                and not any(o['group']==g['id'] and o['action']=='close' and o.get('result',{}).get('qty',0)>0
+                            for o in self.state['orders'])):
+            other=[x for x in self.active() if x['id']!=g['id'] and x['key']==g['key'] and
+                   (x['status']=='open' or (x['status']=='closing' and
+                    x.get('reason') in ('逐组止盈','整篮子止盈','接管篮子收窄并盈利') and
+                    not any(o['group']==x['id'] and o['action']=='close' for o in self.state['orders'])))]
+            members=self._profit_candidates(other,q)+[g]
+            if g.get('reason')=='整篮子止盈':
+                members=[x for x in other if x['parameters']['exit_mode']=='basket' and not x.get('imported')]+[g]
+            evidence=self._depth_exits(members,q).get(g['id'],{})
+            g['liquidity_close']=evidence
+            depth_q=self._depth_quote(g,q,evidence)
+            v=self.valuation(g,depth_q)
+            buffered=v['net']-g['parameters'].get('liquidity_buffer_usd',.1)*amounts['binance']
+            if g.get('reason')=='整篮子止盈':
+                ids=g.get('exit_decision',{}).get('basket_members',[])
+                basket=([x for x in self.state['groups'] if x['id'] in ids and x['key']==g['key']]
+                        if ids else [x for x in members if x['parameters'].get('exit_mode')=='basket' and not x.get('imported')])
+                total_qty=sum(x['qty'] for x in basket)
+                entry=sum(x['entry']*x['qty'] for x in basket)/total_qty
+                buffered=sum(self.valuation(x,depth_q)['net']-x['parameters'].get('liquidity_buffer_usd',.1)*self.amounts(x)['binance'] for x in basket)
+                target_ok=all(self.target(x,entry,depth_q['exit']) for x in basket)
+                net_ok=all(not x['parameters'].get('require_net_profit') or buffered>=x['parameters']['min_net_profit_usd'] for x in basket)
+            else:
+                target_ok=self.target(g,g['entry'],depth_q['exit'])
+                net_ok=not (g.get('imported') or g['parameters'].get('require_net_profit')) or buffered>=g['parameters']['min_net_profit_usd']
+            evidence['estimated_net_after_depth']=buffered
+            if not evidence.get('ready') or not target_ok or not net_ok:
+                code=evidence.get('code','LIQUIDITY_UNAVAILABLE') if not evidence.get('ready') else 'RECHECK_TARGET' if not target_ok else 'LIQUIDITY_PROFIT'
+                self._observe_exit(g,q,code,valuation=v,liquidity=evidence)
+                g.update(status='open',reason='止盈盘口或成本缓冲复查未通过，继续等待')
+                self.exit_confirmations.reset(g['id'])
+                for field in ('exit_signal','exit_decision','execution_close'):g.pop(field,None)
+                self._execution_timers.pop((g['id'],'close'),None)
+                self.save('exit_deferred',dict(group=g['id'],reason=g['reason'],liquidity=liquidity_evidence(evidence)))
+                return
+            q={**q,'exit':depth_q['exit']}
         # A normal profit exit can be deferred only before either leg closes.
         # Once any close fills, always finish reducing the other leg instead
         # of leaving exposure while waiting for a more profitable price.
@@ -1140,18 +1256,30 @@ class Engine:
             if measure: decision_elapsed += time.monotonic()-started
         started = time.monotonic() if measure else 0
         opened=[g for g in scoped() if g['status']=='open' and (not g.get('imported') or g.get('management_enabled'))]
+        depth_exits=(self._depth_exits(self._profit_candidates(opened,market_quote),market_quote)
+                     if any(self._uses_depth(g) for g in opened) else {})
+        for g in opened:
+            evidence=depth_exits.get(g['id'])
+            if evidence:
+                g['liquidity_close']=evidence
+                if evidence.get('ready'):
+                    g['valuation']=self.valuation(g,self._depth_quote(g,direction_quote(market_quote,g),evidence))
+                    evidence['estimated_net_after_depth']=g['valuation']['net']-g['parameters'].get('liquidity_buffer_usd',.1)*self.amounts(g)['binance']
+        def profit_quote(g):return self._depth_quote(g,direction_quote(market_quote,g),depth_exits.get(g['id']))
+        def profit_net(g):return g['valuation']['net']-(g['parameters'].get('liquidity_buffer_usd',.1)*self.amounts(g)['binance'] if g['id'] in depth_exits else 0)
+        def depth_ready(g):return depth_exits.get(g['id'],{}).get('ready',g['id'] not in depth_exits)
         total=sum(g.get('valuation',{}).get('net',0) for g in self.active() if not g.get('imported'))
         loss=c['strategy']['total_loss_enabled'] and total<=-c['strategy']['total_max_loss_usd']
         basket=[g for g in opened if g['parameters']['exit_mode']=='basket' and not g.get('imported')]
         basket_exit=set()
         basket_evidence=None
         if basket:
-            q=direction_quote(market_quote,basket[0])
+            q=profit_quote(basket[0])
             qty=sum(g['qty'] for g in basket); entry=sum(g['entry']*g['qty'] for g in basket)/qty
-            net=sum(g['valuation']['net'] for g in basket)
+            net=sum(profit_net(g) for g in basket)
             # Every current member's saved condition must agree. Explicit
             # existing-basket edits update all current members atomically.
-            if all(self.target(g,entry,q['exit']) and (not g['parameters']['require_net_profit'] or net>=g['parameters']['min_net_profit_usd']) for g in basket):
+            if all(depth_ready(g) and self.target(g,entry,q['exit']) and (not g['parameters']['require_net_profit'] or net>=g['parameters']['min_net_profit_usd']) for g in basket):
                 basket_exit={g['id'] for g in basket}
             if getattr(self,'exit_observations',None) is not None:
                 basket_evidence=dict(entry=entry,net=net,members=len(basket),
@@ -1160,16 +1288,16 @@ class Engine:
         profit_confirmation={}
         members=tuple(sorted(g['id'] for g in basket));basket_ids=set(members)
         for g in opened:
-            q=direction_quote(market_quote,g);s=g['parameters'];v=g['valuation']
+            q=profit_quote(g);s=g['parameters'];v=g['valuation']
             hit=(g['id'] in basket_exit if g['id'] in basket_ids else
-                 self.target(g,g['entry'],q['exit']) and
-                 (not s['require_net_profit'] or v['net']>=s['min_net_profit_usd']))
-            if g.get('imported'): hit=self.target(g,g['entry'],q['exit']) and v['net']>=s['min_net_profit_usd']
+                 depth_ready(g) and self.target(g,g['entry'],q['exit']) and
+                 (not s['require_net_profit'] or profit_net(g)>=s['min_net_profit_usd']))
+            if g.get('imported'): hit=depth_ready(g) and self.target(g,g['entry'],q['exit']) and profit_net(g)>=s['min_net_profit_usd']
             profit_confirmation[g['id']]=self._confirm_profit_exit(g,q,hit,members if g['id'] in basket_ids else ())
         if basket_exit and not all(profit_confirmation[gid]['ready'] for gid in basket_exit):
             basket_exit=set()
         for g in opened:
-            q=direction_quote(market_quote,g)
+            q=profit_quote(g)
             s=g['parameters'];v=g['valuation'];reason=''
             if g.get('imported'):
                 if self.target(g,g['entry'],q['exit']) and v['net']>=s['min_net_profit_usd']: reason='接管篮子收窄并盈利'
@@ -1177,14 +1305,18 @@ class Engine:
             elif s['group_loss_enabled'] and v['net']<=-s['group_max_loss_usd']: reason='单组亏损上限'
             elif s['max_hold_minutes'] and stamp()-g['opened_ms']>=s['max_hold_minutes']*60000: reason='持仓超时'
             elif g['id'] in basket_exit: reason='整篮子止盈'
-            elif s['exit_mode']=='group' and self.target(g,g['entry'],q['exit']) and (not s['require_net_profit'] or v['net']>=s['min_net_profit_usd']): reason='逐组止盈'
+            elif s['exit_mode']=='group' and depth_ready(g) and self.target(g,g['entry'],q['exit']) and (not s['require_net_profit'] or profit_net(g)>=s['min_net_profit_usd']): reason='逐组止盈'
             normal_profit=reason in ('逐组止盈','整篮子止盈','接管篮子收窄并盈利')
+            if normal_profit and not depth_ready(g):reason=''
             confirmation=profit_confirmation[g['id']]
             if normal_profit and not confirmation['ready']: reason=''
             waiting=not reason and confirmation['matched'] and not confirmation['ready']
             basket_wait=not reason and g['id'] in basket_ids and confirmation['matched'] and confirmation['ready'] and not basket_exit
-            self._observe_exit(g,q,'WAIT_CONFIRMATION' if waiting else 'WAIT_BASKET_CONFIRMATION' if basket_wait else None,
-                valuation=v,basket=basket_evidence,trigger=reason,limits=c['strategy'])
+            depth=depth_exits.get(g['id'])
+            depth_code=(depth['code'] if depth and not depth.get('ready') else
+                        'LIQUIDITY_PROFIT' if depth and s['require_net_profit'] and profit_net(g)<s['min_net_profit_usd'] else None)
+            self._observe_exit(g,q,'WAIT_CONFIRMATION' if waiting else 'WAIT_BASKET_CONFIRMATION' if basket_wait else depth_code,
+                valuation=v,basket=basket_evidence,trigger=reason,limits=c['strategy'],liquidity=depth)
             if reason:
                 self._begin_execution(g,'close',q)
                 decision=dict(signal_spread=q['exit'],entry_spread=g['entry'],
@@ -1194,7 +1326,9 @@ class Engine:
                     estimated_gross=v['gross'],estimated_exit_fee=v['estimated_exit_fee'],
                     estimated_rebate=v['estimated_rebate'],valuation_fx=v['valuation_fx'],
                     require_net_profit=s['require_net_profit'],target_mode=s['target_mode'])
-                if g['id'] in basket_exit: decision['basket_estimated_net']=sum(x['valuation']['net'] for x in basket)
+                if g['id'] in basket_exit:
+                    decision['basket_estimated_net']=sum(x['valuation']['net'] for x in basket)
+                    decision['basket_members']=list(members)
                 if normal_profit: decision['confirmation']={k:confirmation[k] for k in ('count','required','ready')}
                 self.exit_confirmations.reset(g['id'])
                 g.update(status='closing',reason=reason,exit_signal=q['exit'],exit_decision=decision)

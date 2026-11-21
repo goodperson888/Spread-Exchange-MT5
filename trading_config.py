@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from liquidation_risk import validate_alerts
 from pair_instruments import native_pair, short_symbol, pool_pair
 from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS
+from liquidity_guard import DEFAULTS as LIQUIDITY_DEFAULTS
 
 REBATE_FIELDS=('binance_rebate_percent','mt5_rebate_percent')
 
@@ -39,6 +40,7 @@ def validate_proxy_url(value):
 def validate(c):
     for k,v in CONFIRMATION_DEFAULTS.items(): c['strategy'].setdefault(k,v)
     s=c['strategy']
+    for k,v in LIQUIDITY_DEFAULTS.items(): s.setdefault(k,v)
     if type(s['exit_confirmation_ticks']) is not int or not 1<=s['exit_confirmation_ticks']<=1000:
         raise ValueError('止盈连续新报价次数必须为 1～1000 的整数')
     for direction in ('forward','reverse'):
@@ -112,7 +114,7 @@ def validate(c):
     if s['exit_mode'] not in ('group', 'basket') or s['target_mode'] not in ('contraction', 'absolute'):
         raise ValueError('退出方式无效')
     for k in ('require_net_profit', 'group_loss_enabled', 'total_loss_enabled', 'grid_enabled',
-              'dynamic_reference_enabled', 'rollover_guard_enabled'):
+              'dynamic_reference_enabled', 'rollover_guard_enabled', 'liquidity_guard_enabled'):
         if type(s[k]) is not bool:
             raise ValueError(k+' 必须是开关')
     if type(s['entry_spread_guard_enabled']) is not bool:
@@ -130,6 +132,7 @@ def validate(c):
         'max_clock_skew_ms': (0, 5000), 'max_unhedged_ms': (100, 30000), 'max_slippage_usd': (0.01, 1000),
         'unwind_slippage_usd': (0.01, 1000),
         'entry_spread_slippage_usd': (0.01, 1000),
+        'liquidity_max_usage_percent': (1, 100), 'liquidity_buffer_usd': (0, 1000),
     }
     if native_pair(c): bounds['entry_spread_usd']=(-100000,100000)
     for k, (lo, hi) in bounds.items():

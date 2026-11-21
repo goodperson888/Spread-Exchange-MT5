@@ -90,6 +90,19 @@ test('combined entry spread guard is opt-in and saves separately from per-leg sl
  assert.equal(f.el('entry-spread-guard-on').checked,false);
 });
 
+test('Lighter depth usage and cost buffer restore and save as independent pair strategy fields',async()=>{
+ const f=await fixture();
+ assert.equal(f.el('liquidity-guard-on').checked,true);
+ assert.equal(f.el('liquidity-usage').value,'80');assert.equal(f.el('liquidity-buffer').value,'0.1');
+ f.edit('liquidity-usage','60');f.edit('liquidity-buffer','0.25');
+ assert.equal(f.run('dirtyFields.has("liquidity-usage")'),true);
+ const c=f.run('formConfig()');
+ assert.equal(c.strategy.liquidity_max_usage_percent,60);assert.equal(c.strategy.liquidity_buffer_usd,.25);
+ f.run('populate({...formConfig(),strategy:{...formConfig().strategy,liquidity_guard_enabled:false,liquidity_max_usage_percent:90,liquidity_buffer_usd:0}})');
+ assert.equal(f.el('liquidity-guard-on').checked,false);assert.equal(f.el('liquidity-buffer').value,'0');
+ assert.equal(f.el('liquidity-usage').value,'90');
+});
+
 test('opening dispatch and MT5 quote interval restore, dirty and save as pair execution settings',async()=>{
  const f=await fixture();
  assert.equal(f.el('entry-dispatch').value,'auto');assert.equal(f.el('mt5-quote-poll-ms').value,'50');

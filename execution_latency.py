@@ -14,7 +14,7 @@ class LatencyStats:
         'binance_push_to_publish_ms', 'mt5_push_to_publish_ms',
         'binance_push_to_strategy_ms', 'mt5_push_to_strategy_ms',
         'result_journal_ms', 'open_dispatch_gap_ms', 'open_execution_to_dispatch_ms', 'close_execution_to_dispatch_ms',
-        'receipt_handling_wait_ms', 'second_leg_quote_ms',
+        'receipt_handling_wait_ms', 'second_leg_quote_ms', 'liquidity_check_ms',
         'open_dispatch_quote_age_ms', 'close_dispatch_quote_age_ms',
         'open_dispatch_quote_alignment_ms', 'close_dispatch_quote_alignment_ms',
         'open_quote_to_execution_ms', 'close_quote_to_execution_ms', 'mt5_quote_queue_ms', 'mt5_quote_roundtrip_ms',

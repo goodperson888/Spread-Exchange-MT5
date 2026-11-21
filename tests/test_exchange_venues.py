@@ -197,6 +197,35 @@ class VenueTests(unittest.TestCase):
         q['binance'].pop('source_sequence');before=source_token(q);q['binance']['time_ms']=300
         self.assertEqual(source_token(q),before)
 
+    def test_execution_depth_snapshot_remains_immutable_and_disconnected_cache_is_unavailable(self):
+        s=LighterBookTicker(92)
+        s.handle(dict(type='subscribed/order_book',channel='order_book:92',
+            order_book=dict(offset=1,nonce=10,bids=[dict(price='3500',size='2')],asks=[dict(price='3501',size='3')])))
+        before=s.depth_snapshot();self.assertEqual(before['bids'],((3500.,2.),))
+        s.handle(dict(type='update/order_book',channel='order_book:92',order_book=dict(offset=2,begin_nonce=10,nonce=11,
+            bids=[dict(price='3500',size='4')],asks=[])))
+        self.assertEqual(before['bids'],((3500.,2.),));self.assertEqual(s.depth_snapshot()['bids'],((3500.,4.),))
+        s.connection_state='reconnecting';self.assertIsNone(s.depth_snapshot())
+
+    def test_cached_depth_block_never_calls_rest_or_signer(self):
+        l=Lighter(dict(account_index=123));l.depth=Mock(side_effect=AssertionError('REST must not run'))
+        l.sdk=Mock(side_effect=AssertionError('signer must not run'))
+        l.depth_provider=Mock(return_value=dict(received_ms=int(time.time()*1000),bids=[(3501,1)],asks=[(3502,1)]))
+        result=l.submit(intent(requested=2,depth_guard=True,liquidity={'ready':True}),spec())
+        self.assertEqual(result['error_code'],'DEPTH_INSUFFICIENT');self.assertFalse(result['submitted'])
+        l.depth_provider.return_value['received_ms']-=4000
+        result=l.submit(intent(requested=2,depth_guard=True,liquidity={'ready':True}),spec())
+        self.assertEqual(result['error_code'],'DEPTH_CHECK_FAILED')
+        l.depth.assert_not_called();l.sdk.assert_not_called()
+
+    def test_protective_close_retains_original_rest_depth_fallback_during_ws_outage(self):
+        l=Lighter(dict(account_index=123));l.depth_provider=Mock(return_value=None)
+        l.depth=Mock(return_value=dict(bids=[(3501,1)],asks=[(3502,1)]))
+        l.sdk=Mock(side_effect=AssertionError('insufficient depth must not send'))
+        result=l.submit(intent(action='close',requested=2,limit=3505,depth_guard=True),spec())
+        self.assertEqual(result['error_code'],'DEPTH_INSUFFICIENT')
+        l.depth.assert_called_once_with('XAU');l.sdk.assert_not_called()
+
     def test_binance_public_stream_path_and_failed_socket_cleanup(self):
         stream=BinanceBookTicker('XAUUSDT',True);socket=Mock()
         socket.recv.side_effect=TimeoutError('proxy-secret-url')

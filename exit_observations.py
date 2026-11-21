@@ -4,9 +4,11 @@ import math
 import threading
 import time
 from pair_instruments import reverse_pair
+from liquidity_guard import LABELS as LIQUIDITY_LABELS, safe_evidence as liquidity_evidence
 
 
 LABELS = {
+    **LIQUIDITY_LABELS,
     'WAIT_CONFIRMATION': '止盈条件达标，等待连续新报价确认',
     'WAIT_BASKET_CONFIRMATION': '本组确认完成，等待整篮子其他成员连续报价确认',
     'WAIT_TARGET': '退出价差尚未达标',
@@ -56,7 +58,7 @@ class ExitObservations:
             self.mode = mode if mode in ('live', 'paper') else 'unknown'
 
     def observe(self, group, quote, code=None, *, valuation=None, basket=None, limits=None,
-                expected_key=None, trigger=None, confirmation=None, now=None):
+                expected_key=None, trigger=None, confirmation=None, now=None, liquidity=None):
         """Record evaluated quotes only. Missing valuation stays missing on early returns.
 
         First evidence is immutable. Repeats update latest evidence and extrema;
@@ -75,6 +77,7 @@ class ExitObservations:
         sample = {('quote_time_ms' if k == 'time_ms' else 'entry_spread' if k == 'entry' else 'exit_spread'): x
                   for k, x in sample.items()}
         sample['evaluated_ms'] = now
+        if liquidity is not None: sample['liquidity']=liquidity_evidence(liquidity)
         if isinstance(confirmation,dict):
             sample['confirmation']=numeric(confirmation,('count','required'))
             for key in ('ready','matched'):

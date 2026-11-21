@@ -5,8 +5,10 @@ import threading
 import time
 from pair_instruments import direction_quote, native_thresholds, native_pair
 from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS, reached
+from liquidity_guard import LABELS as LIQUIDITY_LABELS, safe_evidence as liquidity_evidence
 
 LABELS = {
+    **LIQUIDITY_LABELS,
     'WAIT_CONFIRMATION': '等待连续新报价确认',
     'WAIT_THRESHOLD': '对应方向的可成交价差未到阈值',
     'AMBIGUOUS_THRESHOLD': '两种买卖组合同时到价，等待报价区分',
@@ -57,7 +59,7 @@ class EntryObservations:
             self.started_ms = int(time.time()*1000)
 
     def observe(self, c, quote, code, *, direction=None, stage='engine', enabled=False,
-                threshold=None, now=None, confirmation=None, thresholds=None):
+                threshold=None, now=None, confirmation=None, thresholds=None, liquidity=None):
         if code not in LABELS or stage not in ('engine', 'pool_rank', 'preflight'): return
         now = int(time.time()*1000) if now is None else now
         q = direction_quote(quote, {'pair': c.get('pair', {}), 'direction': 'forward'}) or {}
@@ -71,6 +73,7 @@ class EntryObservations:
         rules['dynamic_reference_enabled'] = s.get('dynamic_reference_enabled') is True
         sample = {k:q[k] for k in ('time_ms', 'entry', 'exit') if finite(q.get(k))}
         sample.update(evaluated_ms=now, automatic_enabled=bool(enabled))
+        if liquidity is not None: sample['liquidity']=liquidity_evidence(liquidity)
         ages = []
         for side, leg in (('a', 'binance'), ('b', 'mt5')):
             book = q.get(leg, {})

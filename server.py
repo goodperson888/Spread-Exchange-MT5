@@ -316,6 +316,9 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             self.engine.exit_confirmations.clear()
             self.engine.quote_provider = self._execution_quote
             self.engine.close_quote_provider = self._cached_close_quote
+            self.engine.depth_provider = getattr(new_stream,'depth_snapshot',None)
+            if exchange_venues.venue(config)=='lighter':
+                new_binance.depth_provider=self.engine.depth_provider
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
             self._last_mt5_snapshot = snapshot if config['mt5']['adapter']=='native' else None
             self._last_mt5_snapshot_at = mt5_snapshot_started

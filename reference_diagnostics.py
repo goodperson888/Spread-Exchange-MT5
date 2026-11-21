@@ -12,7 +12,7 @@ class ReferenceDiagnostics:
         result=[]
         for entry in entries[-8:]:
             item={k:v for k,v in entry.items() if k in (
-                'checked_ms','start_ms','end_ms','display_offset_ms','paired_count','clock_tolerance_ms')
+                'checked_ms','start_ms','end_ms','display_offset_ms','paired_count','clock_tolerance_ms','cache_fallback_ms')
                 and isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v)}
             for k,allowed in [('state',('error','ready')),('period',('M1','M5','M15')),
                               ('stage',('initialize','clock','rates','exchange','align','complete')),
@@ -31,6 +31,7 @@ class ReferenceDiagnostics:
                     if row.get('leg') in ('binance','mt5'):clean['leg']=row['leg']
                     rows.append(clean)
                 if rows:item[key]=rows
+            if type(entry.get('history_cached')) is bool:item['history_cached']=entry['history_cached']
             result.append(item)
         self.chart=result
 

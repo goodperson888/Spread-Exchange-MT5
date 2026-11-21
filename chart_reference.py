@@ -377,14 +377,15 @@ class ReferenceHistory:
                     coverage_start=values[0]['time_ms'] if values else None,
                     coverage_end=values[-1]['time_ms']+interval if values else None,cache_warning=warning,diagnostics=diagnostics)
 
-    def _read_cache(self,key,start,end,interval):
+    def _read_cache(self,key,start,end,interval,allow_stale=False):
         try:
             path=self.directory/(key+'.json')
             if path.stat().st_size>1024*1024: return None
             data=json.loads(path.read_text(encoding='utf-8'))
-            if (data.get('schema')!=1 or data.get('start')>start or data.get('end')>end or
-                    end-data.get('end',0)>CACHE_TTL*1000 or
-                    not 0<=time.time()-data.get('written_at',0)<=CACHE_TTL): return None
+            ttl=7*86400 if allow_stale else CACHE_TTL
+            if (data.get('schema')!=1 or (not allow_stale and data.get('start')>start) or data.get('end')>end or
+                    end-data.get('end',0)>ttl*1000 or
+                    not 0<=time.time()-data.get('written_at',0)<=ttl): return None
             rows=data['rows']
             if (not isinstance(rows,list) or len(rows)>MAX_POINTS or
                     any(not positive(r.get('time_ms')) or r['time_ms']%interval or not positive(r.get('short_close')) or
@@ -430,6 +431,18 @@ class ReferenceHistory:
             except Cancelled:
                 with self.lock: self.entries[key]['state']='idle'
             except Exception as exc:
-                with self.lock: self.entries[key].update(state='error',error='历史参考补取失败：'+storage_error_message(exc),updated_at=time.monotonic(),
-                    diagnostics=getattr(exc,'diagnostics',dict(period=period,start_ms=start,end_ms=end,checked_ms=int(time.time()*1000))))
+                # Closed markets cannot prove a new timezone from frozen ticks.
+                # Reuse only this exact pair/window's previously verified bars;
+                # never derive a fresh offset, fill holes or alter execution clocks.
+                code=getattr(exc,'diagnostics',{}).get('error_code')
+                cached=(self._read_cache(key,start,end,PERIODS[period],allow_stale=True)
+                        if isinstance(exc,HistoryError) and code in ('inconsistent_clocks','ticks_not_advancing','unconfirmed_clock') else None)
+                if cached and getattr(cached,'diagnostics',{}).get('stage')=='complete':
+                    diagnostics={**cached.diagnostics,'history_cached':True,'cache_fallback_ms':int(time.time()*1000)}
+                    with self.lock:self.entries[key].update(state='ready',rows=cached,error='',updated_at=time.monotonic(),
+                        diagnostics=diagnostics,cache_checked=True,
+                        cache_warning='MT5 行情停更或本次时基未确认；仅保留此前已验证的历史缓存，末端空缺不补齐。实时交易仍需新鲜同步报价。')
+                else:
+                    with self.lock: self.entries[key].update(state='error',error='历史参考补取失败：'+storage_error_message(exc),updated_at=time.monotonic(),
+                        diagnostics=getattr(exc,'diagnostics',dict(period=period,start_ms=start,end_ms=end,checked_ms=int(time.time()*1000))))
             PROCESS_REFERENCE_DIAGNOSTICS.set_chart(self.diagnostics())

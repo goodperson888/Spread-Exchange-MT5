@@ -65,6 +65,7 @@
 <label>最大单边敞口时间（毫秒）<input id="max-unhedged" type="number" value="1500"></label>
 <label>最大滑点（USD/盎司）<input id="slippage" type="number" step="0.1" value="0.5"></label>
 <label>保护性平仓最大滑点（USD/盎司）<input id="unwind-slippage" type="number" step="0.1" value="2" min="0.01"></label>
+<div id="lighter-liquidity-settings" hidden><label class="check"><input id="liquidity-guard-on" type="checkbox" checked> Lighter 盘口与成本保护</label><div class="grid"><label>盘口最多使用（%）<input id="liquidity-usage" type="number" min="1" max="100" step="1" value="80"><span class="field-help" tabindex="0" title="固定下单量不得超过保护价内累计盘口数量的此比例。80 表示至少保留 20% 数量余量；同时检查开仓与当前买回侧。初始值供调整，不代表未来平仓流动性保证。">ⓘ</span></label><label>额外成本缓冲（USD/盎司）<input id="liquidity-buffer" type="number" min="0" max="1000" step="0.01" value="0.1"><span class="field-help" tabindex="0" title="在预计双边开平手续费之外，再按每盎司扣除此缓冲。入场按目标退出价差估算收益空间；正常止盈按合计待平数量的盘口成交均价复查净收益。预计返佣按配置计入，资金费和隔夜费未来变化无法保证。">ⓘ</span></label></div><p class="note">读取现有 WebSocket 盘口，按固定数量计算吃单均价；深度或收益空间不足时跳过，不自动缩量。保护价内挂单会变化。止损、手动平仓和已成交一腿后的继续减仓不等待本项检查。参数按组合保存，重新连接后用于新组，已有组保留原规则。</p></div>
 <label class="check"><input id="entry-spread-guard-on" type="checkbox"> 开启组合成交价差滑移保护</label>
 <label id="entry-spread-guard-field">允许组合价差恶化（USD/报价单位）<input id="entry-spread-slippage" type="number" step="0.1" value="0.5" min="0.01"><span class="field-help" tabindex="0" role="img" aria-label="组合价差滑移保护说明" title="两腿都成交后，将实际成交价差与触发价差比较。恶化超过此值时暂停新开仓，并使用保护滑点平掉已成交两腿。它和单腿最大滑点是两项独立限制。">ⓘ</span></label>
 <label>签名请求有效窗口（毫秒）<input id="recv-window" type="number" value="5000"></label>

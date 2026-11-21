@@ -474,11 +474,19 @@ class Lighter:
         except Exception as exc:return dict(status='done',qty=0,price=0,submitted=False,error=str(exc))
         if order.get('depth_guard'):
             try:
-                book=self.depth(order['symbol']);available=Binance.executable_depth(order,
+                provider=getattr(self,'depth_provider',None)
+                book=provider() if provider else self.depth(order['symbol'])
+                if provider and (not book or not 0<=int(time.time()*1000)-book['received_ms']<=order.get('max_depth_age_ms',3000)):
+                    if order.get('liquidity'):
+                        return dict(status='done',qty=0,price=0,submitted=False,error_code='DEPTH_CHECK_FAILED',error='Lighter 盘口缓存已过期，未发送订单')
+                    # Manual/protective reductions and legacy/disabled guards
+                    # retain their original REST fallback when WS is absent.
+                    book=self.depth(order['symbol'])
+                available=Binance.executable_depth(order,
                     dict(side='SELL' if plan['is_ask'] else 'BUY',price=str(plan['limit'])),book)
                 if available+1e-12<float(plan['qty']):
-                    return dict(status='done',qty=0,price=0,submitted=False,error='Lighter 保护价内盘口数量不足')
-            except Exception:return dict(status='done',qty=0,price=0,submitted=False,error='Lighter 盘口深度读取失败，未发送订单')
+                    return dict(status='done',qty=0,price=0,submitted=False,error_code='DEPTH_INSUFFICIENT',error='Lighter 保护价内盘口数量不足')
+            except Exception:return dict(status='done',qty=0,price=0,submitted=False,error_code='DEPTH_CHECK_FAILED',error='Lighter 盘口深度读取失败，未发送订单')
         try:
             session=self.sdk();remaining=plan['deadline']-time.monotonic()
             if remaining<=0:return dict(status='done',qty=0,price=0,submitted=False,error='Lighter 派发前报价或开仓时限已过期')
@@ -607,13 +615,24 @@ class LighterBookTicker(BinanceBookTicker):
         now=int(time.time()*1000);stamp=message.get('timestamp')
         if stamp is None:stamp=now
         if isinstance(stamp,bool) or not isinstance(stamp,(int,float)) or not math.isfinite(stamp):raise ValueError('盘口时间无效')
-        self.levels=levels;self.offset=offset;self.nonce=nonce
         q=dict(bid=float(b),ask=float(a),bid_qty=float(levels['bids'][b]),ask_qty=float(levels['asks'][a]),
                time_ms=int(stamp),received_ms=now,source_sequence=f'{offset}:{nonce}',time_basis='source' if message.get('timestamp') else 'receipt_only')
-        with self.lock:self.value=q;self.last_received_ms=now;self.connection_state='streaming';self.error=''
+        with self.lock:
+            self.levels=levels;self.offset=offset;self.nonce=nonce
+            self.value=q;self.last_received_ms=now;self.connection_state='streaming';self.error=''
         self.ready.set()
         if self.on_quote:self.on_quote()
         return True
+
+    def depth_snapshot(self):
+        # Published maps are immutable: handle() replaces them, never edits them.
+        with self.lock:
+            if self.connection_state!='streaming': return None
+            levels=self.levels;received=self.last_received_ms;offset=self.offset
+        # Sorting outside the lock keeps quote publication independent.
+        return dict(bids=tuple((float(p),float(n)) for p,n in sorted(levels['bids'].items(),reverse=True)[:100]),
+                    asks=tuple((float(p),float(n)) for p,n in sorted(levels['asks'].items())[:100]),
+                    received_ms=received,offset=offset)
 
     def _run(self):
         backoff=1

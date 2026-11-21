@@ -17,6 +17,7 @@
     el('public-ip-result').hidden=lighter;
     el('binance-help').hidden=lighter;
     el('lighter-help').hidden=!lighter||native;
+    el('lighter-liquidity-settings').hidden=!lighter||native;
     el('api-keys-section').style.display=live&&!lighter&&!native?'grid':'none';
   }
   function configure(c) {

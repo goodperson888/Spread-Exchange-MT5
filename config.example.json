@@ -62,7 +62,10 @@
     "entry_forward_confirmation_mode": "at_or_better",
     "entry_forward_confirmation_ticks": 1,
     "entry_reverse_confirmation_mode": "at_or_better",
-    "entry_reverse_confirmation_ticks": 1
+    "entry_reverse_confirmation_ticks": 1,
+    "liquidity_guard_enabled": true,
+    "liquidity_max_usage_percent": 80,
+    "liquidity_buffer_usd": 0.1
   },
   "risk_alerts": {
     "binance_warning_distance_percent": 5,

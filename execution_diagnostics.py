@@ -11,6 +11,7 @@ from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from execution_evidence import reason_code, REASON_LABELS, result_evidence
 from commission_reference import safe_references
 from reference_diagnostics import PROCESS_REFERENCE_DIAGNOSTICS
+from liquidity_guard import safe_evidence as liquidity_evidence
 
 
 def numbers(row, fields):
@@ -143,6 +144,11 @@ def build_report(state, events):
         if type(g.get('parameters',{}).get('entry_spread_guard_enabled')) is bool:
             row['parameters']['entry_spread_guard_enabled']=g['parameters']['entry_spread_guard_enabled']
         row['parameters'].update(numbers(g.get('parameters',{}),'entry_spread_slippage_usd'))
+        row['parameters'].update(numbers(g.get('parameters',{}),'liquidity_max_usage_percent liquidity_buffer_usd'))
+        if type(g.get('parameters',{}).get('liquidity_guard_enabled')) is bool:
+            row['parameters']['liquidity_guard_enabled']=g['parameters']['liquidity_guard_enabled']
+        for action in ('open','close'):
+            if isinstance(g.get('liquidity_'+action),dict):row['liquidity_'+action]=liquidity_evidence(g['liquidity_'+action])
         if isinstance(g.get('entry_spread_guard'),dict):
             guard=g['entry_spread_guard']
             row['entry_spread_guard']=numbers(guard,'signal entry_threshold actual slippage limit time_ms')
@@ -170,6 +176,8 @@ def build_report(state, events):
             decision=g['exit_decision']
             row['exit_decision']=numbers(decision,'signal_spread entry_spread contraction target_contraction target_spread min_net_profit estimated_net estimated_net_before_rebate estimated_gross estimated_exit_fee estimated_rebate valuation_fx basket_estimated_net')
             if type(decision.get('require_net_profit')) is bool: row['exit_decision']['require_net_profit']=decision['require_net_profit']
+            if isinstance(decision.get('basket_members'),list):
+                row['exit_decision']['basket_members']=[group_ids[x] for x in decision['basket_members'][:50] if x in group_ids]
             if decision.get('target_mode') in ('contraction','absolute'): row['exit_decision']['target_mode']=decision['target_mode']
             if isinstance(decision.get('confirmation'),dict):
                 row['exit_decision']['confirmation']=numbers(decision['confirmation'],'count required')
@@ -188,6 +196,7 @@ def build_report(state, events):
              'source':'external' if o.get('source')=='external' else 'adopted' if o.get('imported') else 'program',
              **numbers(o,'requested reference limit slippage fx top_qty created_ms dispatch_ms intent_journal_ms dispatch_queue_ms execution_to_dispatch_ms dispatch_quote_age_ms dispatch_quote_alignment_ms signal_spread signal_time_ms quote_spread actual_spread spread_slippage adverse_slippage close_attempt close_batch')}
         if o.get('dispatch_mode') in ('serial','parallel'): row['dispatch_mode']=o['dispatch_mode']
+        if isinstance(o.get('liquidity'),dict):row['liquidity']=liquidity_evidence(o['liquidity'])
         if o.get('platform')=='mt5': row['platform']='mt5'
         if isinstance(o.get('endpoint'),dict):row['endpoint']=terminal_alias(o['endpoint'])
         if o.get('quantity_unit')=='lot': row['quantity_unit']='lot'
