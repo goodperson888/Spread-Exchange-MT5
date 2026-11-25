@@ -30,20 +30,26 @@ class TickFreshness:
         self.lock = threading.Lock()
         self.ticks = {}
 
-    def observe(self, value, settings, observed_ms=None, *, discard_older=False):
+    def observe(self, value, settings, observed_ms=None, *, discard_older=False, prefer_newer=False):
         quote = observed_quote(value, observed_ms)
-        identity = tuple(str(settings.get(k, '')) for k in ('account', 'server', 'symbol'))
+        # The local simulator uses the computer clock, not the broker clock.
+        # Native polling and EA push still share one real-market watermark.
+        identity = ('paper' if settings.get('adapter') == 'paper' else 'market',) + tuple(
+            str(settings.get(k, '')) for k in ('account', 'server', 'symbol'))
         signature = (quote['source_time_ms'], quote['bid'], quote['ask'])
         with self.lock:
             previous = self.ticks.get(identity)
             if previous:
-                old_signature, first_seen = previous
+                old_signature, old_quote = previous
                 if signature[0] < old_signature[0]:
+                    # A reconnect snapshot can be overtaken by the running
+                    # quote pump. Reuse that newer tick without renewing age.
+                    if prefer_newer:return dict(old_quote)
                     if discard_older:return None
                     raise ValueError('MT5 报价时间倒退，等待新 tick')
                 if signature == old_signature:
-                    quote['observed_ms'] = min(first_seen, quote['observed_ms'])
-            self.ticks[identity] = (signature, quote['observed_ms'])
+                    quote['observed_ms'] = min(old_quote['observed_ms'], quote['observed_ms'])
+            self.ticks[identity] = (signature, dict(quote))
         return quote
 
 

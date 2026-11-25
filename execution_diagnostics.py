@@ -14,6 +14,23 @@ from reference_diagnostics import PROCESS_REFERENCE_DIAGNOSTICS
 from liquidity_guard import safe_evidence as liquidity_evidence
 
 
+_CURRENT_CONNECTION = {}
+
+
+def register_connection(sample):
+    """Publish a tiny immutable connection outcome; never retain config/errors."""
+    global _CURRENT_CONNECTION
+    clean=numbers(sample,'started_ms elapsed_ms requested_lots effective_lots effective_qty')
+    for key in ('requested_mode','effective_mode'):
+        if sample.get(key) in ('paper','live'):clean[key]=sample[key]
+    if sample.get('state') in ('connecting','connected','failed'):clean['state']=sample['state']
+    if sample.get('error_code') in ('NONE','QUOTE_TIME_REGRESSION','STORAGE_FULL','TIMEOUT','CONNECTION_ERROR'):
+        clean['error_code']=sample['error_code']
+    if type(sample.get('connected')) is bool:clean['connected']=sample['connected']
+    _CURRENT_CONNECTION=clean
+    return dict(clean)
+
+
 def numbers(row, fields):
     return {key:value for key in fields.split() if isinstance((value:=row.get(key)),(int,float))
             and not isinstance(value,bool) and math.isfinite(value)}
@@ -330,6 +347,8 @@ def export_report(path):
         db.close()
     report=build_report(state,events)
     report['market_transport']=transport_snapshot(_CURRENT_TRANSPORT)
+    report['connection']=dict(_CURRENT_CONNECTION)
+    report['notes'].append('connection为本进程最近一次交易所/MT5连接尝试的请求模式、手数及完成后的实际模式和数量；失败可保留旧连接。runtime是数据库最后提交状态，两者含义不同；不含配置原文、凭据或错误原文，不增加平台查询。')
     report['notes'].append('market_transport为导出时当前连接的内存行情通道状态、重连次数及固定错误分类；不新增平台请求，不含原始错误、代理地址或凭据，不能还原过去每次断线。')
     report['storage']=storage_snapshot(path)
     report['notes'].append('storage为导出时数据所在磁盘的可用空间及数据库/WAL/SHM大小，单位字节；按需读取，不增加下单路径的磁盘检查，不含数据目录路径。')

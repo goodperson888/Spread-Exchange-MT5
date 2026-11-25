@@ -259,6 +259,7 @@
       if(adoptionAction)text('adoption-feedback',activeId==='adoption-confirm'?'已登记接管；旧仓管理尚未启动，本次没有下单。':'操作完成，请查看下方预览或管理状态。');
     } catch(error) {
       reconcileError=activeId==='trading-reconcile';actionError='本次操作未完成：'+error.message; text('trading-result',actionError,true);
+      if(activeId==='trading-connect'&&last)render(last);
       if(adoptionAction)text('adoption-feedback',actionError,true);
       if(activeId==='exit-rule-apply'){exitPreview=null;text('exit-rule-result',actionError,true);}
     }
@@ -416,11 +417,30 @@
       ? `当前生效：${n(Number(value))}`+(pending!==''&&Number(pending)===Number(value)?'（已有交易组不变）':` · 待应用：${pending||'未填写'}`)
       : '当前生效：未连接';
   }
+  const modeLabel=mode=>mode==='live'?'实盘':'纸面';
+  function connectionConfigNotice() {
+    if(!last?.connected)return '';
+    const actual=last.capabilities?.mode||'paper',requested=el('exec-mode').value;
+    const lots=Number(el('lots').value),effective=last.plan?.lots;
+    const modeChanged=['paper','live'].includes(requested)&&requested!==actual;
+    const lotsChanged=Number.isFinite(lots)&&lots>0&&Number.isFinite(effective)&&lots!==effective;
+    if(!modeChanged&&!lotsChanged)return '';
+    return `待生效设置：${modeLabel(requested)} · 每组 MT5 ${n(lots)} 手；当前实际连接仍为${modeLabel(actual)}${Number.isFinite(effective)?` · 每组 MT5 ${n(effective)} 手`:''}。点击“保存并重新连接”，成功后才切换。`;
+  }
+  function renderRuntimePlan() {
+    const p=last?.plan;
+    if(!p){text('runtime-plan','引擎尚未连接；上方为当前输入预览。');return;}
+    const description=isNative(last)?`品种 A ${last.pair.short_symbol} ${n(p.lots)} 手 / 品种 B ${last.pair.long_symbol} ${n(p.lots)} 手；对应合约数量 ${n(p.lots*p.leg_contracts.binance)} / ${n(p.lots*p.leg_contracts.mt5)}`:`MT5 ${n(p.lots)} 手 ↔ 币安 ${n(p.qty)} XAU`;
+    const notice=connectionConfigNotice();
+    text('runtime-plan',`${last.connected?'当前实际连接':'上次连接（已断开）'}：${description}（${modeLabel(last.capabilities?.mode)}）${notice?'\n'+notice:''}`,Boolean(notice));
+  }
   function updateWorkflow() {
     const state=last?.state||{}, connected=Boolean(last?.connected), reconciled=last?.capabilities?.reconciled===true;
     const connecting=last?.connection_attempt?.state==='connecting';
     const blocked=(state.groups||[]).some(g=>['opening','unwinding','closing','attention'].includes(g.status))||(state.orders||[]).some(o=>o.result?.status!=='done');
-    const pending=connected&&(last?.config_pending===true || typeof dirtyFields!=='undefined'&&[...dirtyFields].some(id=>!id.startsWith('risk-')));
+    const connectionNotice=connectionConfigNotice();
+    const pending=connected&&(Boolean(connectionNotice)||last?.config_pending===true || typeof dirtyFields!=='undefined'&&[...dirtyFields].some(id=>!id.startsWith('risk-')));
+    if(connected)el('trading-mode').textContent=`当前${modeLabel(last.capabilities?.mode)}已连接${connectionNotice?' · 新设置待生效':''}`;
     if(!connected)el('trading-mode').textContent=(el('exec-mode').value==='live'?'实盘配置':'纸面配置')+(connecting?' · 正在连接':' · 未连接');
     const status=el('workflow-status');
     if(status)status.textContent=connecting?'正在连接：'+last.connection_attempt.stage+'；请等待检查完成。':!connected?'下一步：连接双边行情（首次使用先完成连接设置）':pending?'参数有变更：当前引擎继续使用连接时配置；暂停新开仓后重新连接生效。':!reconciled?'下一步：持仓对账，通过后可启动自动开仓。':state.recovery?'等待持仓对账，通过前不能启动自动开仓':blocked?'成交或平仓尚未完成，暂不能启动自动开仓':state.enabled?'自动开仓运行中 · 暂停只停止新开仓，已有仓位继续管理。':last?.auto_values?.mt5_margin_check?.ready===false?'已连接 · 新开仓保证金受限；已有仓位可管理，点击启动时重新核验':'准备就绪 · 可启动自动开仓';
@@ -434,10 +454,11 @@
     }
     el('trading-pause').disabled=pauseBusy||!connected||!state.enabled;
     el('trading-pause').textContent=pauseBusy?'正在暂停新开仓…':'暂停新开仓';
-    text('new-entry-status',connecting?'新开仓：等待连接完成':pauseBusy?'新开仓：正在暂停，等待服务端确认':!connected?'新开仓：未连接':state.enabled?'新开仓：运行中':state.recovery||connected&&!reconciled?'新开仓：已暂停 · 等待持仓核对，已有仓位管理暂未恢复':'新开仓：已暂停 · 已有仓位继续按规则管理');
+    text('new-entry-status',connecting?'新开仓：等待连接完成':pauseBusy?'新开仓：正在暂停，等待服务端确认':!connected?'新开仓：未连接':state.enabled?'新开仓：运行中':state.recovery||connected&&!reconciled?'新开仓：已暂停 · 等待持仓核对，已有仓位管理暂未恢复':(state.groups||[]).some(g=>g.status!=='closed')?'新开仓：已暂停 · 已有仓位继续按规则管理':'新开仓：已暂停 · 当前无本策略持仓');
     el('new-entry-status').dataset.state=pauseBusy?'pending':state.enabled?'running':'paused';
     const pendingNode=el('config-pending');
-    if(pendingNode){pendingNode.hidden=!pending;pendingNode.textContent='已保存 ≠ 已生效。手数、止盈等交易参数须重新连接；开仓阈值可单独点击「应用」，风险提醒阈值保存即生效。已有组保留原规则。';}
+    if(pendingNode){pendingNode.hidden=!pending;pendingNode.textContent=connectionNotice||'已保存 ≠ 已生效。手数、止盈等交易参数须重新连接；开仓阈值可单独点击「应用」，风险提醒阈值保存即生效。已有组保留原规则。';}
+    renderRuntimePlan();
     const groups=(state.groups||[]).filter(g=>g.status!=='closed');
     text('parameter-scope',pending?'参数已修改，尚未全部生效；重新连接后用于后续开仓，现有组保留原规则；修改已有组请到记录页单独预览确认。':connected?`现有 ${groups.length} 组保留各自开仓规则；在记录页可查看。开仓阈值须点“应用”，风险提醒保存即生效。`:'手数和普通策略参数须保存并连接后生效；已有组不会随输入改变。');
     text('live-groups',groups.length+' 组');
@@ -604,7 +625,9 @@
     }
     const pause=state.last_pause;
     const currentPause=pause&&Number(pause.time_ms)>=Math.max(Number(state.boot_ms)||0,Number(state.last_start_ms)||0);
+    const exchangeFailure=result.exchange_connection?.state==='failed';
     const rawAlarm=connection?.state==='failed'?connection.message||result.last_error
+      :exchangeFailure?result.last_error||'上次重新连接未完成'
       :(connecting||!result.connected)&&/双品种已连接/.test(state.alarm||'')?result.last_error||''
       :state.alarm||result.last_error||(currentPause?pause.reason_label:'');
     // A rollback can finish after the pause alarm was written. Keep the
@@ -639,13 +662,14 @@
       : ((!reconciled||state.recovery) ? (result.external_close_status?.message||'请先点击“持仓对账”，对账通过后才能启动自动开仓。')
       : protectionPending ? '平仓完成前不能启动自动开仓；若有成交待确认，先核对再处理已有敞口。'
       : recovered ? '本次延迟回报已确认，两边已开仓，已有仓位继续按退出规则管理；新开仓保持暂停，核对后可手动启动。'
-      : paused ? '已有仓位继续按规则管理。核对平台持仓和暂停原因后，点击“启动自动开仓”手动恢复；程序不会自动恢复开新仓。'
+      : paused ? (groups.some(g=>g.status!=='closed')?'已有仓位继续按规则管理。核对平台持仓和暂停原因后，点击“启动自动开仓”手动恢复；程序不会自动恢复开新仓。':'当前无本策略持仓。核对当前连接模式和参数后，点击“启动自动开仓”；程序不会自行启动。')
       : result.capabilities?.live_orders ? '实盘通道已连接、持仓已对账；启动时仍会检查配置和策略状态。'
       : '纸面模式不会发送真实订单。'));
     const marginNotice=result.connected&&result.auto_values?.mt5_margin_check?.ready===false
       ? '\n'+result.auto_values.mt5_margin_check.message+'。连接已建立；先完成持仓对账，原程序仓位按原规则管理，外部仓位按接管流程登记。启动新开仓时会重新检查。' : '';
     const visibleActionError=actionError&&!(alarm&&actionError.endsWith(String(alarm)))?actionError:'';
-    text('trading-result', `${visibleActionError? visibleActionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}\n${next}${marginNotice}${result.plan?isNative(result)?`\n每组：品种 A ${result.plan.lots} 手 / 品种 B ${result.plan.lots} 手。`:`\n每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司。`: ''}`,Boolean(alarm||actionError||marginNotice));
+    const retainedConnection=exchangeFailure&&result.connected?`\n上次重新连接失败；当前仍保留${modeLabel(mode)}连接${result.plan?`、每组 MT5 ${n(result.plan.lots)} 手`:''}，新设置尚未生效。` : '';
+    text('trading-result', `${visibleActionError? visibleActionError+'\n' : ''}${stateText}${alarm?'：'+alarm:''}${confirmationMessage}${message}${retainedConnection}\n${next}${marginNotice}${result.plan?isNative(result)?`\n每组：品种 A ${result.plan.lots} 手 / 品种 B ${result.plan.lots} 手。`:`\n当前连接每组：MT5 ${result.plan.lots} 手 ↔ 币安 ${result.plan.qty} 盎司（${modeLabel(mode)}）。`: ''}`,Boolean(alarm||actionError||marginNotice));
     const auto=result.auto_values||{}, details=[];
     const commissions=auto.mt5_commission_reference,commissionText=[];let readyCommissions=0,totalCommissions=0;
     if(commissions) for(const leg of ['binance','mt5']) {
@@ -689,12 +713,10 @@
     showQuote(q);
     if(result.plan&&isNative(result)) {
       const p=result.plan;
-      text('runtime-plan',`引擎当前每组：品种 A ${result.pair.short_symbol} ${n(p.lots)} 手 / 品种 B ${result.pair.long_symbol} ${n(p.lots)} 手；对应合约数量 ${n(p.lots*p.leg_contracts.binance)} / ${n(p.lots*p.leg_contracts.mt5)}`);
       if(typeof previewPlan==='function')previewPlan();
       el('plan-state').textContent='双品种相同手数已校验';
     } else if(result.plan) {
       const p=result.plan, notional=q ? p.qty*q.binance.bid : null;
-      text('runtime-plan',`引擎当前每组：MT5 ${n(p.lots)} 手 ↔ 币安 ${n(p.qty)} XAU（${result.capabilities?.mode==='live'?'实盘':'纸面'}）`);
       if(typeof previewPlan==='function') {
         const same=Number(el('lots').value)===Number(p.lots)&&!result.config_pending&&
           (!result.strategy_runtime?.mt5_symbol||el('mt5-symbol').value===result.strategy_runtime.mt5_symbol)&&
@@ -703,8 +725,6 @@
         if(same)showPlan({...p,mt5_lots:p.lots,binance_qty_xau:p.qty,gold_qty_oz:p.qty,binance_notional_usdt:notional},true);
         else previewPlan();
       }
-    } else {
-      text('runtime-plan','引擎尚未连接；上方为当前输入预览。');
     }
     updateWorkflow();
     renderPositionFreshness();

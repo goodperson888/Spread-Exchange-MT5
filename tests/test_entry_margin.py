@@ -88,6 +88,41 @@ class EntryMarginTests(unittest.TestCase):
             self.assertEqual(result['auto_values']['mt5_margin_check']['state'],'unavailable')
             self.assertFalse(self.r.engine.state['enabled'])
 
+    def test_reconnect_snapshot_overtaken_during_checks_uses_original_newer_receipt(self):
+        at=stamp();self.platform['quote']['time_ms']=at
+        def newer_tick(*args,**kwargs):
+            self.r.mt5_freshness.observe(dict(bid=4301,ask=4301.2,time_ms=at+50),self.c['mt5'],at+50)
+            return 'hedge'
+        self.exchange.preflight.side_effect=newer_tick
+        self.connect()
+        self.assertEqual(self.r.quote['mt5']['source_time_ms'],at+50)
+        self.assertEqual(self.r.quote['mt5']['observed_ms'],at+50)
+        self.assertEqual(self.r.quote['mt5']['bid'],4301)
+        self.assertFalse(self.r.engine.state['enabled']);self.assertFalse(self.r.reconciled)
+        self.assertEqual([c.args[0] for c in self.terminal.call.call_args_list],['snapshot','margin'])
+
+    def test_failed_live_reconnect_diagnostics_keep_previous_paper_quantity(self):
+        self.r.connected=True;self.r.config=copy.deepcopy(self.c);self.r.config['execution']['mode']='paper'
+        self.r.plan=dict(lots=.02,qty=2);self.c['strategy']['mt5_lots']=.01
+        self.platform['account']['currency']='EUR'
+        with self.assertRaisesRegex(ValueError,'币种不是 USD'):self.connect()
+        evidence=self.r.exchange_connection
+        self.assertEqual(evidence['state'],'failed');self.assertTrue(evidence['connected'])
+        self.assertEqual((evidence['requested_mode'],evidence['requested_lots']),('live',.01))
+        self.assertEqual((evidence['effective_mode'],evidence['effective_lots']),('paper',.02))
+        self.assertNotIn('test-secret',str(evidence))
+
+    def test_reconnecting_cannot_make_a_cached_frozen_tick_fresh(self):
+        from trading_engine import valid_quote
+        at=stamp()-10000
+        self.r.mt5_freshness.observe(dict(bid=4300,ask=4300.3,time_ms=at),self.c['mt5'],at)
+        self.platform['quote']['time_ms']=at-100
+        self.connect()
+        self.assertEqual(self.r.quote['mt5']['observed_ms'],at)
+        self.assertFalse(valid_quote(self.r.quote,self.c))
+        self.assertFalse(self.r.engine.state['enabled'])
+        self.assertFalse(self.r.reconciled)
+
     def test_margin_transport_failure_still_rejects_connection(self):
         self.margin=TimeoutError('MT5 会话已断开')
         with self.assertRaisesRegex(TimeoutError,'会话已断开'): self.connect()

@@ -36,7 +36,7 @@ from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
 from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS
-from execution_diagnostics import export_report,register_transport
+from execution_diagnostics import export_report,register_transport,register_connection
 from chart_reference import ReferenceHistory
 import position_adoption
 import exit_rules
@@ -168,6 +168,30 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
         validate_trading(config)
         if pool_pair(config): return self._pool_connect(config)
         if native_pair(config): return self._native_connect(config)
+        started=time.monotonic()
+        evidence=dict(started_ms=now_ms(),requested_mode=config['execution']['mode'],
+                      requested_lots=config['strategy']['mt5_lots'])
+        def record(state,error_code='NONE'):
+            effective=getattr(self,'config',None) or {}
+            plan=getattr(self,'plan',None) or {}
+            self.exchange_connection=register_connection(dict(evidence,state=state,error_code=error_code,
+                elapsed_ms=round((time.monotonic()-started)*1000),connected=bool(self.connected),
+                effective_mode=effective.get('execution',{}).get('mode'),
+                effective_lots=plan.get('lots'),effective_qty=plan.get('qty')))
+        record('connecting')
+        try:
+            result=self._exchange_connect(config,api_key,api_secret,mt5_mcp_token)
+        except Exception as exc:
+            error=str(exc)
+            record('failed','QUOTE_TIME_REGRESSION' if '报价时间倒退' in error else
+                'STORAGE_FULL' if 'database or disk is full' in error.lower() else
+                'TIMEOUT' if isinstance(exc,TimeoutError) or '超时' in error else 'CONNECTION_ERROR')
+            raise
+        record('connected')
+        result['exchange_connection']=dict(self.exchange_connection)
+        return result
+
+    def _exchange_connect(self, config, api_key='', api_secret='', mt5_mcp_token=''):
         mode = config['execution']['mode']
         
         # 只支持两种模式：paper（纸上交易）和live（实盘交易）
@@ -210,7 +234,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                     mt5 = inspect_paper_terminal(config['mt5'])
                     if not mt5.get('connected'):
                         raise ValueError(mt5.get('message', '本地 MT5 模拟器不可用'))
-                    snapshot = {'quote': self.mt5_freshness.observe(mt5['quote'],config['mt5']),
+                    snapshot = {'quote': self.mt5_freshness.observe(mt5['quote'],config['mt5'],prefer_newer=True),
                                 'spec': mt5['symbol'], 'allowed': True, 'positions': []}
                 elif config['mt5']['adapter'] == 'mcp':
                     if mode != 'paper':
@@ -218,14 +242,14 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                     checked_spec(config['mt5'], require_applied=True, config=config)
                     new_terminal = McpTerminal(config['mt5'], mt5_mcp_token)
                     snapshot = new_terminal.call('snapshot')
-                    snapshot['quote'] = self.mt5_freshness.observe(snapshot['quote'],config['mt5'])
+                    snapshot['quote'] = self.mt5_freshness.observe(snapshot['quote'],config['mt5'],prefer_newer=True)
                     meta['mt5_transport'] = 'MT5 MCP 真实行情（只读轮询）'
                 else:
                     checked_spec(config['mt5'], require_applied=True, config=config)
                     new_terminal = Terminal(config['mt5'], config['execution']['magic'])
                     mt5_snapshot_started = time.monotonic()
                     snapshot = new_terminal.call('snapshot')
-                    snapshot['quote'] = self.mt5_freshness.observe(snapshot['quote'],config['mt5'])
+                    snapshot['quote'] = self.mt5_freshness.observe(snapshot['quote'],config['mt5'],prefer_newer=True)
                     if not snapshot['allowed']:
                         raise ValueError('MT5 未允许程序交易；请按页面提示完成权限检查')
                     if snapshot['spec']['name'] != config['mt5']['symbol']:
@@ -262,7 +286,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 else:
                     meta['binance_transport'] = 'WebSocket 盘口' if exchange_venues.venue(config)=='lighter' else 'WebSocket bookTicker'
                 new_plan = executable_plan(config, snapshot['spec'], new_spec, market['bid'])
-                new_quote = self._quote(snapshot['quote'], market, config)
+                new_quote = self._quote(snapshot['quote'], market, config,prefer_newer=True)
                 broker = PaperBroker() if mode == 'paper' else LiveBroker(config, new_binance, new_terminal, new_spec)
                 if mode == 'live':
                     new_preflight = EntryPreflight(new_binance, new_binance, new_spec)
@@ -585,11 +609,11 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             return True
         finally: self.lock.release()
 
-    def _quote(self, mt5, binance, config=None):
+    def _quote(self, mt5, binance, config=None, *, prefer_newer=False):
         c = config or self.config
         fx = c['costs']['usdt_usd']
         observed_at = now_ms()
-        mt5 = self.mt5_freshness.observe(mt5, c['mt5'], observed_at)
+        mt5 = self.mt5_freshness.observe(mt5, c['mt5'], observed_at,prefer_newer=prefer_newer)
         binance = observed_quote(binance, observed_at)
         return {
             'key': pair_key(c), 'time_ms': now_ms(),
@@ -1280,6 +1304,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             return {
                 'connected': self.connected, 'last_error': self.last_error,
                 'connection_attempt': self._connection_status(),
+                'exchange_connection': copy.deepcopy(getattr(self,'exchange_connection',None)) if not native_pair(display_config or saved_config) else None,
                 'pair':pair_info(display_config or saved_config),
                 'quote': quote, 'plan': self.plan,
                 'pool':self._pool_status() if getattr(self,'pool',None) else None,

@@ -267,6 +267,7 @@ test('quote failure shows actual prices and time separately from raw symbol meta
 test('risk thresholds save numerically and never ask to reconnect the trading engine',async()=>{
   const live={connected:true,config_pending:false,state:{enabled:false,groups:[],orders:[]},capabilities:{mode:'live',reconciled:true}};
   const f=await fixture({'/api/trading/reconcile':()=>live,'/api/trading/status':()=>live});
+  f.run("populate({...formConfig(),execution:{...formConfig().execution,mode:'live'}})");
   f.loadTrading();await f.el('trading-reconcile').onclick();
   f.edit('risk-binance-warning','8');f.edit('risk-mt5-warning','300');
   assert.doesNotMatch(f.el('workflow-status').textContent,/重新连接/);
@@ -316,6 +317,38 @@ test('an older async plan response cannot replace a newer edit',async()=>{
   f.edit('lots','0.01');resolve({plan:{mt5_lots:.02,binance_qty_xau:2,gold_qty_oz:2,note:'old'}});
   await pending;
   assert.match(f.el('plan-result').textContent,/0\.01 手 ↔ XAUUSDT：1 XAU/);
+});
+
+test('live selection and quantity edits explicitly stay pending until reconnection succeeds',async()=>{
+  const old={connected:true,pair:{exchange:'lighter'},plan:{lots:.02,qty:2},
+    state:{enabled:false,groups:[],orders:[]},config_pending:true,capabilities:{mode:'paper',reconciled:true}};
+  const effective={...old,plan:{lots:.01,qty:1},config_pending:false,capabilities:{mode:'live',reconciled:false}};
+  const f=await fixture({'/api/trading/reconcile':()=>old,'/api/trading/connect':()=>effective});
+  f.loadTrading();await f.el('trading-reconcile').onclick();
+  f.edit('lots','0.01');f.edit('exec-mode','live');
+  assert.match(f.el('runtime-plan').textContent,/当前实际连接：MT5 0\.02 手 ↔ Lighter 2 XAU（纸面）/);
+  assert.match(f.el('runtime-plan').textContent,/待生效设置：实盘 · 每组 MT5 0\.01 手/);
+  assert.match(f.el('trading-mode').textContent,/当前纸面已连接.*待生效/);
+  assert.equal(f.el('trading-toggle').disabled,true);
+  await f.el('trading-connect').onclick();
+  assert.match(f.el('runtime-plan').textContent,/当前实际连接：MT5 0\.01 手 ↔ Lighter 1 XAU（实盘）/);
+  assert.doesNotMatch(f.el('runtime-plan').textContent,/待生效|0\.02/);
+  assert.match(f.el('trading-result').textContent,/等待持仓对账/);
+});
+
+test('failed reconnection explains retained paper engine instead of showing old paper pause as success',async()=>{
+  const old={connected:true,pair:{exchange:'lighter'},plan:{lots:.02,qty:2},last_error:'MT5 报价时间倒退，等待新 tick',
+    exchange_connection:{state:'failed',requested_mode:'live',requested_lots:.01},
+    state:{enabled:false,groups:[],orders:[],alarm:'纸面行情已连接，新开仓尚未启动'},
+    config_pending:true,capabilities:{mode:'paper',reconciled:true}};
+  const f=await fixture({'/api/trading/status':()=>old,
+    '/api/trading/connect':()=>{throw Error(old.last_error);}});
+  f.loadTrading();f.edit('lots','0.01');f.edit('exec-mode','live');
+  await f.el('trading-connect').onclick();
+  assert.match(f.el('trading-result').textContent,/重新连接失败；当前仍保留纸面连接、每组 MT5 0\.02 手/);
+  assert.doesNotMatch(f.el('trading-result').textContent,/纸面行情已连接/);
+  assert.match(f.el('new-entry-status').textContent,/当前无本策略持仓/);
+  assert.equal(f.el('trading-toggle').disabled,true);
 });
 
 test('a queued old save cannot clear the newer edit or its browser draft',async()=>{

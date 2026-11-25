@@ -4,11 +4,28 @@ import threading
 import unittest
 from pathlib import Path
 
-from execution_diagnostics import build_report, export_report
+from execution_diagnostics import build_report, export_report, register_connection
 from trading_store import Store
 
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_connection_outcome_is_allowlisted_and_separate_from_persisted_mode(self):
+        self.addCleanup(register_connection,{})
+        with tempfile.TemporaryDirectory() as directory:
+            store=Store(Path(directory)/'state.db')
+            try:
+                store.commit(dict(mode='live',groups=[],orders=[]),'boot',{})
+                register_connection(dict(state='failed',requested_mode='live',requested_lots=.01,
+                    effective_mode='paper',effective_lots=.02,effective_qty=2,connected=True,
+                    error_code='QUOTE_TIME_REGRESSION',api_secret='SECRET',message='SECRET',elapsed_ms=float('nan')))
+                report=export_report(store.path)
+                self.assertEqual(report['runtime']['mode'],'live')
+                self.assertEqual(report['connection']['effective_mode'],'paper')
+                self.assertEqual(report['connection']['requested_lots'],.01)
+                self.assertNotIn('elapsed_ms',report['connection'])
+                self.assertNotIn('SECRET',json.dumps(report))
+            finally:store.close()
+
     def test_profit_confirmation_export_keeps_only_count_evidence(self):
         state={'groups':[{'id':'private','parameters':{'exit_confirmation_ticks':5,
             'entry_forward_confirmation_ticks':3,'entry_reverse_confirmation_mode':'equal'},

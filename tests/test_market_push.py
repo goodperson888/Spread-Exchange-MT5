@@ -263,6 +263,26 @@ class PumpTests(unittest.TestCase):
         self.assertEqual(q['mt5']['observed_ms'],at)
         self.assertFalse(valid_quote(q,c,now=clock[0]))
 
+    def test_reconnect_prefers_newer_tick_without_refreshing_age_or_changing_watermark(self):
+        tracker=TickFreshness();settings={'adapter':'native','account':'1','server':'Demo','symbol':'XAUUSD'}
+        tick=dict(time_ms=2000,bid=4300,ask=4300.2)
+        tracker.observe(tick,settings,10000)
+        newer=tracker.observe(dict(tick,time_ms=1900,bid=4200),settings,20000,prefer_newer=True)
+        self.assertEqual(newer['bid'],4300);self.assertEqual(newer['source_time_ms'],2000)
+        self.assertEqual(newer['observed_ms'],10000)
+        newer['observed_ms']=99999
+        self.assertEqual(tracker.observe(tick,settings,30000)['observed_ms'],10000)
+        with self.assertRaisesRegex(ValueError,'倒退'):
+            tracker.observe(dict(tick,time_ms=1999),settings,30000)
+
+    def test_simulator_cannot_poison_real_broker_clock_for_same_account(self):
+        tracker=TickFreshness();settings={'adapter':'paper','account':'1','server':'Demo','symbol':'XAUUSD'}
+        tick=dict(time_ms=999999,bid=4300,ask=4300.2)
+        tracker.observe(tick,settings,10000)
+        real=tracker.observe(dict(tick,time_ms=1000),dict(settings,adapter='native'),20000)
+        self.assertEqual(real['source_time_ms'],1000)
+        self.assertEqual(real['observed_ms'],20000)
+
     def test_strategy_wakes_without_waiting_poll_interval(self):
         import server
         r=server.TradingRuntime.__new__(server.TradingRuntime)
