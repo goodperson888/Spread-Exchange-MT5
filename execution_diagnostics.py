@@ -4,6 +4,7 @@ import math
 import re
 import sqlite3
 import time
+import exchange_fee_reference
 from pathlib import Path
 from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
@@ -101,7 +102,7 @@ def build_report(state, events):
     if isinstance(state.get('last_pause'),dict): report['runtime']['last_pause']=pause_evidence(state['last_pause'])
     margin=state.get('entry_margin')
     if isinstance(margin,dict):
-        clean=numbers(margin,'checked_ms lots total_lots managed_lots required available')
+        clean=numbers(margin,'checked_ms lots group_lots remaining_lots total_lots managed_lots required available')
         if type(margin.get('ready')) is bool: clean['ready']=margin['ready']
         if margin.get('state') in ('ready','insufficient','unavailable','capacity_full'): clean['state']=margin['state']
         if margin.get('phase') in ('connect','start'): clean['phase']=margin['phase']
@@ -348,6 +349,8 @@ def export_report(path):
     report=build_report(state,events)
     report['market_transport']=transport_snapshot(_CURRENT_TRANSPORT)
     report['connection']=dict(_CURRENT_CONNECTION)
+    report['exchange_fee_reference']=exchange_fee_reference.snapshot()
+    report['notes'].append('exchange_fee_reference为当前连接采用的单边百分比费率及来源：verified=账户核验、manual=手填、fallback=自动读取失败后备用估算、estimate=纸面估算；error_code仅为固定分类。盘口证据中的fee_basis与费用拆分记录当次判断依据，非实际扣费。后台核验仅供后续新组，已有组费用保持锁定；不含账户、凭据、原始回执或错误原文。')
     report['notes'].append('connection为本进程最近一次交易所/MT5连接尝试的请求模式、手数及完成后的实际模式和数量；失败可保留旧连接。runtime是数据库最后提交状态，两者含义不同；不含配置原文、凭据或错误原文，不增加平台查询。')
     report['notes'].append('market_transport为导出时当前连接的内存行情通道状态、重连次数及固定错误分类；不新增平台请求，不含原始错误、代理地址或凭据，不能还原过去每次断线。')
     report['storage']=storage_snapshot(path)

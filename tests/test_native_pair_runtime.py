@@ -172,6 +172,26 @@ class NativePairRuntimeTests(unittest.TestCase):
         self.r.terminal.call.side_effect=lambda command,**args:dict(required=10 if args['native_position_side']==1 else 20,available=25)
         margin=self.r._native_margin()
         self.assertEqual(margin['required'],30);self.assertFalse(margin['ready'])
+        self.assertEqual(margin['lots'],.01)
+        self.assertTrue(all(c.kwargs['lots']==.01 for c in self.r.terminal.call.call_args_list))
+
+    def test_auto_direction_margin_checks_one_group_for_both_directions(self):
+        self.r.config['strategy'].update(direction_mode='auto',max_total_lots=.1)
+        self.r.terminal.call.side_effect=lambda command,**args:dict(
+            required=10 if args['native_position_side']==1 else 20,available=60)
+        margin=self.r._native_margin()
+        self.assertTrue(margin['ready']);self.assertEqual(margin['lots'],.01)
+        self.assertEqual(margin['required'],30)
+        self.assertEqual(self.r.terminal.call.call_count,4)
+        self.assertTrue(all(c.kwargs['lots']==.01 for c in self.r.terminal.call.call_args_list))
+
+    def test_native_margin_skips_query_when_remainder_cannot_fit_a_whole_group(self):
+        self.r.config['strategy']['max_total_lots']=.015
+        margin=self.r._native_margin()
+        self.assertEqual(margin['state'],'capacity_full')
+        self.assertEqual(margin['group_lots'],.01)
+        self.assertAlmostEqual(margin['remaining_lots'],.005)
+        self.r.terminal.call.assert_not_called()
 
     def test_quote_outage_still_queries_pending_originals(self):
         self.r.pump=Mock();self.r.pump.read.return_value=(None,0,'quote unavailable')

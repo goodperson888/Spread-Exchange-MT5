@@ -50,6 +50,20 @@ class DepthMathTests(unittest.TestCase):
         c['binance_rebate_percent']=100
         self.assertTrue(self.check(costs=c)['ready'])
 
+    def test_cost_basis_explains_profit_block_and_rejects_private_fields(self):
+        c={**self.c['costs'],'binance_taker_percent':.05}
+        r=self.check(costs=c,mt5_open_fee=4,mt5_close_fee=6)
+        self.assertEqual(r['exchange_taker_percent'],.05)
+        self.assertAlmostEqual(r['estimated_mt5_fees'],.1)
+        self.assertAlmostEqual(r['estimated_round_trip_fees'],r['estimated_exchange_fees']+.1)
+        r['fee_basis']=dict(state='fallback',exchange='lighter',taker_percent=.05,
+                            error_code='UNITS_UNVERIFIED',account='PRIVATE',raw='PRIVATE')
+        safe=safe_evidence(r)
+        self.assertEqual(safe['fee_basis']['taker_percent'],.05)
+        self.assertNotIn('PRIVATE',str(safe))
+        self.assertAlmostEqual(safe['expected_net'],safe['expected_gross']-
+                               safe['estimated_round_trip_fees']+safe['estimated_rebate']-safe['buffer_usd'])
+
     def test_absolute_target_fx_and_per_ounce_buffer_are_not_notional_profit(self):
         s={**self.c['strategy'],'target_mode':'absolute','exit_spread_usd':5,'liquidity_buffer_usd':.7}
         r=self.check(strategy=s);self.assertEqual(r['code'],'LIQUIDITY_PROFIT')
@@ -99,11 +113,14 @@ class DepthEngineTests(unittest.TestCase):
         self.assertEqual(self.e.entry_observations.snapshot()['episodes'][-1]['code'],'LIQUIDITY_UNAVAILABLE')
 
     def test_open_exports_vwap_limits_and_cost_evidence(self):
+        self.e.fee_reference_provider=lambda:dict(state='manual',exchange='lighter',taker_percent=self.c['costs']['binance_taker_percent'],secret='PRIVATE')
         g=self.open();o=self.e.state['orders'][0]
         self.assertEqual(o['limit'],4305.8);self.assertEqual(g['liquidity_open']['levels'],2)
         report=build_report(self.e.state,self.store.events())
         self.assertEqual(report['groups'][0]['liquidity_open']['code'],'LIQUIDITY_READY')
         self.assertIn('liquidity',report['orders'][0])
+        self.assertEqual(report['groups'][0]['liquidity_open']['fee_basis']['state'],'manual')
+        self.assertNotIn('PRIVATE',str(report))
 
     def blocked_profit(self):
         g=self.open();self.e.pause();self.q=quote(self.c,bid=4302,ask=4302.1)

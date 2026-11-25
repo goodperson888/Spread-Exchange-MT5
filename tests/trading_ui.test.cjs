@@ -105,14 +105,14 @@ test('risk cards show both platforms and expire even when status polling stops',
 
 test('opening margin warning keeps connection, reconciliation and close actions usable',async()=>{
   const snapshot={connected:true,capabilities:{mode:'live',live_orders:true,reconciled:false},
-    auto_values:{mt5_margin_check:{ready:false,state:'insufficient',lots:.08,required:100,available:1,
+    auto_values:{mt5_margin_check:{ready:false,state:'insufficient',lots:.01,remaining_lots:.08,required:100,available:1,
       message:'MT5 新开仓保证金不足；已有仓位仍可连接、对账和管理'}},
     state:{enabled:false,recovery:true,groups:[{id:'old',status:'open',contract:100,lots:.02,parameters:{},valuation:{}}],orders:[]}};
   const f=pageFixture(false,{'/api/trading/status':()=>snapshot});await f.refresh();
   assert.match(f.el('trading-mode').textContent,/已连接/);
   assert.match(f.el('trading-result').textContent,/连接已建立/);
   assert.match(f.el('trading-result').textContent,/先完成持仓对账/);
-  assert.match(f.el('cost-source').textContent,/剩余开仓额度.*仅限制新开仓/);
+  assert.match(f.el('cost-source').textContent,/下一组 0\.01 手保证金.*仅限制新开仓.*总手数剩余额度 0\.08 手/);
   assert.equal(Boolean(f.el('trading-reconcile').disabled),false);
   assert.equal(f.el('trading-close').disabled,false);
   assert.equal(f.el('trading-toggle').disabled,true);
@@ -1315,4 +1315,82 @@ test('group records show profit confirmation progress without issuing trade requ
   assert.match(f.el('groups').innerHTML,/止盈连续新报价：5 次/);
   assert.ok(f.calls.every(c=>c.method==='GET'));
  }
+});
+
+test('Lighter fee fallback is visible beside chart with units and provenance',async()=>{
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({connected:true,
+    pair:{type:'exchange_mt5',exchange:'lighter'},state:{groups:[],orders:[]},
+    auto_values:{exchange_fee_reference:{state:'fallback',exchange:'lighter',taker_percent:.05,
+      error_code:'UNITS_UNVERIFIED',attempted_ms:Date.now()}}})});
+  await f.el('trading-reconcile').onclick();
+  assert.match(f.el('exchange-fee-status').textContent,/Lighter.*0\.0500%.*备用估算.*60 秒/);
+  assert.match(f.el('exchange-fee-status').title,/计量|单位/);
+  assert.match(f.el('exchange-fee-status').title,/0\.05 表示 0\.05%/);
+  assert.equal(f.calls.filter(c=>c.url.includes('fee')).length,0);
+});
+
+test('chart explains the last missed touch after current spread recedes',async()=>{
+  const now=Date.now();
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({connected:true,
+    pair:{type:'exchange_mt5',exchange:'lighter'},state:{groups:[],orders:[]},
+    entry_evaluation:{current:[{code:'WAIT_THRESHOLD',direction:'forward',
+      sample:{evaluated_ms:now,executable_spread:2.1,threshold:2.5}}],recent_touches:[{
+      code:'LIQUIDITY_SPREAD',direction:'forward',sample:{evaluated_ms:now-1000,
+        executable_spread:2.641,liquidity:{executable_spread:2.478,threshold:2.5}}}]}})});
+  await f.el('trading-reconcile').onclick();
+  const text=f.el('entry-evaluation-status').textContent;
+  assert.match(text,/卖 Lighter.*最近触线未开仓/);
+  assert.match(text,/2\.641.*2\.478.*2\.5/);
+  assert.match(text,/等待不低于 2\.5/);
+});
+
+test('chart shows profit equation with rebate and buffer instead of blaming latency',async()=>{
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({connected:true,
+    pair:{type:'exchange_mt5',exchange:'lighter'},state:{groups:[],orders:[]},
+    entry_evaluation:{current:[{code:'LIQUIDITY_PROFIT',direction:'forward',sample:{evaluated_ms:Date.now(),
+      liquidity:{expected_gross:1,estimated_round_trip_fees:3.526,estimated_rebate:0,
+        buffer_usd:.1,expected_net:-2.626,required_net:0}}}]}})});
+  await f.el('trading-reconcile').onclick();
+  assert.match(f.el('entry-evaluation-status').textContent,/目标毛收益 1.*3\.526.*缓冲 0\.1.*-2\.626/);
+});
+
+test('per-group preview shows each platform round-trip fee and total separately',async()=>{
+  const fees={binance:{open:1.75,close:1.7501,round_trip:3.5001,estimated_rebate:0,spread_loss:.2,
+    taker_percent:.05,basis:{state:'fallback'}},mt5:{open:.04,close:.04,round_trip:.08,estimated_rebate:0,
+    spread_loss:.1,basis:{open:{source:'manual',rate_per_lot_side:4},close:{source:'manual',rate_per_lot_side:4}}}};
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({connected:true,
+    pair:{type:'exchange_mt5',exchange:'lighter'},state:{groups:[],orders:[]},
+    entry_economics:{lots:.01,mode:'live',quote_fresh:true,checked_ms:Date.now(),balanced:true,
+      exposures:{binance:1,mt5:1},usd_per_spread:1,rows:[{direction:'forward',fees,total_fees:3.5801,
+        target_contraction:1,target_gross:1,target_net:-2.6801,estimated_rebate:0,buffer_usd:.1,
+        break_even_contraction:3.6801,required_contraction:3.6801,immediate_round_trip_loss:3.8801}]}})});
+  await f.el('trading-reconcile').onclick();
+  assert.equal(f.el('entry-economics').hidden,false);
+  const html=f.el('entry-economics-rows').innerHTML;
+  assert.match(html,/Lighter 3\.50 USD.*备用估算/);
+  assert.match(html,/MT5 0\.08 USD.*手填/);
+  assert.match(html,/合计 3\.58 USD/);
+  assert.match(html,/价差有利变化 1 ≈ 1\.00 USD/);
+  assert.match(html,/预计净 -2\.68 USD/);
+  const details=f.el('entry-economics-details').innerHTML;
+  assert.match(details,/开仓 1\.75 USD.*平仓 1\.75 USD/);
+  assert.match(details,/即开即平预计损耗 3\.88 USD/);
+  assert.match(details,/不再重复扣算/);
+  assert.equal(f.calls.filter(c=>!c.url.includes('reconcile')&&!c.url.includes('chart')&&!c.url.includes('status')).length,0);
+});
+
+test('unequal MT5 contracts show each exposure and no invented fixed spread profit',async()=>{
+  const fee={open:.03,close:.03,round_trip:.06,spread_loss:.1,basis:{open:{source:'manual'},close:{source:'manual'}}};
+  const f=pageFixture(false,{'/api/trading/reconcile':()=>({connected:true,
+    pair:{type:'mt5_mt5',endpoints:{binance:{name:'期货 A'},mt5:{name:'现货 B'}}},state:{groups:[],orders:[]},
+    entry_economics:{lots:.01,mode:'live',quote_fresh:false,balanced:false,exposures:{binance:1,mt5:.1},
+      usd_per_spread:null,rows:[{direction:'forward',fees:{binance:fee,mt5:fee},total_fees:.12,
+        target_gross:null,target_net:null,break_even_contraction:null,buffer_usd:0,estimated_rebate:0}]}})});
+  await f.el('trading-reconcile').onclick();
+  assert.match(f.el('entry-economics-basis').textContent,/报价过期或未就绪/);
+  const html=f.el('entry-economics-rows').innerHTML;
+  assert.match(html,/两腿合约不同，不能固定换算/);
+  assert.match(html,/期货 A 1／现货 B 0\.1/);
+  assert.doesNotMatch(html,/价差有利变化 1 ≈/);
+  assert.match(html,/合约不等量，需按两腿估值/);
 });

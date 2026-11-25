@@ -89,6 +89,11 @@ class Engine:
             result=assess_liquidity(book,q,qty,strategy or g['parameters'],action,stamp(),
                 threshold=threshold,costs=g['costs'],contract=g['contract'],
                 mt5_open_fee=fee_rate(g,'mt5','open'),mt5_close_fee=fee_rate(g,'mt5','close'))
+            provider=getattr(self,'fee_reference_provider',None)
+            if action=='open' and provider:
+                reference=provider()
+                if reference.get('taker_percent')==g['costs'].get('binance_taker_percent'):
+                    result['fee_basis']=reference
             return liquidity_evidence(result)
         finally:self._latency('liquidity_check_ms',(time.monotonic()-started)*1000)
 

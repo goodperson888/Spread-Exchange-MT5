@@ -26,6 +26,21 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertNotIn('SECRET',json.dumps(report))
             finally:store.close()
 
+    def test_fee_source_export_uses_memory_only_and_fixed_allowlist(self):
+        import exchange_fee_reference
+        self.addCleanup(exchange_fee_reference.register,{})
+        exchange_fee_reference.register(dict(state='fallback',exchange='lighter',taker_percent=.05,
+            attempted_ms=1000,error_code='READ_FAILED',account='PRIVATE',raw_error='PRIVATE'))
+        with tempfile.TemporaryDirectory() as directory:
+            store=Store(Path(directory)/'state.db')
+            try:
+                store.commit(dict(groups=[],orders=[]),'boot',{})
+                report=export_report(store.path)
+                self.assertEqual(report['exchange_fee_reference']['state'],'fallback')
+                self.assertEqual(report['exchange_fee_reference']['taker_percent'],.05)
+                self.assertNotIn('PRIVATE',json.dumps(report))
+            finally:store.close()
+
     def test_profit_confirmation_export_keeps_only_count_evidence(self):
         state={'groups':[{'id':'private','parameters':{'exit_confirmation_ticks':5,
             'entry_forward_confirmation_ticks':3,'entry_reverse_confirmation_mode':'equal'},

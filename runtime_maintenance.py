@@ -7,6 +7,7 @@ from maintenance_work import MaintenanceWork
 from trading_config import pair_key
 from trading_engine import Engine
 import commission_reference
+import exchange_fee_reference
 
 
 def peers(state):
@@ -32,7 +33,11 @@ class MaintenanceMonitor:
         self.threads = []
 
     def start(self):
-        for lane in ('account', 'history', 'commission'):
+        lanes = ('account', 'history', 'commission')
+        config = self.runtime.config
+        if (config['execution']['mode']=='live' and config.get('pair',{}).get('exchange')=='lighter'
+                and config['costs']['binance_fee_auto']): lanes += ('fee',)
+        for lane in lanes:
             thread = threading.Thread(target=self._loop, args=(lane,), name='gold-pair-maintenance-'+lane, daemon=True)
             self.threads.append(thread)
             thread.start()
@@ -66,6 +71,10 @@ class MaintenanceMonitor:
             target = min(eligible, key=lambda g:g.get('import_cost_check_ms' if g.get('imported') else 'cost_check_ms', 0)) if eligible else None
             if kind=='costs' and (r.config['execution']['mode']!='live' or target is None): return None
             if kind=='fx' and not r.config['costs']['usdt_usd_auto']: return None
+            if kind=='fee' and (r.config['execution']['mode']!='live' or
+                    r.config.get('pair',{}).get('exchange')!='lighter' or
+                    not r.config['costs']['binance_fee_auto'] or
+                    r.market_meta.get('exchange_fee_reference',{}).get('state')=='verified'): return None
             if kind=='funding' and (r.config['execution']['mode']!='live' or not active): return None
             selected = [target] if kind=='costs' else active if kind in ('account', 'funding') else []
             ids = {g['id'] for g in selected}
@@ -103,6 +112,10 @@ class MaintenanceMonitor:
                             or isinstance(position.get('swap', 0), bool)
                             or not math.isfinite(float(position.get('swap', 0)))):
                         raise ValueError('invalid position carry')
+            elif kind=='fee':
+                result['fee'] = exchange_fee_reference.verified(
+                    exchange_fee_reference.initial(capture['config']),
+                    self.client.commission_rate(capture['config']['symbol']))
             elif kind=='fx':
                 fx = self.client.usdt_usd()
                 if not isinstance(fx.get('value'), (int,float)) or isinstance(fx['value'],bool) or not math.isfinite(fx['value']) or fx['value']<=0:
@@ -123,8 +136,10 @@ class MaintenanceMonitor:
                 if kind=='costs': work._verify_closed_costs()
                 else: work._update_live_carry(capture['positions'])
                 result.update(state=work.engine.state, warnings=work.market_meta)
-        except Exception:
+        except Exception as exc:
             result = {'error':True}
+            if kind=='fee': result['fee'] = exchange_fee_reference.failed(
+                exchange_fee_reference.initial(capture['config']), exc)
             terminal_kind = 'account' if kind=='account' else 'costs' if kind=='costs' else None
             if terminal_kind:
                 with self.session_lock:
@@ -145,13 +160,16 @@ class MaintenanceMonitor:
             if (self.stopped.is_set() or r.stop_event.is_set() or self is not r.maintenance
                     or not r.connected or r.config!=capture['config']): return False
             state = r.engine.state
-            if kind!='fx':
+            if kind not in ('fx','fee'):
                 if (evidence(state, capture['ids'])!=capture['evidence']
                         or {g['id'] for g in r.engine.active()}!=capture['active_ids']): return False
                 if kind in ('costs', 'funding') and peers(state)!=capture['peers']: return False
                 if kind!='account' and any(g['status']!='open' or r.engine.uncertain(g) for g in r.engine.active()): return False
             if result.get('error'):
-                if kind=='account': r._mt5_risk_error = 'MT5 账户快照读取失败，暂停新开仓；已有仓位继续管理'
+                if kind=='fee':
+                    r.market_meta['exchange_fee_reference'] = exchange_fee_reference.register(result['fee'])
+                    r.market_meta['binance_fee_warning'] = 'Lighter 自动费率待重试；当前采用备用估算，请按实际账户费率核对'
+                elif kind=='account': r._mt5_risk_error = 'MT5 账户快照读取失败，暂停新开仓；已有仓位继续管理'
                 else: r.market_meta[kind+'_warning'] = '后台'+dict(fx='汇率', funding='资金费', costs='成交费用')[kind]+'核对失败，保留原数值稍后重试'
                 r.market_wake.set()
                 return True
@@ -160,6 +178,12 @@ class MaintenanceMonitor:
                 r._last_mt5_snapshot_at = started
                 r._mt5_risk_error = '' if result['snapshot']['allowed'] else 'MT5 自动交易权限已关闭；已暂停新开仓'
                 r._update_live_carry(result['snapshot']['positions'], refresh_funding=False)
+            elif kind=='fee':
+                reference = result['fee']
+                r.config['costs']['binance_taker_percent'] = reference['taker_percent']
+                r.market_meta['exchange_fee_reference'] = exchange_fee_reference.register(reference)
+                r.market_meta['binance_fee'] = dict(taker=reference['taker_percent'], source='Lighter account limits')
+                r.market_meta.pop('binance_fee_warning', None)
             elif kind=='fx':
                 r.config['costs']['usdt_usd'] = result['fx']['value']
                 r.market_meta['fx'] = result['fx']
@@ -218,12 +242,12 @@ class MaintenanceMonitor:
                 self.stopped.wait(60)
             return
         while not self.stopped.is_set():
-            kinds = ('account',) if lane=='account' else ('fx', 'funding', 'costs')
+            kinds = ('account',) if lane=='account' else ('fee',) if lane=='fee' else ('fx', 'funding', 'costs')
             for kind in kinds:
                 if self.stopped.is_set(): break
                 if time.monotonic()<self.retry_at.get(kind, 0): continue
                 try: published = self.step(kind)
                 except Exception: published = False  # Never stop the trading worker.
-                delay = dict(account=2, fx=30, funding=60, costs=2)[kind] if published else .5
+                delay = dict(account=2, fx=30, funding=60, costs=2, fee=60)[kind] if published else (60 if kind=='fee' else .5)
                 self.retry_at[kind] = time.monotonic()+delay
             self.stopped.wait(.25)

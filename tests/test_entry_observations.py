@@ -77,6 +77,21 @@ class EntryObservationTests(unittest.TestCase):
         self.o.reset('live')
         self.assertEqual(self.o.snapshot()['episodes'], [])
 
+    def test_chart_summary_keeps_recent_touch_when_current_price_recedes(self):
+        from trading_config import pair_key
+        self.o.observe(self.c,dict(self.q,entry=.7),'LIQUIDITY_SPREAD',enabled=True,
+                       direction='forward',stage='preflight',now=1000,
+                       liquidity=dict(code='LIQUIDITY_SPREAD',executable_spread=.5,threshold=.6))
+        self.o.observe(self.c,self.q,'WAIT_THRESHOLD',direction='forward',enabled=True,now=1001)
+        report=self.o.summary(pair_key(self.c))
+        self.assertEqual(report['current'][0]['code'],'WAIT_THRESHOLD')
+        self.assertEqual(report['recent_touches'][0]['code'],'LIQUIDITY_SPREAD')
+        report['recent_touches'][0]['sample']['liquidity']['threshold']=999
+        self.assertEqual(self.o.summary(pair_key(self.c))['recent_touches'][0]['sample']['liquidity']['threshold'],.6)
+        self.assertFalse(self.o.summary('OTHER-PAIR')['current'])
+        self.o.reset('live')
+        self.assertFalse(self.o.summary(pair_key(self.c))['recent_touches'])
+
     def test_unknown_codes_and_stages_do_not_export_raw_error_text(self):
         self.o.observe(self.c, self.q, 'PRIVATE-ERROR')
         self.o.observe(self.c, self.q, 'WAIT_THRESHOLD', stage='PRIVATE-STAGE')

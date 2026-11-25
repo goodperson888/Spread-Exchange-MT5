@@ -379,9 +379,77 @@
     }).join('');
     return recordTable(`<table class="records-table"><thead><tr><th>时间</th><th>交易组</th><th>平台 / 品种</th><th>动作</th><th>申请 / 成交数量</th><th>成交价 / 金额</th><th>监控价差<br>实际成交价差<br>偏移</th><th>成交手续费</th><th>状态 / 票据</th></tr></thead><tbody>${rows}</tbody></table>`,page);
   }
+  function renderEntryEconomics() {
+    const box=el('entry-economics'),report=last?.entry_economics;
+    if(!box)return;
+    box.hidden=!report;if(!report)return;
+    const money=v=>Number.isFinite(v)?`${v.toFixed(Math.abs(v)>0&&Math.abs(v)<.01?4:2)} USD`:'待估算';
+    const sources={verified:'账户已核验',manual:'手填',fallback:'备用估算',estimate:'纸面估算',history:'历史佣金参考'};
+    const native=isNative(last),a=legLabel(last,'binance'),b=legLabel(last,'mt5');
+    const source=(leg,fee)=>native||leg==='mt5'?[...new Set(['open','close'].map(k=>sources[fee.basis?.[k]?.source]||'来源待核对'))].join('／'):sources[fee.basis?.state]||'来源待核对';
+    const direction=r=>r.direction==='reverse'?`买 ${a}／卖 ${b}`:`卖 ${a}／买 ${b}`;
+    const cell=(label,value,detail,title='')=>`<div class="economics-cell" tabindex="0" title="${escape(title||detail)}"><span>${escape(label)}</span><strong>${escape(value)}</strong><small>${escape(detail)}</small></div>`;
+    const pending=last?.config_pending||connectionConfigNotice();
+    text('entry-economics-basis',`${last?.connected?'当前实际连接':'上次连接，仅供参考'} · 每组 ${n(report.lots)} 手 · ${modeLabel(report.mode)}${!report.quote_fresh?' · 报价过期或未就绪，仅参考':''}${pending?' · 新设置待重新连接':''}`);
+    el('entry-economics-rows').innerHTML=(report.rows||[]).map(row=>{
+      const f=row.fees,convert=report.balanced?`价差有利变化 1 ≈ ${money(report.usd_per_spread)}`:'两腿合约不同，不能固定换算';
+      const quantity=native?`${a} ${n(report.exposures.binance)}／${b} ${n(report.exposures.mt5)} 合约数量`:`MT5 ${n(report.lots)} 手 ↔ ${n(report.exposures.binance)} XAU`;
+      const feeLines=`${a} ${money(f.binance.round_trip)}（${source('binance',f.binance)}）；${b} ${money(f.mt5.round_trip)}（${source('mt5',f.mt5)}）`;
+      const feeCell=`<div class="economics-cell" tabindex="0" title="${escape(feeLines+'。往返含两边各自开仓、平仓，共四次交易操作的手续费；未包含买卖点差。')}"><span>两平台往返手续费（预估）</span><small>${escape(a+' '+money(f.binance.round_trip)+' · '+source('binance',f.binance))}</small><small>${escape(b+' '+money(f.mt5.round_trip)+' · '+source('mt5',f.mt5))}</small><strong>${escape('合计 '+money(row.total_fees))}</strong></div>`;
+      const target=Number.isFinite(row.target_contraction)?`目标有利变化 ${n(row.target_contraction)}`:'目标收益';
+      const net=Number.isFinite(row.target_net)?`预计净 ${money(row.target_net)}`:'合约不等量，需按两腿估值';
+      const profit=cell(target,net,`毛收益 ${money(row.target_gross)}；预计返佣 ${money(row.estimated_rebate)}`,`目标毛收益 − 两平台往返手续费 + 预计返佣 − 执行缓冲 ${money(row.buffer_usd)}；不含未来隔夜费、资金费及超出预留的实际滑点，不是保证收益。`);
+      const even=cell('覆盖费用及缓冲需有利变化',Number.isFinite(row.break_even_contraction)?n(row.break_even_contraction)+' USD/报价单位':'合约不等量，无法统一换算',`执行缓冲 ${money(row.buffer_usd)}${Number.isFinite(row.required_contraction)&&row.min_net_profit>0?'；满足最低净收益需 '+n(row.required_contraction):''}`,'（往返手续费 − 预计返佣 + 执行缓冲）÷ 每 1 价差对应金额。买卖点差已在可成交入场与退出价差中体现，不再重复相加。');
+      return `<div class="economics-row"><p class="economics-direction">${escape(direction(row))}</p><div class="economics-grid">${cell('每组金额换算',convert,quantity,'价差有利变化带来的毛收益，尚未扣手续费等成本；按当前汇率估算，入场价差本身不等于利润。')}${feeCell}${profit}${even}</div></div>`;
+    }).join('');
+    const details=(report.rows||[]).map(row=>{
+      const fees=Object.entries(row.fees).map(([leg,f])=>{
+        const label=leg==='binance'?a:b,rate=native||leg==='mt5'?`佣金参考 开 ${n(f.basis?.open?.rate_per_lot_side)}／平 ${n(f.basis?.close?.rate_per_lot_side)} USD/手`:`吃单费率 ${n(f.taker_percent)}%/单边`;
+        return `${label}：开仓 ${money(f.open)} + 平仓 ${money(f.close)} = 往返 ${money(f.round_trip)}，${source(leg,f)}；${rate}；当前买卖点差损耗 ${money(f.spread_loss)}`;
+      }).join('。');
+      return `<p><strong>${escape(direction(row))}</strong>：${escape(fees+'。预计手续费返佣 '+money(row.estimated_rebate)+'（未到账）；当前即开即平预计损耗 '+money(row.immediate_round_trip_loss)+'，包含当前买卖点差及往返手续费、减预计返佣，尚未包含额外滑点及未来持仓费用。')}</p>`;
+    }).join('');
+    el('entry-economics-details').innerHTML=details+`<p>按当前连接配置及一档报价估算，更新于 ${escape(dateTime(report.checked_ms))}；实际入场仍须通过整笔盘口、报价时效及收益检查。买卖点差已包含在可成交价差变化中，不再重复扣算。执行缓冲是预留，非实际扣费。此处预览后续新组；已有持仓以记录页锁定规则与实际成交核验为准。</p>`;
+  }
+  function renderFeeReference() {
+    const r=last?.auto_values?.exchange_fee_reference, native=isNative(last)||last?.pair?.type==='mt5_pool';
+    const exchange=legLabel(last,'binance'), names={verified:'账户已核验',manual:'手动填写',fallback:'备用估算，未核验',estimate:'纸面估算'};
+    const errors={TIMEOUT:'读取超时',UNITS_UNVERIFIED:'平台非零费率单位尚未核验',READ_FAILED:'账户费率读取失败'};
+    let message=!last?.connected?'连接后显示当前采用的交易所费率':r?`${exchange} 单边吃单费率 ${Number(r.taker_percent).toFixed(4)}% · ${names[r.state]||'来源待核对'}`:'交易所费率来源未记录，请重新连接更新';
+    if(r?.state==='fallback')message+='；后台每 60 秒重试，请核对备用值';
+    const detail=message+(r?.error_code&&r.error_code!=='NONE'?`。${errors[r.error_code]||'读取失败'}。`:'。')+
+      (r?.checked_ms?`核验时间 ${dateTime(r.checked_ms)}。`:'')+(r?.attempted_ms?`最近尝试 ${dateTime(r.attempted_ms)}。`:'')+
+      '百分数按单边名义金额计算，0.05 表示 0.05%；这是当前新组费用依据，不代表实际扣费。后台核验成功仅供后续新组；已有组费用继续按锁定规则计算，实际成交费用另行核验。';
+    for(const id of ['exchange-fee-status','fee-reference-summary']) {
+      const node=el(id);if(!node)continue;
+      node.hidden=native;node.title=detail;
+      text(id,native?'':message,r?.state==='fallback');
+    }
+  }
+  function entryDecisionText(row) {
+    const s=row.sample||{},l=s.liquidity||{},fmt=x=>Number.isFinite(x)?n(x):'—';
+    if(row.code==='LIQUIDITY_SPREAD')return `触线 ${fmt(s.executable_spread)} → 整笔成交均价差 ${fmt(l.executable_spread)}，低于阈值 ${fmt(l.threshold)}`;
+    if(row.code==='LIQUIDITY_PROFIT')return `目标毛收益 ${fmt(l.expected_gross)} − 开平费用 ${fmt(l.estimated_round_trip_fees)} + 预计返佣 ${fmt(l.estimated_rebate)} − 缓冲 ${fmt(l.buffer_usd)} = 预计净收益 ${fmt(l.expected_net)} USD，低于要求 ${fmt(l.required_net)}`;
+    if(row.code==='LIQUIDITY_DEPTH')return `保护价内盘口不足或占用超限：申请 ${fmt(l.requested)}，开仓可用 ${fmt(l.available)}${Number.isFinite(l.exit_available)?'，反侧可用 '+fmt(l.exit_available):''}，最多占用 ${fmt(l.max_usage_percent)}%`;
+    if(row.code==='QUOTE_INVALID')return `报价无效或过期，${legLabel(last,'binance')} 年龄 ${fmt(s.a_age_ms)} ms／${legLabel(last,'mt5')} 年龄 ${fmt(s.b_age_ms)} ms`;
+    if(row.code==='WAIT_THRESHOLD')return `入场价差 ${fmt(s.executable_spread)}，等待${row.direction==='reverse'?'不高于':'不低于'} ${fmt(s.threshold)}`;
+    return row.label||row.code;
+  }
+  function renderEntryEvaluation() {
+    const node=el('entry-evaluation-status');if(!node)return;
+    const report=last?.entry_evaluation||{},current=report.current||[],touches=report.recent_touches||[];
+    const direction=row=>isNative(last)?(row.direction==='reverse'?nativeLabels(last).buy:nativeLabels(last).sell):`卖 ${legLabel(last,'binance')}／买 MT5`;
+    const line=row=>`${direction(row)} · ${date(row.sample?.evaluated_ms)}：${entryDecisionText(row)}`;
+    const lines=current.map(row=>'最近开仓检查 '+line(row));
+    for(const row of touches)if(Date.now()-row.sample?.evaluated_ms<300000&&
+      !current.some(r=>r.direction===row.direction&&r.sample?.evaluated_ms===row.sample?.evaluated_ms&&r.code===row.code))lines.push('最近触线未开仓 '+line(row));
+    text('entry-evaluation-status',last?.connected?(lines.join('；')||'等待策略评估；图上入场触线后仍需整笔均价、盘口与费用检查'):'连接后显示开仓检查及最近触线未开仓原因');
+    node.title=lines.join('\n')+'\n来自策略实际评估；时间为本机检查时间，不代表当前盘口。图上价格为一档价差，整笔成交均价差还取决于下单数量及多档深度。费用均为预估，实际扣费另行核验。';
+  }
   function showQuote(q) {
+    renderFeeReference();renderEntryEvaluation();
     const progress=last?.strategy_runtime?.entry_confirmation||{},labels=nativeLabels(q||last);
-    const details=Object.entries(progress).filter(([d])=>!isNative(last)?d==='forward':(last?.strategy_runtime?.direction_mode||'forward')!==(d==='forward'?'reverse':'forward')).map(([d,r])=>`${d==='forward'?(isNative(last)?labels.sell:'卖币安／买 MT5'):labels.buy}：${r.mode==='equal'?'等于（'+r.decimals+'位）':'达到或优于'} · 连续确认 ${r.count}/${r.required}${r.ready?'，确认通过':''}`);
+    const details=Object.entries(progress).filter(([d])=>!isNative(last)?d==='forward':(last?.strategy_runtime?.direction_mode||'forward')!==(d==='forward'?'reverse':'forward')).map(([d,r])=>`${d==='forward'?(isNative(last)?labels.sell:`卖 ${legLabel(last,'binance')}／买 MT5`):labels.buy}：${r.mode==='equal'?'等于（'+r.decimals+'位）':'达到或优于'} · 连续确认 ${r.count}/${r.required}${r.ready?'，确认通过':''}`);
     text('entry-confirmation-progress',last?.connected?details.join('；'):'连接后显示连续新报价确认进度');
     if(q) {
       const same=isNative(q)||isNative(last),labels=nativeLabels(q),a=same?labels.a:legLabel(q||last,'binance'),b=same?labels.b:'MT5';
@@ -561,6 +629,7 @@
       historyKey=incomingKey;invalidateHistory();
       chartSamples=quoteBuffer?quoteBuffer.merge([],windowStart(),incomingKey):[];
     }
+    renderEntryEconomics();
     const state=result.state||{}, q=(latestLive&&result.quote&&latestLive.key===result.quote.key&&latestLive.time_ms>result.quote.time_ms?latestLive:result.quote);
     renderPositions(result.position_report);
     const rollover=result.strategy_runtime?.rollover_status;
@@ -692,13 +761,13 @@
     }
     if(auto.binance_fee?.taker!==undefined) {
       if(loaded && el('auto-binance-fee').checked && el('exec-mode').value==='live' && !dirtyFields.has('binance-fee')) el('binance-fee').value=Number(auto.binance_fee.taker).toFixed(4);
-      details.push(`币安 taker ${Number(auto.binance_fee.taker).toFixed(4)}%`);
+      details.push(`${legLabel(result,'binance')} taker ${Number(auto.binance_fee.taker).toFixed(4)}%`);
     }
     if(auto.mt5_margin_check) {
       const m=auto.mt5_margin_check;
-      if(m.state==='capacity_full') details.push('MT5 已达总手数上限；已有仓位继续管理');
+      if(m.state==='capacity_full') details.push(m.message||'MT5 总手数剩余额度不足下一组；已有仓位继续管理');
       else if(Number.isFinite(m.required)&&Number.isFinite(m.available))
-        details.push(`MT5 剩余开仓额度 ${n(m.lots)} 手：需 ${Number(m.required).toFixed(2)} / 可用 ${Number(m.available).toFixed(2)} USD${m.ready===false?'（仅限制新开仓）':''}`);
+        details.push(`MT5 下一组 ${n(m.lots)} 手保证金：需 ${Number(m.required).toFixed(2)} / 可用 ${Number(m.available).toFixed(2)} USD${m.ready===false?'（仅限制新开仓）':''}${Number.isFinite(m.remaining_lots)?`；总手数剩余额度 ${n(m.remaining_lots)} 手`:''}`);
       else details.push(m.message||'MT5 新开仓保证金待核验；不影响连接和持仓对账');
     }
     if(auto.binance_permission_warning) details.push(`币安权限明细读取待复核：${auto.binance_permission_warning}`);

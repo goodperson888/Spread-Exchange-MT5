@@ -53,6 +53,58 @@ class MaintenanceTests(unittest.TestCase):
         self.r.maintenance = self.monitor
         self.addCleanup(self.monitor.close)
 
+    def fee_mode(self):
+        import exchange_fee_reference
+        self.addCleanup(exchange_fee_reference.register,{})
+        self.c['pair']={'type':'exchange_mt5','exchange':'lighter'}
+        self.c['costs']['binance_fee_auto']=True
+        self.r.market_meta['exchange_fee_reference']=exchange_fee_reference.initial(self.c)
+        self.client.commission_rate.return_value=dict(taker=0.)
+
+    def test_fee_retry_accepts_verified_zero_only_for_future_groups(self):
+        self.fee_mode()
+        locked=copy.deepcopy(self.g['costs'])
+        self.assertTrue(self.monitor.step('fee'))
+        self.assertEqual(self.c['costs']['binance_taker_percent'],0)
+        self.assertEqual(self.r.market_meta['exchange_fee_reference']['state'],'verified')
+        self.assertEqual(self.g['costs'],locked)
+        self.assertIsNone(self.monitor.capture('fee'))
+
+    def test_slow_fee_query_never_holds_strategy_lock_or_uses_execution_client(self):
+        self.fee_mode()
+        self.run_blocked('fee',self.client.commission_rate,self.assert_strategy_free)
+        self.assertEqual(self.c['costs']['binance_taker_percent'],0)
+
+    def test_failed_fee_query_preserves_fallback_and_sanitizes_errors(self):
+        self.fee_mode()
+        self.client.commission_rate.side_effect=TimeoutError('PRIVATE ACCOUNT TOKEN')
+        self.assertTrue(self.monitor.step('fee'))
+        reference=self.r.market_meta['exchange_fee_reference']
+        self.assertEqual(self.c['costs']['binance_taker_percent'],.05)
+        self.assertEqual(reference['state'],'fallback')
+        self.assertEqual(reference['error_code'],'TIMEOUT')
+        self.assertNotIn('PRIVATE',str(reference))
+        self.assertTrue(self.r.market_meta['binance_fee_warning'])
+
+    def test_fee_result_from_replaced_session_cannot_change_new_runtime(self):
+        self.fee_mode()
+        def replace(): self.r.maintenance=object()
+        self.run_blocked('fee',self.client.commission_rate,replace)
+        self.assertEqual(self.c['costs']['binance_taker_percent'],.05)
+
+    def test_manual_rate_does_not_trigger_fee_requests(self):
+        self.fee_mode();self.c['costs']['binance_fee_auto']=False
+        self.assertFalse(self.monitor.step('fee'))
+        self.client.commission_rate.assert_not_called()
+
+    def test_invalid_account_rate_cannot_overwrite_fallback(self):
+        self.fee_mode()
+        for rate in (float('nan'),True,-1,6,'0'):
+            self.client.commission_rate.return_value=dict(taker=rate)
+            self.assertTrue(self.monitor.step('fee'))
+            self.assertEqual(self.c['costs']['binance_taker_percent'],.05)
+            self.assertEqual(self.r.market_meta['exchange_fee_reference']['state'],'fallback')
+
     def run_blocked(self, kind, operation, continuation):
         entered, release = threading.Event(), threading.Event()
         original = operation.side_effect

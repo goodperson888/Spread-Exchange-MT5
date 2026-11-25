@@ -538,8 +538,13 @@ class NativePairRuntime:
         return q if valid_group_quote(q,pair_key(self.config),limits) else {**self.pump.refresh(publish=False),'execution_quote_source':'refresh'}
 
     def _native_margin(self):
-        c=self.config;lots=max(0,c['strategy']['max_total_lots']-sum(g['lots'] for g in self.engine.active()))
-        if lots<=1e-9: return dict(ready=True,state='capacity_full',required=0.,checked_ms=stamp(),message='总手数额度已用满，已有持仓继续管理')
+        c=self.config;lots=c['strategy']['mt5_lots']
+        total=c['strategy']['max_total_lots'];managed=sum(g['lots'] for g in self.engine.active())
+        remaining=max(0,total-managed)
+        capacity=dict(group_lots=lots,remaining_lots=remaining,total_lots=total,managed_lots=managed)
+        if remaining+1e-9<lots:
+            return dict(ready=True,state='capacity_full',lots=0.,required=0.,checked_ms=stamp(),**capacity,
+                        message=f'总手数剩余额度 {remaining:g} 手不足下一组 {lots:g} 手；不缩量开仓，已有持仓继续管理')
         mode=c['strategy'].get('direction_mode','forward')
         directions=('forward','reverse') if mode=='auto' else (mode,)
         batches=[[self.terminal.call('margin',symbol=name,lots=lots,
@@ -551,8 +556,8 @@ class NativePairRuntime:
             available=min(float(x['available']) for rows in batches for x in rows)
             if not math.isfinite(required) or required<=0 or not math.isfinite(available): raise ValueError()
             return dict(ready=required<=available,state='ready' if required<=available else 'insufficient',lots=lots,
-                        required=required,available=available,checked_ms=stamp(),
-                        message=f'按双腿剩余额度各 {lots:g} 手估算保证金 {required:.2f} USD，可用 {available:.2f} USD')
+                        required=required,available=available,checked_ms=stamp(),**capacity,
+                        message=f'按下一组双腿各 {lots:g} 手估算保证金 {required:.2f} USD，可用 {available:.2f} USD')
         except (TypeError,ValueError,KeyError):
             return dict(ready=False,state='unavailable',checked_ms=stamp(),message='双品种新开仓保证金未能核验；已有持仓仍可管理')
 

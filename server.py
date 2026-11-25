@@ -36,6 +36,8 @@ from execution_latency import PROCESS_LATENCY
 from exit_observations import PROCESS_EXIT_OBSERVATIONS
 from entry_observations import PROCESS_ENTRY_OBSERVATIONS
 from entry_confirmation import DEFAULTS as CONFIRMATION_DEFAULTS
+import exchange_fee_reference
+from entry_economics import estimate as estimate_entry_economics
 from execution_diagnostics import export_report,register_transport,register_connection
 from chart_reference import ReferenceHistory
 import position_adoption
@@ -166,8 +168,10 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
     def connect(self, config, api_key='', api_secret='', mt5_mcp_token=''):
         config = copy.deepcopy(config)
         validate_trading(config)
-        if pool_pair(config): return self._pool_connect(config)
-        if native_pair(config): return self._native_connect(config)
+        if pool_pair(config) or native_pair(config):
+            result = self._pool_connect(config) if pool_pair(config) else self._native_connect(config)
+            if native_pair(self.config or {}) or pool_pair(self.config or {}): exchange_fee_reference.register({})
+            return result
         started=time.monotonic()
         evidence=dict(started_ms=now_ms(),requested_mode=config['execution']['mode'],
                       requested_lots=config['strategy']['mt5_lots'])
@@ -188,6 +192,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 'TIMEOUT' if isinstance(exc,TimeoutError) or '超时' in error else 'CONNECTION_ERROR')
             raise
         record('connected')
+        exchange_fee_reference.register(self.market_meta.get('exchange_fee_reference', {}))
         result['exchange_connection']=dict(self.exchange_connection)
         return result
 
@@ -223,7 +228,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             new_risk_monitor = None
             new_pump = new_external = new_maintenance = None
             mt5_snapshot_started = None
-            meta = {'mt5_transport':'工作进程持久会话 + tick 轮询','exchange':exchange_venues.metadata(config)}
+            meta = {'mt5_transport':'工作进程持久会话 + tick 轮询','exchange':exchange_venues.metadata(config),
+                    'exchange_fee_reference':exchange_fee_reference.initial(config)}
             try:
                 new_spec = new_binance.spec(config['symbol'])
                 if config['costs']['usdt_usd_auto']:
@@ -268,10 +274,12 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                         if config['costs']['binance_fee_auto']:
                             try:
                                 fees = new_binance.commission_rate(config['symbol'])
-                                config['costs']['binance_taker_percent'] = fees['taker']
+                                meta['exchange_fee_reference'] = exchange_fee_reference.verified(meta['exchange_fee_reference'],fees)
+                                config['costs']['binance_taker_percent'] = meta['exchange_fee_reference']['taker_percent']
                                 meta['binance_fee'] = {**fees, 'source':fees.get('source','Binance account commission rate')}
-                            except Exception:
+                            except Exception as exc:
                                 if exchange_venues.venue(config)!='lighter': raise
+                                meta['exchange_fee_reference'] = exchange_fee_reference.failed(meta['exchange_fee_reference'],exc)
                                 meta['binance_fee_warning']='Lighter 账户费率未核验，暂用本组合备用费率；请按账户实际费率填写，成交费用继续后台核验'
                         # Opening capacity must not prevent connecting to recover,
                         # reconcile, adopt, or close positions already on-platform.
@@ -341,6 +349,7 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             self.engine.quote_provider = self._execution_quote
             self.engine.close_quote_provider = self._cached_close_quote
             self.engine.depth_provider = getattr(new_stream,'depth_snapshot',None)
+            self.engine.fee_reference_provider = lambda: self.market_meta.get('exchange_fee_reference', {})
             if exchange_venues.venue(config)=='lighter':
                 new_binance.depth_provider=self.engine.depth_provider
             self.engine.entry_preflight = self._entry_preflight_guard if mode == 'live' else None
@@ -877,24 +886,25 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
     def _mt5_entry_margin_check(self, config, terminal):
         """Read-only opening budget; never a connection or closing gate.
 
-        Match the engine's total-lots cap. Existing journaled/adopted groups
-        already occupy that capacity and must not be charged for it twice.
-        Unadopted platform positions do not grant any additional strategy room.
+        Check exactly one configured group, not the entire unused lot cap.
+        Existing groups still occupy capacity; never shrink the next group to
+        fill a fractional remainder. Platform funds include external exposure.
         """
         report={'ready':False,'state':'unavailable','checked_ms':now_ms(),
                 'message':'MT5 新开仓保证金未能核验；已有仓位仍可连接、对账和管理'}
         try:
             limit=float(config['strategy']['max_total_lots'])
+            lots=float(config['strategy']['mt5_lots'])
             amounts=[float(g['lots']) for g in self.engine.active()]
-            if (not math.isfinite(limit) or limit<=0 or
+            if (not math.isfinite(limit) or limit<=0 or not math.isfinite(lots) or lots<=0 or
                     any(not math.isfinite(n) or n<0 for n in amounts)):
                 return report
             managed=sum(amounts)
-            lots=max(0.,limit-managed)
-            report.update(lots=lots,total_lots=limit,managed_lots=managed)
-            if lots<=1e-9:
+            remaining=max(0.,limit-managed)
+            report.update(lots=lots,group_lots=lots,remaining_lots=remaining,total_lots=limit,managed_lots=managed)
+            if remaining+1e-9<lots:
                 report.update(lots=0.,required=0.,ready=True,state='capacity_full',
-                              message='已达到总手数上限；已有仓位继续管理，不增加开仓额度')
+                              message=f'总手数剩余额度 {remaining:g} 手不足下一组 {lots:g} 手；不缩量开仓，已有仓位继续管理')
                 return report
         except (ValueError,TypeError,KeyError,OverflowError):
             return report
@@ -908,8 +918,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             if not math.isfinite(required) or required<=0 or not math.isfinite(available): return report
             ready=required<=available
             report.update(required=required,available=available,ready=ready,state='ready' if ready else 'insufficient',
-                message=(f'按剩余开仓额度 {lots:g} 手核算，MT5 保证金检查通过' if ready else
-                         f'MT5 新开仓保证金不足：剩余额度 {lots:g} 手需 {required:.2f} USD，可用 {available:.2f} USD；已有仓位仍可连接、对账和管理'))
+                message=(f'按下一组 {lots:g} 手核算，MT5 保证金检查通过' if ready else
+                         f'MT5 新开仓保证金不足：下一组 {lots:g} 手需 {required:.2f} USD，可用 {available:.2f} USD；已有仓位仍可连接、对账和管理'))
         except (ValueError,TypeError,KeyError,OverflowError):
             pass
         return report
@@ -1282,6 +1292,16 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
             self.engine.save('reconciled', {'binance_qty': signed_bqty, 'position_mode':position_mode, 'mt5_lots': lots})
             return self.snapshot()
 
+    def _entry_economics(self, config, quote):
+        if not config: return None
+        plan = self.pool.contexts[self.pool.chart_key].plan if getattr(self,'pool',None) else self.plan
+        reference = getattr(self.engine,'commission_references',{}).get(pair_key(config),
+                    getattr(self.engine,'commission_reference',{}))
+        legs = reference.get('legs',{}) if reference.get('key')==pair_key(config) else {}
+        return estimate_entry_economics(config,plan,quote,legs,
+            self.market_meta.get('exchange_fee_reference',{}),
+            fresh=bool(self.connected and valid_group_quote(quote,pair_key(config),config['strategy'])))
+
     def snapshot(self):
         with self.lock:
             saved_config = load_config()
@@ -1309,6 +1329,8 @@ class TradingRuntime(PoolRuntime, NativePairRuntime, MaintenanceWork):
                 'quote': quote, 'plan': self.plan,
                 'pool':self._pool_status() if getattr(self,'pool',None) else None,
                 'state': st, 'events': self.store.events(),
+                'entry_evaluation': PROCESS_ENTRY_OBSERVATIONS.summary(pair_key(display_config)) if display_config else {},
+                'entry_economics': self._entry_economics(display_config,quote),
                 'auto_values': {**self.market_meta, **({'mt5_transport':self.pump.mt5_transport, 'binance_transport':self.pump.binance_transport,
                     'exchange_stream_status':self.market_stream.status() if hasattr(getattr(self,'market_stream',None),'status') else {}} if getattr(self,'pump',None) else {})},
                 'position_report': self.position_report,

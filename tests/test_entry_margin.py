@@ -71,7 +71,8 @@ class EntryMarginTests(unittest.TestCase):
         self.assertEqual(group['status'],'open')
         report=result['auto_values']['mt5_margin_check']
         self.assertEqual(report['state'],'insufficient')
-        self.assertAlmostEqual(report['lots'],.08)
+        self.assertAlmostEqual(report['lots'],.02)
+        self.assertAlmostEqual(report['remaining_lots'],.08)
         self.assertAlmostEqual(report['managed_lots'],.02)
         self.assertIn('已有仓位',report['message'])
         self.terminal.close.assert_not_called()
@@ -168,8 +169,43 @@ class EntryMarginTests(unittest.TestCase):
         self.platform['positions']=[dict(lots=.05,side=0)]
         result=self.connect()
         self.assertEqual(result['auto_values']['mt5_margin_check']['managed_lots'],0)
-        self.assertAlmostEqual(result['auto_values']['mt5_margin_check']['lots'],.1)
+        self.assertAlmostEqual(result['auto_values']['mt5_margin_check']['lots'],.02)
+        self.assertAlmostEqual(result['auto_values']['mt5_margin_check']['remaining_lots'],.1)
         self.assertFalse(self.r.reconciled)
+
+    def test_one_group_can_start_without_enough_margin_for_entire_total_cap(self):
+        self.c['strategy']['mt5_lots']=.01
+        def margin_for_requested_group(command,**kwargs):
+            if command=='snapshot':return copy.deepcopy(self.platform)
+            if command=='margin':return dict(required=kwargs['lots']*705,available=60.45)
+            raise AssertionError(command)
+        self.terminal.call.side_effect=margin_for_requested_group
+        result=self.connect();self.r.reconciled=True;self.r.start()
+        report=result['auto_values']['mt5_margin_check']
+        self.assertTrue(self.r.engine.state['enabled'])
+        self.assertAlmostEqual(report['required'],7.05)
+        self.assertAlmostEqual(report['remaining_lots'],.1)
+        margins=[c for c in self.terminal.call.call_args_list if c.args[0]=='margin']
+        self.assertEqual(len(margins),2)
+        self.assertTrue(all(c.kwargs['lots']==.01 for c in margins))
+        self.assertIn('下一组 0.01 手',report['message'])
+        exported=build_report(self.store.load(),[])['runtime']['entry_margin']
+        self.assertEqual(exported['group_lots'],.01)
+        self.assertEqual(exported['remaining_lots'],.1)
+        self.exchange.test_order.assert_not_called()
+
+    def test_fractional_remaining_capacity_never_shrinks_or_opens_a_group(self):
+        self.existing_group()
+        self.c['strategy'].update(mt5_lots=.01,max_total_lots=.025,max_groups=2)
+        result=self.connect();self.r.reconciled=True;self.r.start()
+        report=result['auto_values']['mt5_margin_check']
+        self.assertEqual(report['state'],'capacity_full')
+        self.assertAlmostEqual(report['remaining_lots'],.005)
+        self.assertEqual(report['group_lots'],.01)
+        self.assertFalse(any(c.args[0]=='margin' for c in self.terminal.call.call_args_list))
+        self.r.engine.tick(self.c,self.r.plan,quote(self.c))
+        self.assertEqual(len(self.r.engine.active()),1)
+        self.assertFalse(any(c.args[0]=='submit' for c in self.terminal.call.call_args_list))
 
     def test_margin_failure_does_not_gate_existing_group_close(self):
         g=self.existing_group();self.connect();self.r.reconciled=True

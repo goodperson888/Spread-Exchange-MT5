@@ -1,5 +1,6 @@
 """Bounded, memory-only evidence for actual entry evaluations; no broker/store I/O."""
 from collections import OrderedDict, deque
+import copy
 import math
 import threading
 import time
@@ -126,6 +127,28 @@ class EntryObservations:
                 if evidence.get('threshold_reached'):
                     row['reached_samples'] = row.get('reached_samples', 0)+1
                     row['last_reached'] = evidence
+
+    def summary(self, key):
+        """Scan bounded metadata; copy at most four selected samples per poll."""
+        current, touches = {}, {}
+        def select(target, row, sample):
+            direction=row['direction']
+            rank=(sample['evaluated_ms'], row['stage']=='preflight')
+            if direction not in target or rank >= target[direction][0]:
+                target[direction]=(rank,row,sample)
+        def views(selected):
+            return [dict(code=row['code'],label=row['label'],direction=row['direction'],
+                         stage=row['stage'],sample=copy.deepcopy(sample))
+                    for _,row,sample in selected.values()]
+        with self.lock:
+            for row in self.rows:
+                if row['_pair'] != key: continue
+                select(current,row,row['latest'])
+                sample=row.get('last_reached')
+                if (sample and sample.get('automatic_enabled') and sample.get('direction_enabled')
+                        and row['code'] != 'ENTRY_SUBMIT'):
+                    select(touches,row,sample)
+            return dict(current=views(current), recent_touches=views(touches))
 
     def snapshot(self, terminal_alias=None):
         with self.lock:
